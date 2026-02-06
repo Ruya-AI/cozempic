@@ -26,20 +26,20 @@ pip install -e .
 # List all sessions with sizes
 cozempic list
 
-# Diagnose a session (read-only)
-cozempic diagnose <session_id>
+# Auto-detect and diagnose the current session
+cozempic current --diagnose
 
-# Dry-run the standard prescription
-cozempic treat <session_id>
+# Dry-run the standard prescription on current session
+cozempic treat current
 
 # Apply with backup
-cozempic treat <session_id> --execute
+cozempic treat current --execute
 
-# Go aggressive
+# Go aggressive on a specific session
 cozempic treat <session_id> -rx aggressive --execute
 ```
 
-Session IDs accept full UUIDs, UUID prefixes, or file paths.
+Session IDs accept full UUIDs, UUID prefixes, file paths, or `current` for auto-detection based on your working directory.
 
 ## How It Works
 
@@ -82,12 +82,59 @@ cozempic strategy thinking-blocks <session_id> --thinking-mode truncate
 
 ```
 cozempic list [--project NAME]          List sessions with sizes
+cozempic current [-d]                   Show/diagnose current session (auto-detect)
 cozempic diagnose <session>             Analyze bloat sources (read-only)
 cozempic treat <session> [-rx PRESET]   Run prescription (dry-run default)
 cozempic treat <session> --execute      Apply changes with backup
 cozempic strategy <name> <session>      Run single strategy
 cozempic formulary                      Show all strategies & prescriptions
 ```
+
+Use `current` as the session argument in any command to auto-detect the active session for your working directory.
+
+## Claude Code Integration
+
+### Slash Command
+
+Cozempic ships with a `/cozempic` slash command for Claude Code. Install it by copying the command file to your user-level commands directory:
+
+```bash
+cp .claude/commands/cozempic.md ~/.claude/commands/cozempic.md
+```
+
+Then from any Claude Code session, type `/cozempic` to diagnose and treat the current session interactively. You can also pass a prescription directly: `/cozempic aggressive`.
+
+After treatment, exit and resume the session to load the pruned context:
+
+```bash
+claude --resume
+```
+
+### SessionStart Hook (Optional)
+
+To persist the session ID as an environment variable for use in scripts and other hooks:
+
+```bash
+cp .claude/hooks/persist-session-id.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/persist-session-id.sh
+```
+
+Add to your `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/hooks/persist-session-id.sh"
+      }]
+    }]
+  }
+}
+```
+
+This makes `$CLAUDE_SESSION_ID` available in all Bash commands during the session.
 
 ## Safety
 

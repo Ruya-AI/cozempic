@@ -57,11 +57,45 @@ def find_sessions(project_filter: str | None = None) -> list[dict]:
     return sessions
 
 
+def cwd_to_project_slug(cwd: str | None = None) -> str:
+    """Convert a working directory path to the Claude project slug format.
+
+    Claude stores projects under ~/.claude/projects/ using the path with
+    slashes replaced by dashes, e.g. /Users/foo/myproject -> -Users-foo-myproject
+    """
+    import os
+    if cwd is None:
+        cwd = os.getcwd()
+    return cwd.replace("/", "-")
+
+
+def find_current_session(cwd: str | None = None) -> dict | None:
+    """Find the most recently modified session for the current project.
+
+    Matches the CWD against Claude project directory names to find the right
+    project, then returns the most recently modified JSONL session.
+    """
+    slug = cwd_to_project_slug(cwd)
+    sessions = find_sessions()
+    matching = [s for s in sessions if slug in s["project"]]
+    if not matching:
+        return None
+    return max(matching, key=lambda s: s["mtime"])
+
+
 def resolve_session(session_arg: str, project_filter: str | None = None) -> Path:
     """Resolve a session argument to a JSONL file path.
 
-    Accepts: full path, UUID, or UUID prefix.
+    Accepts: full path, UUID, UUID prefix, or "current" for auto-detection.
     """
+    if session_arg == "current":
+        sess = find_current_session()
+        if sess:
+            return sess["path"]
+        print("Error: Could not auto-detect current session.", file=sys.stderr)
+        print("Use 'cozempic list' to find the session ID.", file=sys.stderr)
+        sys.exit(1)
+
     p = Path(session_arg)
     if p.exists() and p.suffix == ".jsonl":
         return p

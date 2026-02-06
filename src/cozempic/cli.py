@@ -9,7 +9,7 @@ from pathlib import Path
 from .diagnosis import diagnose_session
 from .executor import execute_actions, run_prescription
 from .registry import PRESCRIPTIONS, STRATEGIES
-from .session import find_sessions, load_messages, resolve_session, save_messages
+from .session import find_current_session, find_sessions, load_messages, resolve_session, save_messages
 from .types import PrescriptionResult, StrategyResult
 
 # Ensure all strategies are registered
@@ -116,6 +116,37 @@ def cmd_list(args):
     total = sum(s["size"] for s in sessions)
     print(f"  Total: {len(sessions)} sessions, {fmt_bytes(total)}")
     print()
+
+
+def cmd_current(args):
+    cwd = args.cwd or None
+    sess = find_current_session(cwd)
+    if not sess:
+        print("Could not detect current session.", file=sys.stderr)
+        print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n  Current Session:")
+    print(f"    ID:      {sess['session_id']}")
+    print(f"    Size:    {fmt_bytes(sess['size'])} ({sess['lines']} messages)")
+    print(f"    Project: {sess['project']}")
+    print(f"    Path:    {sess['path']}")
+    print(f"    Modified: {sess['mtime'].strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+
+    if args.diagnose:
+        messages = load_messages(sess["path"])
+        diag = diagnose_session(messages)
+        print_diagnosis(diag, sess["path"])
+
+        print("  Estimated Savings by Prescription:")
+        for rx_name, strategy_names in PRESCRIPTIONS.items():
+            new_msgs, _ = run_prescription(messages, strategy_names, {})
+            final_bytes = sum(b for _, _, b in new_msgs)
+            total_saved = diag["total_bytes"] - final_bytes
+            pct = fmt_pct(total_saved, diag["total_bytes"])
+            print(f"    {rx_name:<15} ~{fmt_bytes(total_saved):>10} ({pct})")
+        print()
 
 
 def cmd_diagnose(args):
@@ -254,18 +285,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
     sub = parser.add_subparsers(dest="command")
 
+    session_help = "Session ID, UUID prefix, path, or 'current' for auto-detect"
+
     # list
     p_list = sub.add_parser("list", help="List sessions with sizes")
     p_list.add_argument("--project", help="Filter by project name")
 
+    # current
+    p_current = sub.add_parser("current", help="Show current session for this project")
+    p_current.add_argument("--cwd", help="Working directory (default: current)")
+    p_current.add_argument("--diagnose", "-d", action="store_true", help="Also run diagnosis")
+
     # diagnose
     p_diag = sub.add_parser("diagnose", help="Analyze bloat sources (read-only)")
-    p_diag.add_argument("session", help="Session ID, UUID prefix, or path")
+    p_diag.add_argument("session", help=session_help)
     p_diag.add_argument("--project", help="Filter by project name")
 
     # treat
     p_treat = sub.add_parser("treat", help="Run prescription (dry-run by default)")
-    p_treat.add_argument("session", help="Session ID, UUID prefix, or path")
+    p_treat.add_argument("session", help=session_help)
     p_treat.add_argument("-rx", help="Prescription: gentle, standard, aggressive")
     p_treat.add_argument("--execute", action="store_true", help="Apply changes (default is dry-run)")
     p_treat.add_argument("--project", help="Filter by project name")
@@ -274,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     # strategy
     p_strat = sub.add_parser("strategy", help="Run single strategy")
     p_strat.add_argument("name", help="Strategy name")
-    p_strat.add_argument("session", help="Session ID, UUID prefix, or path")
+    p_strat.add_argument("session", help=session_help)
     p_strat.add_argument("--execute", action="store_true", help="Apply changes")
     p_strat.add_argument("--verbose", "-v", action="store_true", help="Show action details")
     p_strat.add_argument("--project", help="Filter by project name")
@@ -296,6 +334,7 @@ def main():
 
     commands = {
         "list": cmd_list,
+        "current": cmd_current,
         "diagnose": cmd_diagnose,
         "treat": cmd_treat,
         "strategy": cmd_strategy,
