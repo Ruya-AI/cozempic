@@ -1,112 +1,178 @@
 ---
-description: Diagnose and prune bloated Claude Code context. Run to slim down the current session before compacting or resuming.
-argument-hint: "[gentle|standard|aggressive]"
+description: Diagnose and prune bloated Claude Code context. Supports treat, reload, guard mode, and doctor.
+argument-hint: "[diagnose|treat|guard|doctor]"
 ---
 
-You are the Cozempic context weight-loss agent. Your job is to diagnose the current session's bloat and apply targeted pruning to slim it down.
+You are the Cozempic context weight-loss agent. Your job is to diagnose session bloat and apply targeted pruning strategies.
 
-Cozempic must be installed (`pip install cozempic` or `pip install -e .` from the repo). If the `cozempic` command is not found, tell the user to install it first.
+Cozempic is installed as a CLI tool. If `cozempic` is not found, install with `pip install cozempic`.
 
-## Workflow
+## On Bare Invocation (no args)
 
-Follow these steps in order. Do not skip the diagnosis or ask unnecessary questions.
+When the user runs `/cozempic` with no arguments:
 
-### Step 1: Detect the current session
+1. **First**, run a quick size check silently:
+   ```bash
+   cozempic current 2>/dev/null
+   ```
 
-Run this to find and diagnose the current session:
+2. **Then** present this summary and menu. Output something like:
 
+   > **Cozempic** — Context Weight-Loss Tool
+   >
+   > Current session: **X.XX MB** (N messages)
+   >
+   > Cozempic prunes bloated Claude Code sessions by collapsing progress ticks,
+   > deduplicating file reads, stripping metadata, and more. Prescriptions range
+   > from `gentle` (safe, ~50% savings) to `aggressive` (~90% savings).
+
+3. **Then** use `AskUserQuestion` with:
+
+**Question:** "What would you like to do?"
+**Header:** "Cozempic"
+**Options:**
+
+1. **Diagnose** — "Analyze bloat sources and recommend a prescription (read-only, no changes)"
+2. **Treat & Reload** (Recommended) — "Diagnose, prune session, and auto-open a new terminal with clean context"
+3. **Treat Only** — "Diagnose and prune session in-place (you resume manually with claude --resume)"
+4. **Guard Mode** — "Start a background sentinel that auto-prunes before compaction kills agent teams"
+
+Then follow the appropriate section below based on their choice.
+
+## On Invocation With Args
+
+If the user passes arguments (e.g., `/cozempic diagnose`, `/cozempic treat`, `/cozempic guard`), skip the menu and go directly to the relevant section.
+
+If the user passes a prescription name (e.g., `/cozempic aggressive`), go to Treat & Reload with that prescription.
+
+---
+
+## Diagnose
+
+Run diagnosis and show results:
 ```bash
 cozempic current --diagnose
 ```
+After showing results, suggest a prescription:
+- `gentle` — Safe, minimal: progress collapse + file-history dedup + metadata strip
+- `standard` — Recommended: + thinking blocks, tool trim, stale reads, system reminders
+- `aggressive` — Maximum: + error collapse, document dedup, mega-block trim, envelope strip
 
-If that fails (the project directory doesn't match any Claude project), fall back to:
+Recommend based on session size:
+- Under 5MB: `gentle`
+- 5-20MB: `standard`
+- Over 20MB: `aggressive`
 
-```bash
-cozempic list
-```
+Ask if they'd like to treat.
 
-And pick the most recently modified session that matches this project.
+## Treat & Reload
 
-### Step 2: Show the diagnosis
+1. Run diagnosis first:
+   ```bash
+   cozempic current --diagnose
+   ```
 
-Present the diagnosis output to the user. Highlight the biggest sources of bloat (progress ticks, thinking blocks, tool results, etc.) and note the estimated savings for each prescription tier.
+2. Recommend a prescription based on bloat profile, then dry-run:
+   ```bash
+   cozempic treat current -rx <prescription>
+   ```
 
-### Step 3: Recommend a prescription
+3. Show the dry-run results, then ask confirmation to apply. On confirmation:
+   ```bash
+   cozempic treat current -rx <prescription> --execute && cozempic reload
+   ```
 
-Based on the diagnosis, recommend a prescription:
+4. Tell the user: *"Treatment applied. Type `/exit` — a new Terminal window will open automatically with the pruned session."*
 
-- If the user passed an argument like `/cozempic aggressive`, use that prescription.
-- Otherwise, recommend based on session size:
-  - Under 5MB: `gentle` (safe, minimal impact)
-  - 5-20MB: `standard` (recommended, good balance)
-  - Over 20MB: `aggressive` (maximum savings)
+## Treat Only
 
-If the user provided `$ARGUMENTS`, use that as the prescription name.
+Same as Treat & Reload but without the auto-resume. Use when the user wants to stay in the current session or resume manually.
 
-### Step 4: Dry-run the prescription
+1. Run diagnosis first:
+   ```bash
+   cozempic current --diagnose
+   ```
 
-Run the treatment in dry-run mode first:
+2. Recommend a prescription based on bloat profile, then dry-run:
+   ```bash
+   cozempic treat current -rx <prescription>
+   ```
 
-```bash
-cozempic treat current -rx <prescription>
-```
+3. Show the dry-run results, then ask confirmation to apply. On confirmation:
+   ```bash
+   cozempic treat current -rx <prescription> --execute
+   ```
 
-Show the user the results: how much will be saved, how many messages removed vs modified, and what each strategy contributes.
+4. Tell the user: *"Treatment applied. To resume with the pruned session, exit and run `claude --resume`."*
 
-### Step 5: Ask before executing
+## Guard Mode (Agent Team Protection)
 
-Ask the user if they want to proceed. Show them two options:
-
-1. **Apply now** and resume the session (recommended for active work)
-2. **Run from another terminal** for maximum safety
-
-### Step 6: Execute if approved
-
-If the user approves option 1:
-
-```bash
-cozempic treat current -rx <prescription> --execute
-```
-
-Then tell the user:
-
-> Treatment applied. A timestamped backup was created automatically.
->
-> To load the pruned context, exit this session and resume with:
-> ```
-> claude --resume
-> ```
-> Claude will pick up the last session automatically. The pruned file is smaller, so you'll have more headroom before the next compaction.
-
-If the user prefers option 2, give them the command to copy:
+For sessions running agent teams, **always recommend guard mode**. Agent teams are
+lost when auto-compaction triggers because the lead's context is summarized and
+team state (TeamCreate, SendMessage, tasks) is discarded.
 
 ```bash
-cozempic treat <session_id> -rx <prescription> --execute
+cozempic guard --threshold 50 -rx standard --interval 30
 ```
 
-(Replace `<session_id>` with the actual ID from step 1.)
+Guard prevents state loss by:
+1. Monitoring session file size every 30s
+2. When threshold is crossed: extracting team state (teammates, tasks, roles)
+3. Writing a checkpoint to `.claude/team-checkpoint.md`
+4. Pruning the session with team messages protected from removal
+5. Injecting team state as a synthetic message pair
+6. Triggering reload so Claude resumes with clean context + team state baked in
 
-## Strategy Reference
+Use `--no-reload` if the user just wants background pruning without restarting:
+```bash
+cozempic guard --threshold 50 --no-reload
+```
 
-| Strategy | Tier | What It Prunes |
-|----------|------|---------------|
-| progress-collapse | gentle | Consecutive progress tick messages |
-| file-history-dedup | gentle | Duplicate file-history snapshots |
-| metadata-strip | gentle | Token usage stats, costs, stop_reason |
-| thinking-blocks | standard | Thinking content and signatures |
-| tool-output-trim | standard | Large tool results over 8KB or 100 lines |
-| stale-reads | standard | File reads superseded by later edits |
-| system-reminder-dedup | standard | Repeated system-reminder tags |
-| http-spam | aggressive | Consecutive HTTP request runs |
-| error-retry-collapse | aggressive | Repeated error/retry sequences |
-| background-poll-collapse | aggressive | Repeated polling messages |
-| document-dedup | aggressive | Duplicate large document blocks |
-| mega-block-trim | aggressive | Any content block over 32KB |
-| envelope-strip | aggressive | Constant envelope fields (cwd, version, slug) |
+Tell the user: *"Guard is watching your session. If it crosses the threshold, it will auto-prune (protecting team state) and reload."*
 
-## Safety
+## Doctor
 
-- Dry-run is always shown first before any changes
-- Timestamped backups are created automatically on execute
-- Conversation structure (uuid/parentUuid) is never touched
-- Summary and queue-operation messages are never removed
+```bash
+cozempic doctor        # Diagnose
+cozempic doctor --fix  # Auto-fix where possible
+```
+
+Checks: trust-dialog-hang (Windows resume bug), oversized sessions, stale backups, disk usage.
+
+---
+
+## Reference
+
+### Prescriptions
+
+| Rx | Strategies | Typical Savings |
+|----|-----------|----------------|
+| `gentle` | progress-collapse, file-history-dedup, metadata-strip | 40-55% |
+| `standard` | gentle + thinking-blocks, tool-output-trim, stale-reads, system-reminder-dedup | 50-70% |
+| `aggressive` | standard + error-retry-collapse, document-dedup, mega-block-trim, envelope-strip | 70-95% |
+
+### Single Strategy Mode
+
+For targeted pruning:
+```bash
+cozempic strategy <name> current -v
+cozempic strategy <name> current --execute
+```
+
+### Thinking Block Modes
+
+- `remove` (default) — Remove thinking blocks entirely
+- `truncate` — Keep first 200 chars
+- `signature-only` — Only strip signature fields
+
+```bash
+cozempic treat current --thinking-mode truncate
+```
+
+### Safety Rules
+
+- **Always dry-run first** — show user results before executing
+- **Backups are automatic** — timestamped `.bak` files created on execute
+- **Never touch uuid/parentUuid** — conversation DAG stays intact
+- **Never remove summary/queue-operation** — structurally important
+- **Team messages are protected** — guard mode never prunes TeamCreate/SendMessage/TaskCreate

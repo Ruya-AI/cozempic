@@ -173,7 +173,10 @@ def wire_hooks(project_dir: str) -> dict:
 def install_slash_command(project_dir: str) -> dict:
     """Copy the /cozempic slash command to ~/.claude/commands/.
 
-    Returns dict with: installed (bool), path, already_existed (bool).
+    Always overwrites to keep the slash command up-to-date with the
+    installed cozempic version.
+
+    Returns dict with: installed (bool), path, already_existed (bool), updated (bool).
     """
     # Find the slash command source — bundled as package data
     source = Path(__file__).parent / "data" / "cozempic_slash_command.md"
@@ -185,16 +188,20 @@ def install_slash_command(project_dir: str) -> dict:
     target_dir = Path.home() / ".claude" / "commands"
     target = target_dir / "cozempic.md"
 
-    if target.exists():
-        return {"installed": False, "path": str(target), "already_existed": True}
-
     if not source.exists():
-        return {"installed": False, "path": None, "already_existed": False}
+        return {"installed": False, "path": None, "already_existed": False, "updated": False}
+
+    already_existed = target.exists()
+
+    # Check if content differs
+    if already_existed:
+        if source.read_text() == target.read_text():
+            return {"installed": False, "path": str(target), "already_existed": True, "updated": False}
 
     target_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
 
-    return {"installed": True, "path": str(target), "already_existed": False}
+    return {"installed": True, "path": str(target), "already_existed": already_existed, "updated": already_existed}
 
 
 def run_init(project_dir: str, skip_slash: bool = False) -> dict:

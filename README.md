@@ -386,19 +386,18 @@ The `--fix` flag auto-applies fixes where safe (e.g., resetting the trust dialog
 
 ### Slash Command
 
-Cozempic ships with a `/cozempic` slash command for Claude Code. Install it by copying the command file to your user-level commands directory:
+Cozempic ships with a `/cozempic` slash command that's automatically installed to `~/.claude/commands/` when you run `cozempic init`. It works in any Claude Code project.
 
-```bash
-cp .claude/commands/cozempic.md ~/.claude/commands/cozempic.md
-```
+Type `/cozempic` in any session to get an interactive menu:
 
-Then from any Claude Code session, type `/cozempic` to diagnose and treat the current session interactively. You can also pass a prescription directly: `/cozempic aggressive`.
+1. **Diagnose** — Analyze bloat sources and recommend a prescription (read-only, no changes)
+2. **Treat & Reload** (Recommended) — Diagnose, prune session, and auto-open a new terminal with clean context
+3. **Treat Only** — Diagnose and prune session in-place (you resume manually with `claude --resume`)
+4. **Guard Mode** — Start a background sentinel that auto-prunes before compaction kills agent teams
 
-After treatment, exit and resume the session to load the pruned context:
+You can also skip the menu with arguments: `/cozempic diagnose`, `/cozempic treat`, `/cozempic guard`, or `/cozempic doctor`.
 
-```bash
-claude --resume
-```
+The slash command is kept up-to-date — running `cozempic init` again after upgrading will update it if a newer version is available.
 
 ### SessionStart Hook (Optional)
 

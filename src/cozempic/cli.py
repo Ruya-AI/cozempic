@@ -518,11 +518,14 @@ def cmd_init(args):
 
     # Report slash command
     slash = result["slash_command"]
-    if slash["installed"]:
+    if slash.get("updated"):
+        print(f"  Slash command: updated → {slash['path']}")
+        print(f"  Use /cozempic in any Claude Code session to diagnose and treat.")
+    elif slash["installed"]:
         print(f"  Slash command: installed → {slash['path']}")
         print(f"  Use /cozempic in any Claude Code session to diagnose and treat.")
     elif slash["already_existed"]:
-        print(f"  Slash command: already installed at {slash['path']}")
+        print(f"  Slash command: up-to-date at {slash['path']}")
     elif not args.no_slash_command:
         print(f"  Slash command: source not found (install from git repo to get it)")
 
