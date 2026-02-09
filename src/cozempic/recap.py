@@ -104,42 +104,65 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
         else:
             merged.append((role, text))
 
-    # Bookend: show first few + gap + last batch
-    head_count = 5
-    tail_count = max_turns - head_count - 1  # -1 for the gap line
+    # Pair up: each user turn + its assistant response = one line
+    paired: list[tuple[str, str]] = []  # (user_text, assistant_text)
+    i = 0
+    while i < len(merged):
+        role, text = merged[i]
+        if role == "you":
+            # Look ahead for assistant response
+            response = ""
+            if i + 1 < len(merged) and merged[i + 1][0] == "claude":
+                response = merged[i + 1][1]
+                i += 2
+            else:
+                i += 1
+            paired.append((text, response))
+        else:
+            # Orphan assistant message (e.g. session start)
+            paired.append(("", text))
+            i += 1
+
+    # Bookend: first few + gap + last batch
+    head_count = 4
+    tail_count = max_turns - head_count - 1
 
     # Format
     lines = []
     lines.append("")
-    lines.append("  ╔══════════════════════════════════════════════════════════════╗")
-    lines.append("  ║              PREVIOUSLY ON THIS SESSION                     ║")
-    lines.append("  ╚══════════════════════════════════════════════════════════════╝")
+    lines.append("  ╔══════════════════════════════════════════════════════════════════════╗")
+    lines.append("  ║                    PREVIOUSLY ON THIS SESSION                       ║")
+    lines.append("  ╚══════════════════════════════════════════════════════════════════════╝")
     lines.append("")
 
-    def _fmt(role: str, text: str) -> str:
-        if role == "you":
-            if len(text) > 90:
-                text = text[:87] + "..."
-            return f"  > {text}"
+    def _fmt_pair(num: int, user: str, assistant: str) -> str:
+        if user:
+            if len(user) > 70:
+                user = user[:67] + "..."
+            if assistant:
+                if len(assistant) > 50:
+                    assistant = assistant[:47] + "..."
+                return f"  {num:>3}.  {user}\n        {assistant}"
+            return f"  {num:>3}.  {user}"
         else:
-            return f"    -> {text}"
+            if len(assistant) > 70:
+                assistant = assistant[:67] + "..."
+            return f"  {num:>3}.  {assistant}"
 
-    if len(merged) <= max_turns:
-        # Everything fits
-        for role, text in merged:
-            lines.append(_fmt(role, text))
+    if len(paired) <= max_turns:
+        for idx, (u, a) in enumerate(paired, 1):
+            lines.append(_fmt_pair(idx, u, a))
     else:
-        # Head
-        for role, text in merged[:head_count]:
-            lines.append(_fmt(role, text))
-        skipped = len(merged) - head_count - tail_count
-        lines.append(f"  ... ({skipped} turns skipped) ...")
-        # Tail
-        for role, text in merged[-tail_count:]:
-            lines.append(_fmt(role, text))
+        for idx, (u, a) in enumerate(paired[:head_count], 1):
+            lines.append(_fmt_pair(idx, u, a))
+        skipped = len(paired) - head_count - tail_count
+        lines.append(f"\n        ... {skipped} exchanges skipped ...\n")
+        start_num = len(paired) - tail_count + 1
+        for idx, (u, a) in enumerate(paired[-tail_count:], start_num):
+            lines.append(_fmt_pair(idx, u, a))
 
     lines.append("")
-    lines.append("  ── context pruned by cozempic ── resuming ──")
+    lines.append("  ── context cleaned by cozempic ── full history preserved ──")
     lines.append("")
 
     return "\n".join(lines)
