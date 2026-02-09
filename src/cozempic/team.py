@@ -212,15 +212,21 @@ _AGENT_PROGRESS_RE = re.compile(
 def _is_team_message(msg_dict: dict) -> bool:
     """Check if a message is related to agent team coordination.
 
-    Detects:
-    - Task tool calls (subagent spawns)
-    - task-notification messages (agent completion results)
-    - TaskCreate/Update/List/Get (todo list)
-    - TaskOutput/TaskStop (background agent management)
-    - TeamCreate/SendMessage (explicit teams)
-    - Tool results from any of the above
+    Handles these JSONL message types:
+    - type='assistant': Tool use calls (Task, TaskCreate, etc.)
+    - type='user': Nested content with task-notification XML
+    - type='queue-operation': Root-level content with task-notification XML
+    - Tool results from any team-related tool calls
     - Text mentioning team coordination keywords
     """
+    # Handle queue-operation messages (background task results).
+    # These have content at the ROOT level, not under 'message'.
+    if msg_dict.get("type") == "queue-operation":
+        root_content = msg_dict.get("content", "")
+        if isinstance(root_content, str) and "<task-notification>" in root_content:
+            return True
+        return False
+
     inner = msg_dict.get("message", {})
     content = inner.get("content", [])
 
@@ -449,14 +455,19 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                         seen_subagents[real_id] = agent
 
     # ── Second pass: scan for task-notification messages ────────────
-    # These are user messages containing XML with actual agent results,
-    # delivered after background agents complete. They carry the real
-    # result text (not just "Async agent launched").
+    # These appear in two places:
+    #   1. User messages: msg['message']['content'] as string with XML
+    #   2. Queue-operation messages: msg['content'] at root level with XML
+    # Both carry the real result text (not just "Async agent launched").
     for line_idx, msg, byte_size in messages:
-        inner = msg.get("message", {})
-        content = inner.get("content", "")
+        # Extract content string from either schema
+        if msg.get("type") == "queue-operation":
+            content = msg.get("content", "")
+        else:
+            inner = msg.get("message", {})
+            content = inner.get("content", "")
 
-        # task-notifications are string content in user messages
+        # task-notifications are string content
         if not isinstance(content, str) or "<task-notification>" not in content:
             continue
 
