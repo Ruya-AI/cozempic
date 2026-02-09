@@ -1,8 +1,12 @@
 # Cozempic
 
-Context weight-loss tool for [Claude Code](https://claude.ai/code). Prune bloated JSONL conversation files using composable strategies.
+Context weight-loss tool for [Claude Code](https://claude.ai/code). Prune bloated JSONL sessions and **prevent Agent Teams from being lost when auto-compaction fires**.
 
-Claude Code sessions grow large — 8-46MB from progress ticks, repeated thinking blocks, stale file reads, duplicate document injections, and metadata bloat. Cozempic diagnoses the bloat and applies targeted pruning strategies to slim them down.
+Claude Code sessions grow large — 8-46MB from progress ticks, repeated thinking blocks, stale file reads, duplicate document injections, and metadata bloat. When sessions get too big, Claude's auto-compaction kicks in and summarizes away critical context. For users running **Agent Teams**, this is catastrophic: the lead agent's context is compacted, team state (teammates, tasks, coordination messages) is discarded, and the entire team is orphaned with no way to recover.
+
+Cozempic solves both problems:
+- **Session pruning** — composable strategies that remove dead weight before compaction ever triggers
+- **Guard mode** — a background daemon that monitors session size and automatically prunes with team-state preservation, so Agent Teams survive across context resets
 
 **Zero external dependencies.** Python 3.10+ stdlib only.
 
@@ -37,6 +41,9 @@ cozempic treat current --execute
 
 # Go aggressive on a specific session
 cozempic treat <session_id> -rx aggressive --execute
+
+# Protect Agent Teams from context loss (run in a separate terminal)
+cozempic guard --threshold 50 -rx standard
 ```
 
 Session IDs accept full UUIDs, UUID prefixes, file paths, or `current` for auto-detection based on your working directory.
@@ -88,38 +95,40 @@ cozempic treat <session> [-rx PRESET]   Run prescription (dry-run default)
 cozempic treat <session> --execute      Apply changes with backup
 cozempic strategy <name> <session>      Run single strategy
 cozempic reload [-rx PRESET]            Treat + auto-resume in new terminal
-cozempic guard [--threshold MB]         Background sentinel — prevents compaction state loss
+cozempic guard [--threshold MB]         Prevent Agent Teams context loss from auto-compaction
 cozempic doctor [--fix]                 Check for known Claude Code issues
 cozempic formulary                      Show all strategies & prescriptions
 ```
 
 Use `current` as the session argument in any command to auto-detect the active session for your working directory.
 
-## Guard (Agent Team Protection)
+## Guard — Agent Teams Context Loss Prevention
 
-Agent Teams are lost when auto-compaction triggers — the lead's context is summarized and team state (teammates, tasks, coordination) is discarded. Guard prevents this.
+> **The problem:** Agent Teams are lost after auto-compaction. When a session grows too large, Claude's auto-compaction summarizes the lead agent's context — discarding TeamCreate, SendMessage, TaskCreate/Update messages. The lead forgets its teammates exist. Subagents become orphaned. There is no built-in recovery. ([#23620](https://github.com/anthropics/claude-code/issues/23620), [#23821](https://github.com/anthropics/claude-code/issues/23821), [#24052](https://github.com/anthropics/claude-code/issues/24052), [#21925](https://github.com/anthropics/claude-code/issues/21925))
+
+Guard is a background daemon that **prevents auto-compaction from ever triggering** by keeping sessions lean, while preserving every team coordination message.
 
 ```bash
-# Start guard daemon (watches session, auto-prunes before compaction)
+# Protect Agent Teams — run this in a separate terminal
 cozempic guard --threshold 50 -rx standard
 
-# Without auto-reload (just prune the file)
+# Without auto-reload (just prune the file, no restart)
 cozempic guard --threshold 50 --no-reload
 
-# Custom interval
+# Lower threshold, faster checks
 cozempic guard --threshold 30 --interval 15
 ```
 
 **How it works:**
 
 1. Monitors the active session JSONL file size every 30 seconds
-2. When threshold is crossed, extracts team state (teammates, tasks, roles, messages)
-3. Writes a checkpoint to `.claude/team-checkpoint.md` (survives any crash)
+2. When the threshold is crossed, **extracts full team state** — teammates, tasks, roles, coordination messages
+3. Writes a crash-safe checkpoint to `.claude/team-checkpoint.md`
 4. Prunes the session with **team-protect** — TeamCreate, SendMessage, TaskCreate/Update messages are never removed
-5. Injects team state as a synthetic message pair directly into the JSONL — when Claude resumes, it *sees* the team state as conversation history (forced, not suggested)
-6. Triggers auto-reload (kill + resume in new terminal) so Claude picks up the pruned file
+5. **Injects team state as a synthetic message pair** directly into the JSONL — when Claude resumes, it *sees* the team as conversation history (force-read, not a suggestion)
+6. Triggers auto-reload (kill + resume in new terminal) so Claude picks up the pruned context
 
-**The result:** Claude resumes with clean context, full team awareness, and all coordination state intact. Compaction never triggers because the session stays under the threshold.
+**The result:** Auto-compaction never fires because the session stays under threshold. Agent Teams survive with full coordination state intact — teammates, tasks, roles, and messages are all preserved across context resets. No more orphaned subagents.
 
 ## Doctor
 
@@ -191,6 +200,7 @@ This makes `$CLAUDE_SESSION_ID` available in all Bash commands during the sessio
 - **Timestamped backups** — automatic `.bak` files before any modification
 - **Never touches uuid/parentUuid** — conversation DAG stays intact
 - **Never removes summary/queue-operation messages** — structurally important
+- **Team messages are protected** — guard mode never prunes TeamCreate, SendMessage, TaskCreate/Update
 - **Strategies compose sequentially** — each runs on the output of the previous, so savings are accurate and don't overlap
 
 ## Example Output

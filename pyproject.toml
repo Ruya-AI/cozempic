@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cozempic"
 version = "0.3.0"
-description = "Context weight-loss tool for Claude Code — prune bloated JSONL conversation files"
+description = "Context weight-loss tool for Claude Code — prune bloated sessions and prevent Agent Teams context loss"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ authors = [
     { name = "Ruya AI" },
     { name = "Junaid Qureshi" },
 ]
-keywords = ["claude", "claude-code", "context", "pruning", "jsonl", "optimization"]
+keywords = ["claude", "claude-code", "context", "pruning", "jsonl", "optimization", "agent-teams", "compaction"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
