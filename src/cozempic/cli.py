@@ -12,6 +12,7 @@ from pathlib import Path
 from .diagnosis import diagnose_session
 from .doctor import run_doctor
 from .executor import execute_actions, run_prescription
+from .guard import start_guard
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .session import find_current_session, find_sessions, load_messages, resolve_session, save_messages
 from .types import PrescriptionResult, StrategyResult
@@ -383,6 +384,17 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def cmd_guard(args):
+    """Start the guard daemon to prevent compaction-induced state loss."""
+    start_guard(
+        cwd=args.cwd or os.getcwd(),
+        threshold_mb=args.threshold,
+        rx_name=args.rx or "standard",
+        interval=args.interval,
+        auto_reload=not args.no_reload,
+    )
+
+
 def cmd_doctor(args):
     """Run health checks on Claude Code configuration and sessions."""
     STATUS_ICONS = {
@@ -467,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.3.0")
     sub = parser.add_subparsers(dest="command")
 
     session_help = "Session ID, UUID prefix, path, or 'current' for auto-detect"
@@ -509,6 +521,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_reload.add_argument("-rx", help="Prescription: gentle, standard, aggressive (default: standard)")
     p_reload.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"])
 
+    # guard
+    p_guard = sub.add_parser("guard", help="Background sentinel — auto-prune before compaction triggers")
+    p_guard.add_argument("--cwd", help="Working directory (default: current)")
+    p_guard.add_argument("-rx", help="Prescription to apply (default: standard)")
+    p_guard.add_argument("--threshold", type=float, default=50.0, help="File size threshold in MB (default: 50)")
+    p_guard.add_argument("--interval", type=int, default=30, help="Check interval in seconds (default: 30)")
+    p_guard.add_argument("--no-reload", action="store_true", help="Prune without auto-reload (just trim the file)")
+
     # doctor
     p_doctor = sub.add_parser("doctor", help="Check for known Claude Code issues and fix them")
     p_doctor.add_argument("--fix", action="store_true", help="Auto-fix issues where possible")
@@ -534,6 +554,7 @@ def main():
         "treat": cmd_treat,
         "strategy": cmd_strategy,
         "reload": cmd_reload,
+        "guard": cmd_guard,
         "doctor": cmd_doctor,
         "formulary": cmd_formulary,
     }

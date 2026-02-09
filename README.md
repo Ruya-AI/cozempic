@@ -88,11 +88,38 @@ cozempic treat <session> [-rx PRESET]   Run prescription (dry-run default)
 cozempic treat <session> --execute      Apply changes with backup
 cozempic strategy <name> <session>      Run single strategy
 cozempic reload [-rx PRESET]            Treat + auto-resume in new terminal
+cozempic guard [--threshold MB]         Background sentinel — prevents compaction state loss
 cozempic doctor [--fix]                 Check for known Claude Code issues
 cozempic formulary                      Show all strategies & prescriptions
 ```
 
 Use `current` as the session argument in any command to auto-detect the active session for your working directory.
+
+## Guard (Agent Team Protection)
+
+Agent Teams are lost when auto-compaction triggers — the lead's context is summarized and team state (teammates, tasks, coordination) is discarded. Guard prevents this.
+
+```bash
+# Start guard daemon (watches session, auto-prunes before compaction)
+cozempic guard --threshold 50 -rx standard
+
+# Without auto-reload (just prune the file)
+cozempic guard --threshold 50 --no-reload
+
+# Custom interval
+cozempic guard --threshold 30 --interval 15
+```
+
+**How it works:**
+
+1. Monitors the active session JSONL file size every 30 seconds
+2. When threshold is crossed, extracts team state (teammates, tasks, roles, messages)
+3. Writes a checkpoint to `.claude/team-checkpoint.md` (survives any crash)
+4. Prunes the session with **team-protect** — TeamCreate, SendMessage, TaskCreate/Update messages are never removed
+5. Injects team state as a synthetic message pair directly into the JSONL — when Claude resumes, it *sees* the team state as conversation history (forced, not suggested)
+6. Triggers auto-reload (kill + resume in new terminal) so Claude picks up the pruned file
+
+**The result:** Claude resumes with clean context, full team awareness, and all coordination state intact. Compaction never triggers because the session stays under the threshold.
 
 ## Doctor
 
