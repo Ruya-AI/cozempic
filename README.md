@@ -2,11 +2,15 @@
 
 Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloat, keep everything that matters**.
 
-Claude Code sessions grow large — 8-46MB from progress ticks, repeated thinking blocks, stale file reads, duplicate document injections, and metadata bloat. When sessions get too big, Claude's auto-compaction kicks in and summarizes away critical context. For users running **Agent Teams**, this is catastrophic: the lead agent's context is compacted, team state (teammates, tasks, coordination messages) is discarded, and the entire team is orphaned with no way to recover.
+### What gets removed
 
-Cozempic cleans your context intelligently:
-- **Targeted strategies** — remove dead weight (progress ticks, stale reads, duplicate content) while preserving everything valuable: your conversation, decisions, tool results, and team coordination
-- **Guard mode** — a background daemon that keeps sessions lean automatically, so auto-compaction never fires and Agent Teams survive across context resets
+Claude Code context fills up with dead weight that wastes your token budget: hundreds of progress tick messages, repeated thinking blocks and signatures, stale file reads that were superseded by edits, duplicate document injections, oversized tool outputs, and metadata bloat (token counts, stop reasons, cost fields). A typical session carries 8-46MB — most of it noise. Cozempic identifies and removes all of it using 13 composable strategies, while your actual conversation, decisions, tool results, and working context stay untouched.
+
+### Agent Teams context loss protection
+
+When context gets too large, Claude's auto-compaction summarizes away critical state. For **Agent Teams**, this is catastrophic: the lead agent's context is compacted, team coordination messages (TeamCreate, SendMessage, TaskCreate/Update) are discarded, the lead forgets its teammates exist, and subagents are orphaned with no recovery path. ([#23620](https://github.com/anthropics/claude-code/issues/23620), [#23821](https://github.com/anthropics/claude-code/issues/23821), [#24052](https://github.com/anthropics/claude-code/issues/24052), [#21925](https://github.com/anthropics/claude-code/issues/21925))
+
+Cozempic's **guard mode** prevents this entirely — a background daemon that continuously cleans dead weight so auto-compaction never triggers, while protecting every team message and automatically repairing team state if context is reset.
 
 **Zero external dependencies.** Python 3.10+ stdlib only.
 
@@ -50,7 +54,7 @@ Session IDs accept full UUIDs, UUID prefixes, file paths, or `current` for auto-
 
 ## How It Works
 
-Cozempic uses **strategies** — targeted functions that identify what's bloat and what's valuable. Each strategy produces declarative actions (remove or replace) that clean dead weight while leaving your meaningful context untouched. Strategies are grouped into **prescriptions**:
+Each type of bloat has a dedicated **strategy** that knows exactly what to remove and what to keep. Strategies are grouped into **prescriptions** — presets that balance cleaning depth against risk:
 
 | Prescription | Strategies | Risk | Typical Savings |
 |---|---|---|---|
@@ -95,40 +99,43 @@ cozempic treat <session> [-rx PRESET]   Run prescription (dry-run default)
 cozempic treat <session> --execute      Apply changes with backup
 cozempic strategy <name> <session>      Run single strategy
 cozempic reload [-rx PRESET]            Treat + auto-resume in new terminal
-cozempic guard [--threshold MB]         Auto-clean context, prevent Agent Teams loss
+cozempic guard [--threshold MB]         Protect & repair Agent Teams context (background)
 cozempic doctor [--fix]                 Check for known Claude Code issues
 cozempic formulary                      Show all strategies & prescriptions
 ```
 
 Use `current` as the session argument in any command to auto-detect the active session for your working directory.
 
-## Guard — Agent Teams Context Loss Prevention
+## Guard — Agent Teams Context Loss Protection & Repair
 
-> **The problem:** Agent Teams are lost after auto-compaction. When a session grows too large, Claude's auto-compaction summarizes the lead agent's context — discarding TeamCreate, SendMessage, TaskCreate/Update messages. The lead forgets its teammates exist. Subagents become orphaned. There is no built-in recovery. ([#23620](https://github.com/anthropics/claude-code/issues/23620), [#23821](https://github.com/anthropics/claude-code/issues/23821), [#24052](https://github.com/anthropics/claude-code/issues/24052), [#21925](https://github.com/anthropics/claude-code/issues/21925))
-
-Guard is a background daemon that **prevents auto-compaction from ever triggering** by continuously cleaning dead weight — while preserving every conversation, decision, and team coordination message that matters.
+Guard is a background daemon that **protects** and **repairs** Agent Teams context. Run it in a separate terminal and forget about it.
 
 ```bash
-# Protect Agent Teams — run this in a separate terminal
+# Protect Agent Teams — run in a separate terminal
 cozempic guard --threshold 50 -rx standard
 
-# Without auto-reload (just prune the file, no restart)
+# Without auto-reload (just clean, no restart)
 cozempic guard --threshold 50 --no-reload
 
 # Lower threshold, faster checks
 cozempic guard --threshold 30 --interval 15
 ```
 
-**How it works:**
+**Protection** — prevents context loss before it happens:
 
-1. Monitors the active session JSONL file size every 30 seconds
-2. When the threshold is crossed, **extracts full team state** — teammates, tasks, roles, coordination messages
-3. Writes a crash-safe checkpoint to `.claude/team-checkpoint.md`
-4. Prunes the session with **team-protect** — TeamCreate, SendMessage, TaskCreate/Update messages are never removed
-5. **Injects team state as a synthetic message pair** directly into the JSONL — when Claude resumes, it *sees* the team as conversation history (force-read, not a suggestion)
-6. Triggers auto-reload (kill + resume in new terminal) so Claude picks up the pruned context
+1. Monitors context size every 30 seconds
+2. When the threshold is approached, cleans dead weight using the same strategies as `treat`
+3. Team coordination messages (TeamCreate, SendMessage, TaskCreate/Update) are **never removed**
+4. Context stays under threshold — auto-compaction never fires
 
-**The result:** Your context stays clean and under threshold — auto-compaction never fires. Everything valuable is preserved: your conversation history, decisions, tool results, and full Agent Teams coordination state. No more orphaned subagents, no more lost context.
+**Repair** — recovers team state if context is reset:
+
+5. Before cleaning, **extracts full team state** — teammates, tasks, roles, coordination history
+6. Writes a crash-safe checkpoint to `.claude/team-checkpoint.md`
+7. **Injects team state directly into the context** as a synthetic message pair — Claude *sees* the team as conversation history when it resumes (force-read, not a suggestion)
+8. Triggers auto-reload (kill + resume in new terminal) so Claude picks up the clean context with team state intact
+
+**The result:** Your context stays clean. Everything valuable is preserved — conversation history, decisions, tool results, and full Agent Teams coordination. Auto-compaction never fires. No orphaned subagents, no lost context.
 
 ## Doctor
 
