@@ -74,13 +74,22 @@ def find_current_session(cwd: str | None = None) -> dict | None:
 
     Matches the CWD against Claude project directory names to find the right
     project, then returns the most recently modified JSONL session.
+
+    Falls back to the most recently modified session across all projects
+    if no CWD match is found (handles cases where the slash command runs
+    from a different CWD than the project root).
     """
-    slug = cwd_to_project_slug(cwd)
     sessions = find_sessions()
-    matching = [s for s in sessions if slug in s["project"]]
-    if not matching:
+    if not sessions:
         return None
-    return max(matching, key=lambda s: s["mtime"])
+
+    slug = cwd_to_project_slug(cwd)
+    matching = [s for s in sessions if slug in s["project"]]
+    if matching:
+        return max(matching, key=lambda s: s["mtime"])
+
+    # Fallback: most recently modified session across all projects
+    return max(sessions, key=lambda s: s["mtime"])
 
 
 def resolve_session(session_arg: str, project_filter: str | None = None) -> Path:
