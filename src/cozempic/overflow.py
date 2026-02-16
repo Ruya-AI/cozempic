@@ -166,7 +166,8 @@ class OverflowRecovery:
             self._recovering = False
 
     def _do_recover(self) -> None:
-        from .guard import checkpoint_team, guard_prune_cycle, _find_claude_pid, _spawn_reload_watcher
+        from .guard import checkpoint_team, guard_prune_cycle, _spawn_reload_watcher
+        from .session import find_claude_pid
 
         now = _now()
         print(f"\n  [{now}] OVERFLOW DETECTED — reactive recovery triggered", file=sys.stderr)
@@ -226,7 +227,7 @@ class OverflowRecovery:
         )
 
         # 6. Kill Claude + auto-resume
-        claude_pid = _find_claude_pid()
+        claude_pid = find_claude_pid()
         if claude_pid:
             _spawn_reload_watcher(claude_pid, self.cwd, session_id=self.session_id)
             print(

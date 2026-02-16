@@ -40,6 +40,11 @@ def set_content_blocks(msg: dict, blocks: list[dict]) -> dict:
     return msg
 
 
+def shell_quote(s: str) -> str:
+    """Single-quote a string for shell use."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
 def text_of(block: dict) -> str:
     """Get the text content of a content block, handling all block types."""
     result = block.get("text", "") or block.get("thinking", "") or block.get("content", "")

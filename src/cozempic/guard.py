@@ -24,8 +24,9 @@ import time
 from pathlib import Path
 
 from .executor import run_prescription
+from .helpers import shell_quote
 from .registry import PRESCRIPTIONS
-from .session import find_current_session, load_messages, save_messages
+from .session import find_claude_pid, find_current_session, load_messages, save_messages
 from .team import TeamState, extract_team_state, inject_team_recovery, write_team_checkpoint
 
 
@@ -365,7 +366,7 @@ def guard_prune_cycle(
 
     # Trigger reload if configured — kill Claude + resume
     if auto_reload:
-        claude_pid = _find_claude_pid()
+        claude_pid = find_claude_pid()
         if claude_pid:
             _spawn_reload_watcher(claude_pid, cwd, session_id=session_id)
             result["reloading"] = True
@@ -375,36 +376,6 @@ def guard_prune_cycle(
             print(f"  Restart manually: claude {resume_flag}")
 
     return result
-
-
-# ─── Process management (shared with cli.py reload) ──────────────────────────
-
-def _find_claude_pid() -> int | None:
-    """Walk up the process tree to find the Claude Code node process."""
-    try:
-        pid = os.getpid()
-        for _ in range(10):
-            result = subprocess.run(
-                ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
-                capture_output=True, text=True,
-            )
-            parts = result.stdout.strip().split(None, 1)
-            if len(parts) < 2:
-                break
-            ppid, comm = int(parts[0]), parts[1]
-            if "node" in comm.lower() or "claude" in comm.lower():
-                return pid
-            pid = ppid
-    except (ValueError, OSError):
-        pass
-    ppid = os.getppid()
-    if ppid > 1:
-        return ppid
-    return None
-
-
-def _shell_quote(s: str) -> str:
-    return "'" + s.replace("'", "'\\''") + "'"
 
 
 def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | None = None):
@@ -417,14 +388,14 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     if system == "Darwin":
         resume_cmd = (
             f"osascript -e 'tell application \"Terminal\" to do script "
-            f"\"cd {_shell_quote(project_dir)} && claude {resume_flag}\"'"
+            f"\"cd {shell_quote(project_dir)} && claude {resume_flag}\"'"
         )
     elif system == "Linux":
         resume_cmd = (
             f"if command -v gnome-terminal >/dev/null 2>&1; then "
-            f"gnome-terminal -- bash -c 'cd {_shell_quote(project_dir)} && claude {resume_flag}; exec bash'; "
+            f"gnome-terminal -- bash -c 'cd {shell_quote(project_dir)} && claude {resume_flag}; exec bash'; "
             f"elif command -v xterm >/dev/null 2>&1; then "
-            f"xterm -e 'cd {_shell_quote(project_dir)} && claude {resume_flag}' & "
+            f"xterm -e 'cd {shell_quote(project_dir)} && claude {resume_flag}' & "
             f"else echo 'No terminal emulator found' >> /tmp/cozempic_guard.log; fi"
         )
     elif system == "Windows":

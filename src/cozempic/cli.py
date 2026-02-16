@@ -16,7 +16,8 @@ from .guard import checkpoint_team, start_guard, start_guard_daemon
 from .init import run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
-from .session import find_current_session, find_sessions, load_messages, project_slug_to_path, resolve_session, save_messages
+from .helpers import shell_quote
+from .session import find_claude_pid, find_current_session, find_sessions, load_messages, project_slug_to_path, resolve_session, save_messages
 from .types import PrescriptionResult, StrategyResult
 
 # Ensure all strategies are registered
@@ -321,7 +322,7 @@ def cmd_reload(args):
     print(f"  Recap saved to {recap_path}")
 
     # Step 3: Find Claude's parent PID and spawn watcher
-    claude_pid = _find_claude_pid()
+    claude_pid = find_claude_pid()
     if not claude_pid:
         print("  WARNING: Could not detect Claude Code process.")
         print("  Treatment was applied, but auto-resume watcher was NOT started.")
@@ -334,31 +335,6 @@ def cmd_reload(args):
     print()
 
 
-def _find_claude_pid() -> int | None:
-    """Walk up the process tree to find the Claude Code node process."""
-    try:
-        pid = os.getpid()
-        for _ in range(10):  # walk up at most 10 levels
-            result = subprocess.run(
-                ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
-                capture_output=True, text=True,
-            )
-            parts = result.stdout.strip().split(None, 1)
-            if len(parts) < 2:
-                break
-            ppid, comm = int(parts[0]), parts[1]
-            if "node" in comm.lower() or "claude" in comm.lower():
-                return pid  # return the pid we were checking (the claude process)
-            pid = ppid
-    except (ValueError, OSError):
-        pass
-    # Fallback: PPID is often Claude when invoked from within a session
-    ppid = os.getppid()
-    if ppid > 1:
-        return ppid
-    return None
-
-
 def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = None, session_id: str | None = None):
     """Spawn a detached background process that waits for Claude to exit, then resumes."""
     system = platform.system()
@@ -366,19 +342,19 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
     # Build the command sequence: show recap, then launch claude --resume
     recap_cmd = ""
     if recap_path and recap_path.exists():
-        recap_cmd = f"cat {_shell_quote(str(recap_path))}; echo; "
+        recap_cmd = f"cat {shell_quote(str(recap_path))}; echo; "
 
     # Use session ID for precise resume targeting
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
 
     if system == "Darwin":
-        inner_cmd = f"cd {_shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}"
+        inner_cmd = f"cd {shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}"
         resume_cmd = (
             f"osascript -e 'tell application \"Terminal\" to do script "
             f"\"{inner_cmd}\"'"
         )
     elif system == "Linux":
-        inner_cmd = f"cd {_shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}; exec bash"
+        inner_cmd = f"cd {shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}; exec bash"
         resume_cmd = (
             f"if command -v gnome-terminal >/dev/null 2>&1; then "
             f"gnome-terminal -- bash -c '{inner_cmd}'; "
@@ -405,11 +381,6 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
         stdin=subprocess.DEVNULL,
         start_new_session=True,  # fully detach from parent
     )
-
-
-def _shell_quote(s: str) -> str:
-    """Single-quote a string for shell use."""
-    return "'" + s.replace("'", "'\\''") + "'"
 
 
 def cmd_checkpoint(args):

@@ -80,26 +80,30 @@ def project_slug_to_path(slug: str) -> str:
     return slug.replace("-", "/")
 
 
-def _find_claude_pid() -> int | None:
+def find_claude_pid() -> int | None:
     """Walk up the process tree to find the Claude Code node process."""
     try:
         pid = os.getpid()
         for _ in range(10):
             result = subprocess.run(
-                ["ps", "-o", "pid=,ppid=,comm=", "-p", str(pid)],
+                ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
                 capture_output=True, text=True,
             )
-            parts = result.stdout.strip().split()
-            if len(parts) < 3:
+            parts = result.stdout.strip().split(None, 1)
+            if len(parts) < 2:
                 break
-            ppid, comm = int(parts[1]), parts[2]
-            if "claude" in comm.lower():
+            ppid, comm = int(parts[0]), parts[1]
+            if "node" in comm.lower() or "claude" in comm.lower():
                 return pid
             pid = ppid
             if pid <= 1:
                 break
     except (ValueError, OSError):
         pass
+    # Fallback: PPID is often Claude when invoked from within a session
+    ppid = os.getppid()
+    if ppid > 1:
+        return ppid
     return None
 
 
@@ -109,7 +113,7 @@ def _session_id_from_process() -> str | None:
     Claude keeps .claude/tasks/<session-id>/ directories open. We can use
     lsof to find the session UUID from the parent Claude process.
     """
-    claude_pid = _find_claude_pid()
+    claude_pid = find_claude_pid()
     if not claude_pid:
         return None
 
