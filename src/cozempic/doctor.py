@@ -47,7 +47,7 @@ def check_trust_dialog_hang() -> CheckResult:
         )
 
     try:
-        data = json.loads(claude_json.read_text())
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         return CheckResult(
             name="trust-dialog-hang",
@@ -93,7 +93,7 @@ def fix_trust_dialog_hang() -> str:
         return "No ~/.claude.json found — nothing to fix."
 
     try:
-        data = json.loads(claude_json.read_text())
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         return f"Could not read ~/.claude.json: {e}"
 
@@ -115,7 +115,7 @@ def fix_trust_dialog_hang() -> str:
     backup = claude_json.parent / ".claude.json.bak"
     shutil.copy2(claude_json, backup)
 
-    claude_json.write_text(json.dumps(data, indent=2) + "\n")
+    claude_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return f"Reset hasTrustDialogAccepted to false. Backup: {backup}"
 
 

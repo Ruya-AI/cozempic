@@ -22,6 +22,11 @@ from .types import PrescriptionResult, StrategyResult
 # Ensure all strategies are registered
 import cozempic.strategies  # noqa: F401
 
+# Fix Windows stdout/stderr encoding for Unicode characters (box-drawing, emoji)
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 # ─── Formatting ───────────────────────────────────────────────────────────────
 

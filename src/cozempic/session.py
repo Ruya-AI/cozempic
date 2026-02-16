@@ -45,7 +45,7 @@ def find_sessions(project_filter: str | None = None) -> list[dict]:
             mtime = datetime.fromtimestamp(f.stat().st_mtime)
             session_id = f.stem
             line_count = 0
-            with open(f, "r") as fh:
+            with open(f, "r", encoding="utf-8") as fh:
                 for _ in fh:
                     line_count += 1
             sessions.append({
@@ -141,7 +141,7 @@ def _match_session_by_text(sessions: list[dict], match_text: str) -> dict | None
     """
     for sess in sorted(sessions, key=lambda s: s["mtime"], reverse=True):
         try:
-            with open(sess["path"], "r") as f:
+            with open(sess["path"], "r", encoding="utf-8") as f:
                 # Read last 50 lines efficiently
                 lines = f.readlines()
                 tail = lines[-50:] if len(lines) > 50 else lines
@@ -220,7 +220,7 @@ def resolve_session(session_arg: str, project_filter: str | None = None) -> Path
 def load_messages(path: Path) -> list[Message]:
     """Load JSONL file. Returns list of (line_index, message_dict, byte_size)."""
     messages: list[Message] = []
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             line = line.strip()
             if not line:
@@ -248,7 +248,7 @@ def save_messages(
         backup_path = path.with_suffix(f".{ts}.jsonl.bak")
         shutil.copy2(path, backup_path)
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for _, msg, _ in messages:
             if msg.get("_parse_error"):
                 f.write(msg["_raw"] + "\n")

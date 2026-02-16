@@ -529,7 +529,7 @@ def start_guard_daemon(
         cmd_parts.append("--no-reactive")
 
     # Spawn detached process
-    with open(log_file, "a") as lf:
+    with open(log_file, "a", encoding="utf-8") as lf:
         from datetime import datetime
         lf.write(f"\n--- Guard daemon started at {datetime.now().isoformat()} ---\n")
         lf.write(f"CWD: {cwd}\n")

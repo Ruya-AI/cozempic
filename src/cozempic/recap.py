@@ -183,5 +183,5 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
 def save_recap(messages: list[Message], dest: Path, max_turns: int = 40) -> Path:
     """Generate and save recap to a file. Returns the path."""
     recap = generate_recap(messages, max_turns)
-    dest.write_text(recap)
+    dest.write_text(recap, encoding="utf-8")
     return dest

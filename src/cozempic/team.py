@@ -537,7 +537,7 @@ def load_team_configs() -> list[dict]:
 
     for config_file in teams_dir.glob("*/config.json"):
         try:
-            data = json.loads(config_file.read_text())
+            data = json.loads(config_file.read_text(encoding="utf-8"))
             data["_config_path"] = str(config_file)
             configs.append(data)
         except (json.JSONDecodeError, OSError):
@@ -621,7 +621,7 @@ def write_team_checkpoint(state: TeamState, project_dir: Path | None = None) -> 
     else:
         path = Path.home() / ".claude" / "team-checkpoint.md"
 
-    path.write_text(state.to_markdown())
+    path.write_text(state.to_markdown(), encoding="utf-8")
     return path
 
 

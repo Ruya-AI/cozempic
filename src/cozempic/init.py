@@ -94,7 +94,7 @@ def _settings_path(project_dir: str) -> Path:
 def _load_settings(path: Path) -> dict:
     """Load settings.json, returning empty dict if missing."""
     if path.exists():
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
@@ -112,7 +112,7 @@ def _backup_settings(path: Path) -> Path | None:
 def _save_settings(path: Path, settings: dict) -> None:
     """Write settings.json with consistent formatting."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
 
@@ -195,7 +195,7 @@ def install_slash_command(project_dir: str) -> dict:
 
     # Check if content differs
     if already_existed:
-        if source.read_text() == target.read_text():
+        if source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8"):
             return {"installed": False, "path": str(target), "already_existed": True, "updated": False}
 
     target_dir.mkdir(parents=True, exist_ok=True)

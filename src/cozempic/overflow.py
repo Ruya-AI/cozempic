@@ -47,7 +47,7 @@ class CircuitBreaker:
         if not self.state_path.exists():
             return []
         try:
-            data = json.loads(self.state_path.read_text())
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return []
         cutoff = time.time() - self.window_seconds
@@ -55,7 +55,7 @@ class CircuitBreaker:
 
     def _save(self, records: list[dict]) -> None:
         try:
-            self.state_path.write_text(json.dumps(records))
+            self.state_path.write_text(json.dumps(records), encoding="utf-8")
         except OSError:
             pass
 
