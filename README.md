@@ -6,6 +6,10 @@ Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloa
 
 Claude Code context fills up with dead weight that wastes your token budget: hundreds of progress tick messages, repeated thinking blocks and signatures, stale file reads that were superseded by edits, duplicate document injections, oversized tool outputs, and metadata bloat (token counts, stop reasons, cost fields). A typical session carries 8-46MB — most of it noise. Cozempic identifies and removes all of it using 13 composable strategies, while your actual conversation, decisions, tool results, and working context stay untouched.
 
+### Token-aware diagnostics
+
+File size is a poor proxy for context usage — a 1.1MB JSONL can hold 158K tokens. Cozempic reads the **exact token counts** from Claude's `usage` fields in the session file, so you see real context window usage instead of misleading byte sizes. Every command shows tokens and a context % bar, and guard thresholds can be set in tokens for precise compaction prevention.
+
 ### Agent Teams context loss protection
 
 When context gets too large, Claude's auto-compaction summarizes away critical state. For **Agent Teams**, this is catastrophic: the lead agent's context is compacted, team coordination messages (TeamCreate, SendMessage, TaskCreate/Update) are discarded, the lead forgets its teammates exist, and subagents are orphaned with no recovery path. ([#23620](https://github.com/anthropics/claude-code/issues/23620), [#23821](https://github.com/anthropics/claude-code/issues/23821), [#24052](https://github.com/anthropics/claude-code/issues/24052), [#21925](https://github.com/anthropics/claude-code/issues/21925))
@@ -79,6 +83,9 @@ cozempic checkpoint --show
 # Or run manually with custom thresholds:
 cozempic guard --threshold 50 -rx standard
 
+# Guard with token-based thresholds (fires whichever is hit first):
+cozempic guard --threshold 50 --threshold-tokens 180000
+
 # Run as background daemon (what the SessionStart hook uses):
 cozempic guard --daemon
 
@@ -139,6 +146,8 @@ cozempic reload [-rx PRESET]                Treat + auto-resume in new terminal
 cozempic checkpoint [--show]                Save team/agent state to disk (no pruning)
 cozempic guard [--threshold MB]             Tiered guard: checkpoint + soft/hard prune
 cozempic guard --soft-threshold 25          Custom soft threshold (default: 60% of hard)
+cozempic guard --threshold-tokens 180000    Hard threshold in tokens (alongside --threshold)
+cozempic guard --soft-threshold-tokens N    Soft threshold in tokens
 cozempic guard --no-reactive                Disable reactive overflow recovery
 cozempic doctor [--fix]                     Check for known Claude Code issues
 cozempic formulary                          Show all strategies & prescriptions
@@ -244,6 +253,9 @@ cozempic guard --threshold 50 --no-reload
 # Disable reactive overflow recovery (polling only)
 cozempic guard --no-reactive
 
+# Token-based thresholds (fires whichever is hit first)
+cozempic guard --threshold 50 --threshold-tokens 180000 --soft-threshold-tokens 120000
+
 # Aggressive at hard threshold, gentle at soft (automatic)
 cozempic guard --threshold 30 -rx aggressive
 ```
@@ -257,6 +269,8 @@ Output:
   Size:        5.4MB
   Soft:        30.0MB (gentle prune, no reload)
   Hard:        50.0MB (full prune + reload)
+  Soft tokens: 120,000
+  Hard tokens: 180,000
   Rx:          gentle (soft) / standard (hard)
   Interval:    30s
   Team-protect: enabled
@@ -268,7 +282,7 @@ Output:
   [14:23:01] Checkpoint #1: 6 agents, 9 tasks, 121 msgs (5.4MB)
   [14:25:31] Checkpoint #2: 8 agents, 12 tasks, 156 msgs (6.1MB)
   [14:28:01] Checkpoint #3: 8 agents, 12 tasks, 189 msgs (7.2MB)
-  [14:45:01] SOFT THRESHOLD: 30.2MB >= 30.0MB
+  [14:45:01] SOFT THRESHOLD: 121,432 tokens >= 120,000
              Gentle prune, no reload (cycle #1)
              Trimmed: 4.1MB saved
   [15:10:01] HARD THRESHOLD: 50.3MB >= 50.0MB
@@ -461,6 +475,7 @@ This makes `$CLAUDE_SESSION_ID` available in all Bash commands during the sessio
   Before: 29.56MB (6602 messages)
   After:  23.09MB (5073 messages)
   Saved:  6.47MB (21.9%) — 1529 removed, 4038 modified
+  Tokens: 158.2K -> 121.5K (36.7K freed, 23.2%) (exact)
 
   Strategy Results:
     progress-collapse              1.63MB saved  (5.5%)  (1525 removed)
@@ -471,6 +486,29 @@ This makes `$CLAUDE_SESSION_ID` available in all Bash commands during the sessio
     stale-reads                   710.0KB saved  (2.3%)  (176 modified)
     system-reminder-dedup          27.6KB saved  (0.1%)  (92 modified)
     envelope-strip                509.2KB saved  (1.7%)  (4657 modified)
+```
+
+Diagnosis output:
+
+```
+  Patient: abc123
+  Weight:  1.01MB (223 messages)
+  Tokens:  83.0K (exact)
+  Context: [========------------] 42%
+
+  Vital Signs:
+    Progress ticks:         41
+    File history snaps:      8
+    ...
+```
+
+The `list` command also shows a Tokens column for every session:
+
+```
+  Session ID                                     Size   Tokens Messages Modified             Project
+  ──────────────────────────────────────── ────────── ──────── ──────── ────────────────────
+  38cbd1d7-d465-456e-892b-61c7d70725ab        43.88MB   143.2K      828 2026-01-23 20:28     ...
+  547f8a35-8162-4bb0-b727-1fe2f6452c07        12.79MB   152.0K     5102 2026-02-16 20:51     ...
 ```
 
 ## Contributing
