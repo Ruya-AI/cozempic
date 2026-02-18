@@ -12,7 +12,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .session import find_sessions, get_claude_dir
+from .session import find_sessions, get_claude_dir, get_claude_json_path
 
 
 @dataclass
@@ -37,7 +37,7 @@ def check_trust_dialog_hang() -> CheckResult:
 
     Ref: anthropics/claude-code#18532
     """
-    claude_json = get_claude_dir() / ".claude.json"
+    claude_json = get_claude_json_path()
 
     if not claude_json.exists():
         return CheckResult(
@@ -87,7 +87,7 @@ def check_trust_dialog_hang() -> CheckResult:
 
 def fix_trust_dialog_hang() -> str:
     """Fix the trust dialog hang by resetting hasTrustDialogAccepted."""
-    claude_json = get_claude_dir() / ".claude.json"
+    claude_json = get_claude_json_path()
 
     if not claude_json.exists():
         return f"No {claude_json} found — nothing to fix."
