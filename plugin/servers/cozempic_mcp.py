@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
+# Ensure all strategies are registered
+import cozempic.strategies  # noqa: F401
+
 mcp = FastMCP("Cozempic")
 
 
