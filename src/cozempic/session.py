@@ -14,8 +14,19 @@ from .types import Message
 
 
 def get_claude_dir() -> Path:
-    """Return the Claude configuration directory."""
+    import os
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir)
     return Path.home() / ".claude"
+
+
+def get_claude_json_path() -> Path:
+    import os
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / ".claude.json"
+    return Path.home() / ".claude.json"
 
 
 def get_projects_dir() -> Path:
