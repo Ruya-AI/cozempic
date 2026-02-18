@@ -185,7 +185,8 @@ def install_slash_command(project_dir: str) -> dict:
     if not source.exists():
         source = Path(__file__).parent.parent.parent / ".claude" / "commands" / "cozempic.md"
 
-    target_dir = Path.home() / ".claude" / "commands"
+    from .session import get_claude_dir
+    target_dir = get_claude_dir() / "commands"
     target = target_dir / "cozempic.md"
 
     if not source.exists():

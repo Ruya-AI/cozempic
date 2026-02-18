@@ -530,7 +530,8 @@ def load_team_configs() -> list[dict]:
 
     Returns a list of parsed config dicts, one per team.
     """
-    teams_dir = Path.home() / ".claude" / "teams"
+    from .session import get_claude_dir
+    teams_dir = get_claude_dir() / "teams"
     configs = []
     if not teams_dir.is_dir():
         return configs
@@ -619,7 +620,8 @@ def write_team_checkpoint(state: TeamState, project_dir: Path | None = None) -> 
     if project_dir and project_dir.exists():
         path = project_dir / "team-checkpoint.md"
     else:
-        path = Path.home() / ".claude" / "team-checkpoint.md"
+        from .session import get_claude_dir
+        path = get_claude_dir() / "team-checkpoint.md"
 
     path.write_text(state.to_markdown(), encoding="utf-8")
     return path

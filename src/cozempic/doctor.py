@@ -37,13 +37,13 @@ def check_trust_dialog_hang() -> CheckResult:
 
     Ref: anthropics/claude-code#18532
     """
-    claude_json = Path.home() / ".claude.json"
+    claude_json = get_claude_dir() / ".claude.json"
 
     if not claude_json.exists():
         return CheckResult(
             name="trust-dialog-hang",
             status="ok",
-            message="No ~/.claude.json found (fresh install)",
+            message=f"No {claude_json} found (fresh install)",
         )
 
     try:
@@ -52,7 +52,7 @@ def check_trust_dialog_hang() -> CheckResult:
         return CheckResult(
             name="trust-dialog-hang",
             status="warning",
-            message=f"Could not read ~/.claude.json: {e}",
+            message=f"Could not read {claude_json}: {e}",
         )
 
     # Check top-level and project-specific entries
@@ -87,15 +87,15 @@ def check_trust_dialog_hang() -> CheckResult:
 
 def fix_trust_dialog_hang() -> str:
     """Fix the trust dialog hang by resetting hasTrustDialogAccepted."""
-    claude_json = Path.home() / ".claude.json"
+    claude_json = get_claude_dir() / ".claude.json"
 
     if not claude_json.exists():
-        return "No ~/.claude.json found — nothing to fix."
+        return f"No {claude_json} found — nothing to fix."
 
     try:
         data = json.loads(claude_json.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        return f"Could not read ~/.claude.json: {e}"
+        return f"Could not read {claude_json}: {e}"
 
     changed = False
 
