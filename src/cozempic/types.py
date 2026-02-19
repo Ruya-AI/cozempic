@@ -45,6 +45,8 @@ class PrescriptionResult:
     original_tokens: int | None = None
     final_tokens: int | None = None
     token_method: str | None = None
+    model: str | None = None
+    context_window: int | None = None
 
 
 @dataclass

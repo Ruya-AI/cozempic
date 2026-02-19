@@ -71,8 +71,12 @@ def print_diagnosis(diag: dict, path: Path):
     te = diag.get("token_estimate")
     if te:
         confidence = f", {te.confidence}" if te.method == "heuristic" else ""
+        model_str = f"  Model:   {te.model}" if te.model else ""
+        window_str = f"{fmt_tokens(te.context_window)}" if te.context_window != 200_000 else "200K"
         print(f"  Tokens:  {fmt_tokens(te.total)} ({te.method}{confidence})")
-        print(f"  Context: {fmt_context_bar(te.context_pct)}")
+        print(f"  Context: {fmt_context_bar(te.context_pct)} of {window_str}")
+        if model_str:
+            print(model_str)
     print()
 
     print("  Vital Signs:")
@@ -122,11 +126,13 @@ def print_prescription_result(pr: PrescriptionResult):
         tok_saved = pr.original_tokens - pr.final_tokens
         tok_pct = f"{tok_saved / pr.original_tokens * 100:.1f}%" if pr.original_tokens > 0 else "0%"
         from .tokens import DEFAULT_CONTEXT_WINDOW
-        after_pct = round(pr.final_tokens / DEFAULT_CONTEXT_WINDOW * 100, 1)
+        context_window = pr.context_window or DEFAULT_CONTEXT_WINDOW
+        after_pct = round(pr.final_tokens / context_window * 100, 1)
+        window_str = fmt_tokens(context_window)
         print(f"  Before: {fmt_tokens(pr.original_tokens)} tokens ({fmt_bytes(pr.original_total_bytes)}, {pr.original_message_count} messages)")
         print(f"  After:  {fmt_tokens(pr.final_tokens)} tokens ({fmt_bytes(pr.final_total_bytes)}, {pr.final_message_count} messages)")
         print(f"  Freed:  {fmt_tokens(tok_saved)} tokens ({tok_pct}) — {fmt_bytes(saved)}, {removed} removed, {total_replaced} modified")
-        print(f"  Context: {fmt_context_bar(after_pct)}")
+        print(f"  Context: {fmt_context_bar(after_pct)} of {window_str}{f' ({pr.model})' if pr.model else ''}")
     else:
         byte_pct = fmt_pct(saved, pr.original_total_bytes)
         print(f"  Before: {fmt_bytes(pr.original_total_bytes)} ({pr.original_message_count} messages)")
@@ -181,11 +187,18 @@ def cmd_current(args):
     print(f"    ID:      {sess['session_id']}")
     print(f"    Size:    {fmt_bytes(sess['size'])} ({sess['lines']} messages)")
 
+    from .tokens import detect_context_window, detect_model
+    messages_for_model = load_messages(sess["path"])
+    context_window = detect_context_window(messages_for_model)
+    model = detect_model(messages_for_model)
+
     tok = quick_token_estimate(sess["path"])
     if tok is not None:
-        from .tokens import DEFAULT_CONTEXT_WINDOW
-        pct = round(tok / DEFAULT_CONTEXT_WINDOW * 100, 1)
-        print(f"    Tokens:  {fmt_tokens(tok)} {fmt_context_bar(pct)}")
+        pct = round(tok / context_window * 100, 1)
+        window_str = fmt_tokens(context_window)
+        print(f"    Tokens:  {fmt_tokens(tok)} {fmt_context_bar(pct)} of {window_str}")
+    if model:
+        print(f"    Model:   {model}")
 
     print(f"    Project: {sess['project']}")
     print(f"    Path:    {sess['path']}")
@@ -260,6 +273,8 @@ def cmd_treat(args):
         original_tokens=pre_te.total,
         final_tokens=post_te.total,
         token_method=pre_te.method,
+        model=pre_te.model,
+        context_window=pre_te.context_window,
     )
 
     print_prescription_result(pr)
@@ -367,6 +382,8 @@ def cmd_reload(args):
         original_tokens=pre_te.total,
         final_tokens=post_te.total,
         token_method=pre_te.method,
+        model=pre_te.model,
+        context_window=pre_te.context_window,
     )
     print_prescription_result(pr)
 

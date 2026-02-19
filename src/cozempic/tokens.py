@@ -18,14 +18,60 @@ from .types import Message
 DEFAULT_CONTEXT_WINDOW = 200_000
 SYSTEM_OVERHEAD_TOKENS = 21_000
 
+# Model → context window mapping
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-6": 1_000_000,
+    "claude-opus-4-5": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-3-5-sonnet": 200_000,
+    "claude-3-5-haiku": 200_000,
+    "claude-3-opus": 200_000,
+    "claude-3-sonnet": 200_000,
+    "claude-3-haiku": 200_000,
+}
+
 # Chars-per-token defaults (conservative)
 CHARS_PER_TOKEN_CODE = 3.5
 CHARS_PER_TOKEN_PROSE = 4.0
 CHARS_PER_TOKEN_DEFAULT = 3.7  # blended default
 
 TokenEstimate = namedtuple(
-    "TokenEstimate", ["total", "context_pct", "method", "confidence"]
+    "TokenEstimate", ["total", "context_pct", "method", "confidence", "model", "context_window"]
 )
+
+
+def detect_model(messages: list[Message]) -> str | None:
+    """Detect the model from the last main-chain assistant message."""
+    for _, msg, _ in reversed(messages):
+        if get_msg_type(msg) != "assistant":
+            continue
+        if msg.get("isSidechain"):
+            continue
+        inner = msg.get("message", {})
+        model = inner.get("model", "")
+        if model:
+            return model
+    return None
+
+
+def detect_context_window(messages: list[Message]) -> int:
+    """Detect the context window size from the session's model.
+
+    Returns the context window in tokens. Falls back to DEFAULT_CONTEXT_WINDOW
+    if the model is unknown or undetectable.
+    """
+    model = detect_model(messages)
+    if model:
+        # Exact match first
+        if model in MODEL_CONTEXT_WINDOWS:
+            return MODEL_CONTEXT_WINDOWS[model]
+        # Prefix match for versioned model IDs (e.g. claude-opus-4-6-20260101)
+        for prefix, window in MODEL_CONTEXT_WINDOWS.items():
+            if model.startswith(prefix):
+                return window
+    return DEFAULT_CONTEXT_WINDOW
 
 
 def _is_sidechain(msg: dict) -> bool:
@@ -174,30 +220,39 @@ def estimate_session_tokens(messages: list[Message]) -> TokenEstimate:
 
     Returns a TokenEstimate namedtuple:
       total: estimated total tokens
-      context_pct: percentage of DEFAULT_CONTEXT_WINDOW used
+      context_pct: percentage of context window used (auto-detected per model)
       method: "exact" or "heuristic"
       confidence: "high" (exact) or "medium" (heuristic)
+      model: detected model name or None
+      context_window: context window size used for % calculation
     """
+    model = detect_model(messages)
+    context_window = detect_context_window(messages)
+
     # Try exact first
     usage = extract_usage_tokens(messages)
     if usage is not None:
         total = usage["total"]
-        pct = round(total / DEFAULT_CONTEXT_WINDOW * 100, 1)
+        pct = round(total / context_window * 100, 1)
         return TokenEstimate(
             total=total,
             context_pct=pct,
             method="exact",
             confidence="high",
+            model=model,
+            context_window=context_window,
         )
 
     # Fall back to heuristic
     total, _ = estimate_tokens_heuristic(messages)
-    pct = round(total / DEFAULT_CONTEXT_WINDOW * 100, 1)
+    pct = round(total / context_window * 100, 1)
     return TokenEstimate(
         total=total,
         context_pct=pct,
         method="heuristic",
         confidence="medium",
+        model=model,
+        context_window=context_window,
     )
 
 
