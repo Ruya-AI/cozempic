@@ -1,7 +1,7 @@
 {
   "name": "cozempic",
   "version": "0.7.0",
-  "description": "Context weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction",
+  "description": "2x the effective context with smart weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction, monitor token usage with MCP tools",
   "author": {
     "name": "Ruya AI",
     "url": "https://github.com/Ruya-AI"

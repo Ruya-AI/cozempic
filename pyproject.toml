@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cozempic"
 version = "0.7.0"
-description = "Context cleaning for Claude Code — remove the bloat, keep everything that matters, protect Agent Teams from context loss"
+description = "2x the effective context with smart weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction, monitor token usage with MCP tools"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
