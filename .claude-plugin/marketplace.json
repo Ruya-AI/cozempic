@@ -1,0 +1,22 @@
+{
+  "name": "cozempic",
+  "owner": {
+    "name": "Ruya AI",
+    "email": "hello@ruya.ai"
+  },
+  "metadata": {
+    "description": "Context weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction",
+    "version": "0.7.0",
+    "pluginRoot": "./plugin"
+  },
+  "plugins": [
+    {
+      "name": "cozempic",
+      "source": "./plugin",
+      "description": "Context weight-loss for Claude Code — prune bloated sessions, protect agent teams, monitor token usage. Includes MCP tools, skills, and auto-wired hooks.",
+      "version": "0.7.0",
+      "category": "productivity",
+      "tags": ["context", "pruning", "compaction", "agent-teams", "tokens", "optimization"]
+    }
+  ]
+}
