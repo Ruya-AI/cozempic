@@ -296,7 +296,7 @@ def start_guard(
                     print(f"  Reload triggered. Guard exiting.")
                     break
 
-                print(f"  Pruned: {result['saved_mb']:.1f}MB saved")
+                print(f"  Pruned: {_fmt_prune_result(result)}")
                 if result.get("team_name"):
                     print(
                         f"  Team '{result['team_name']}' state preserved "
@@ -328,7 +328,7 @@ def start_guard(
                         session_id=sess["session_id"],
                     )
 
-                    print(f"  Trimmed: {result['saved_mb']:.1f}MB saved")
+                    print(f"  Trimmed: {_fmt_prune_result(result)}")
                     if result.get("team_name"):
                         print(
                             f"  Team '{result['team_name']}' state preserved "
@@ -363,8 +363,13 @@ def guard_prune_cycle(
 
     Returns dict with: saved_mb, team_name, team_messages, reloading, checkpoint_path
     """
+    from .tokens import estimate_session_tokens
+
     messages = load_messages(session_path)
     original_bytes = sum(b for _, _, b in messages)
+
+    # Token estimate before pruning
+    pre_te = estimate_session_tokens(messages)
 
     # Prune with team protection
     pruned_messages, results, team_state = prune_with_team_protect(
@@ -373,6 +378,9 @@ def guard_prune_cycle(
 
     final_bytes = sum(b for _, _, b in pruned_messages)
     saved_bytes = original_bytes - final_bytes
+
+    # Token estimate after pruning
+    post_te = estimate_session_tokens(pruned_messages)
 
     # Write checkpoint if team exists
     checkpoint_path = None
@@ -385,6 +393,8 @@ def guard_prune_cycle(
 
     result = {
         "saved_mb": saved_bytes / 1024 / 1024,
+        "original_tokens": pre_te.total,
+        "final_tokens": post_te.total,
         "team_name": team_state.team_name,
         "team_messages": team_state.message_count,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
@@ -565,6 +575,18 @@ def start_guard_daemon(
         "log_file": str(log_file),
         "already_running": False,
     }
+
+
+def _fmt_prune_result(result: dict) -> str:
+    """Format a prune cycle result, leading with tokens if available."""
+    orig_tok = result.get("original_tokens")
+    final_tok = result.get("final_tokens")
+    if orig_tok and final_tok:
+        saved_tok = orig_tok - final_tok
+        tok_str = f"{saved_tok / 1000:.1f}K" if saved_tok >= 1000 else str(saved_tok)
+        pct = f"{saved_tok / orig_tok * 100:.1f}%" if orig_tok > 0 else "0%"
+        return f"{tok_str} tokens freed ({pct}), {result['saved_mb']:.1f}MB saved"
+    return f"{result['saved_mb']:.1f}MB saved"
 
 
 def _now() -> str:

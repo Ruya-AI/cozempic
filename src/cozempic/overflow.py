@@ -232,11 +232,22 @@ class OverflowRecovery:
 
         # 5. Record in breaker
         self.breaker.record_recovery(rx, before_mb, after_mb)
-        print(
-            f"  [{now}] Pruned {before_mb:.1f}MB → {after_mb:.1f}MB "
-            f"(saved {result['saved_mb']:.1f}MB)",
-            file=sys.stderr,
-        )
+        orig_tok = result.get("original_tokens")
+        final_tok = result.get("final_tokens")
+        if orig_tok and final_tok:
+            saved_tok = orig_tok - final_tok
+            tok_str = f"{saved_tok / 1000:.1f}K" if saved_tok >= 1000 else str(saved_tok)
+            print(
+                f"  [{now}] Pruned {tok_str} tokens freed "
+                f"({before_mb:.1f}MB → {after_mb:.1f}MB)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [{now}] Pruned {before_mb:.1f}MB → {after_mb:.1f}MB "
+                f"(saved {result['saved_mb']:.1f}MB)",
+                file=sys.stderr,
+            )
 
         # 6. Kill Claude + auto-resume
         claude_pid = find_claude_pid()

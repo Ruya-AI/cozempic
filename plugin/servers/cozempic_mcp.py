@@ -143,16 +143,23 @@ def treat_session(prescription: str = "standard", execute: bool = False) -> str:
 
     lines = []
     lines.append(f"Prescription: {prescription}")
-    lines.append(f"Before: {original_bytes / 1024:.1f}KB ({len(messages)} messages)")
-    lines.append(f"After: {final_bytes / 1024:.1f}KB ({len(new_messages)} messages)")
-    lines.append(f"Saved: {saved_bytes / 1024:.1f}KB ({pct:.1f}%)")
 
     if pre_te.total and post_te.total:
+        from cozempic.tokens import DEFAULT_CONTEXT_WINDOW
         tok_saved = pre_te.total - post_te.total
         tok_pct = tok_saved / pre_te.total * 100 if pre_te.total > 0 else 0
+        after_pct = round(post_te.total / DEFAULT_CONTEXT_WINDOW * 100, 1)
         pre_str = f"{pre_te.total / 1000:.1f}K" if pre_te.total >= 1000 else str(pre_te.total)
         post_str = f"{post_te.total / 1000:.1f}K" if post_te.total >= 1000 else str(post_te.total)
-        lines.append(f"Tokens: {pre_str} -> {post_str} ({tok_saved / 1000:.1f}K freed, {tok_pct:.1f}%)")
+        tok_saved_str = f"{tok_saved / 1000:.1f}K" if tok_saved >= 1000 else str(tok_saved)
+        lines.append(f"Before: {pre_str} tokens ({original_bytes / 1024:.1f}KB, {len(messages)} messages)")
+        lines.append(f"After: {post_str} tokens ({final_bytes / 1024:.1f}KB, {len(new_messages)} messages)")
+        lines.append(f"Freed: {tok_saved_str} tokens ({tok_pct:.1f}%) — {saved_bytes / 1024:.1f}KB")
+        lines.append(f"Context: {after_pct}% of 200K window")
+    else:
+        lines.append(f"Before: {original_bytes / 1024:.1f}KB ({len(messages)} messages)")
+        lines.append(f"After: {final_bytes / 1024:.1f}KB ({len(new_messages)} messages)")
+        lines.append(f"Saved: {saved_bytes / 1024:.1f}KB ({pct:.1f}%)")
 
     lines.append("")
     lines.append("Strategy Results:")

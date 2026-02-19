@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "2x the effective context with smart weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction, monitor token usage with MCP tools",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "pluginRoot": "./plugin"
   },
   "plugins": [
@@ -14,7 +14,7 @@
       "name": "cozempic",
       "source": "./plugin",
       "description": "2x the effective context with smart weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction, monitor token usage with MCP tools",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "productivity",
       "tags": ["context", "pruning", "compaction", "agent-teams", "tokens", "optimization"]
     }

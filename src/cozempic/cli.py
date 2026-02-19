@@ -113,20 +113,25 @@ def print_strategy_result(sr: StrategyResult, total_bytes: int):
 
 def print_prescription_result(pr: PrescriptionResult):
     saved = pr.original_total_bytes - pr.final_total_bytes
-    pct = fmt_pct(saved, pr.original_total_bytes)
     removed = pr.original_message_count - pr.final_message_count
     total_replaced = sum(sr.messages_replaced for sr in pr.strategy_results)
 
     print(f"\n  Prescription: {pr.prescription_name}")
-    print(f"  Before: {fmt_bytes(pr.original_total_bytes)} ({pr.original_message_count} messages)")
-    print(f"  After:  {fmt_bytes(pr.final_total_bytes)} ({pr.final_message_count} messages)")
-    print(f"  Saved:  {fmt_bytes(saved)} ({pct}) — {removed} removed, {total_replaced} modified")
 
     if pr.original_tokens is not None and pr.final_tokens is not None:
         tok_saved = pr.original_tokens - pr.final_tokens
         tok_pct = f"{tok_saved / pr.original_tokens * 100:.1f}%" if pr.original_tokens > 0 else "0%"
-        method = f" ({pr.token_method})" if pr.token_method else ""
-        print(f"  Tokens: {fmt_tokens(pr.original_tokens)} -> {fmt_tokens(pr.final_tokens)} ({fmt_tokens(tok_saved)} freed, {tok_pct}){method}")
+        from .tokens import DEFAULT_CONTEXT_WINDOW
+        after_pct = round(pr.final_tokens / DEFAULT_CONTEXT_WINDOW * 100, 1)
+        print(f"  Before: {fmt_tokens(pr.original_tokens)} tokens ({fmt_bytes(pr.original_total_bytes)}, {pr.original_message_count} messages)")
+        print(f"  After:  {fmt_tokens(pr.final_tokens)} tokens ({fmt_bytes(pr.final_total_bytes)}, {pr.final_message_count} messages)")
+        print(f"  Freed:  {fmt_tokens(tok_saved)} tokens ({tok_pct}) — {fmt_bytes(saved)}, {removed} removed, {total_replaced} modified")
+        print(f"  Context: {fmt_context_bar(after_pct)}")
+    else:
+        byte_pct = fmt_pct(saved, pr.original_total_bytes)
+        print(f"  Before: {fmt_bytes(pr.original_total_bytes)} ({pr.original_message_count} messages)")
+        print(f"  After:  {fmt_bytes(pr.final_total_bytes)} ({pr.final_message_count} messages)")
+        print(f"  Saved:  {fmt_bytes(saved)} ({byte_pct}) — {removed} removed, {total_replaced} modified")
 
     print()
     print("  Strategy Results:")
@@ -628,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.7.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.7.1")
     sub = parser.add_subparsers(dest="command")
 
     session_help = "Session ID, UUID prefix, path, or 'current' for auto-detect"

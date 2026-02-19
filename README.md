@@ -537,10 +537,10 @@ This makes `$CLAUDE_SESSION_ID` available in all Bash commands during the sessio
 
 ```
   Prescription: aggressive
-  Before: 29.56MB (6602 messages)
-  After:  23.09MB (5073 messages)
-  Saved:  6.47MB (21.9%) — 1529 removed, 4038 modified
-  Tokens: 158.2K -> 121.5K (36.7K freed, 23.2%) (exact)
+  Before: 158.2K tokens (29.56MB, 6602 messages)
+  After:  121.5K tokens (23.09MB, 5073 messages)
+  Freed:  36.7K tokens (23.2%) — 6.47MB, 1529 removed, 4038 modified
+  Context: [============--------] 61%
 
   Strategy Results:
     progress-collapse              1.63MB saved  (5.5%)  (1525 removed)
