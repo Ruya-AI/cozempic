@@ -26,11 +26,31 @@ Cozempic prevents this with five layers of protection:
 
 ## Install
 
+### As a Claude Code Plugin (Recommended)
+
 ```bash
 pip install cozempic
 ```
 
-Or run directly:
+Then inside Claude Code:
+
+```
+/plugin marketplace add Ruya-AI/cozempic
+/plugin install cozempic
+```
+
+This gives you everything: MCP tools, skills (`/cozempic:diagnose`, `/cozempic:treat`, etc.), auto-wired hooks for guard daemon and team checkpointing. See [Plugin](#plugin-recommended) for details.
+
+### CLI Only
+
+```bash
+pip install cozempic
+cozempic init
+```
+
+`cozempic init` wires hooks and the `/cozempic` slash command into your project — same protection, just without the plugin framework. See [Setup](#setup) for what gets wired.
+
+### From Source
 
 ```bash
 git clone https://github.com/Ruya-AI/cozempic.git
@@ -40,7 +60,7 @@ pip install -e .
 
 ## Setup
 
-After installing, run `init` from your project directory:
+After installing via CLI, run `init` from your project directory:
 
 ```bash
 cd your-project/
