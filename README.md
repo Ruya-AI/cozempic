@@ -417,9 +417,74 @@ The `--fix` flag auto-applies fixes where safe (e.g., resetting the trust dialog
 
 ## Claude Code Integration
 
+### Plugin (Recommended)
+
+Cozempic ships as a Claude Code plugin with skills, hooks, and an MCP server. The plugin gives Claude direct access to cozempic tools — it can diagnose context pressure, run treatments, and monitor sessions without you running CLI commands.
+
+Install from the repo:
+
+```bash
+git clone https://github.com/Ruya-AI/cozempic.git
+claude --plugin-dir ./cozempic/plugin
+```
+
+The plugin registers:
+
+**Skills** — invoke from the chat or let Claude trigger automatically:
+
+| Skill | Description |
+|-------|-------------|
+| `/cozempic:diagnose` | Analyze session bloat, token count, context % |
+| `/cozempic:treat [rx]` | Prune session with gentle/standard/aggressive |
+| `/cozempic:reload [rx]` | Treat + auto-resume in new terminal |
+| `/cozempic:guard` | Start background sentinel daemon |
+| `/cozempic:doctor` | Run health checks |
+
+**MCP Tools** — Claude can call these directly as tool use:
+
+| Tool | What It Does |
+|------|-------------|
+| `diagnose_current` | Full session diagnosis with token counts and bloat breakdown |
+| `estimate_tokens` | Quick token count + context % (reads only the tail of the file) |
+| `list_sessions` | All sessions with sizes and token estimates |
+| `treat_session` | Dry-run or apply a prescription |
+| `list_strategies` | Available strategies and prescriptions |
+
+**Hooks** — auto-registered when the plugin is enabled:
+
+| Event | Action |
+|-------|--------|
+| `SessionStart` | Start guard daemon in background |
+| `PostToolUse` (Task/TaskCreate/TaskUpdate) | Checkpoint agent team state |
+| `PreCompact` | Emergency checkpoint before compaction |
+| `Stop` | Final checkpoint on session end |
+
+The MCP server requires `fastmcp` (installed automatically via `uv`). See [plugin/README.md](plugin/README.md) for details.
+
+### Standalone MCP Server
+
+To use the MCP tools without the full plugin, add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cozempic": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with", "fastmcp",
+        "--with", "cozempic",
+        "python",
+        "path/to/plugin/servers/cozempic_mcp.py"
+      ]
+    }
+  }
+}
+```
+
 ### Slash Command
 
-Cozempic ships with a `/cozempic` slash command that's automatically installed to `~/.claude/commands/` when you run `cozempic init`. It works in any Claude Code project.
+Cozempic also ships with a `/cozempic` slash command that's automatically installed to `~/.claude/commands/` when you run `cozempic init`. It works in any Claude Code project without the plugin.
 
 Type `/cozempic` in any session to get an interactive menu:
 
