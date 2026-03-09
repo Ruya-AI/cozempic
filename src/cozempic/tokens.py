@@ -18,6 +18,38 @@ from .types import Message
 DEFAULT_CONTEXT_WINDOW = 200_000
 SYSTEM_OVERHEAD_TOKENS = 21_000
 
+# Default token thresholds as fractions of context window
+DEFAULT_HARD_TOKEN_PCT = 0.75  # 75% — hard prune + reload
+DEFAULT_SOFT_TOKEN_PCT = 0.45  # 45% — gentle prune, no reload
+
+
+def get_system_overhead_tokens() -> int:
+    """Get system overhead token estimate, checking env var override.
+
+    Sessions with heavy rules files, MCP servers, and tool schemas can
+    have 30K-40K+ tokens of system overhead. The default (21K) is
+    conservative for lightweight sessions. Override with
+    COZEMPIC_SYSTEM_OVERHEAD_TOKENS env var or --system-overhead-tokens flag.
+    """
+    import os
+    val = os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS")
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return SYSTEM_OVERHEAD_TOKENS
+
+
+def default_token_thresholds(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tuple[int, int]:
+    """Compute default hard and soft token thresholds from context window.
+
+    Returns (hard_threshold, soft_threshold) in tokens.
+    """
+    hard = int(context_window * DEFAULT_HARD_TOKEN_PCT)
+    soft = int(context_window * DEFAULT_SOFT_TOKEN_PCT)
+    return hard, soft
+
 # Model → context window mapping
 # Note: claude-opus-4-6 has 200K by default. 1M is beta-only via API header.
 # Use COZEMPIC_CONTEXT_WINDOW env var or --context-window flag to override.
@@ -224,7 +256,7 @@ def estimate_tokens_heuristic(
         breakdown[mtype] = breakdown.get(mtype, 0) + msg_chars
         total_chars += msg_chars
 
-    total_tokens = int(total_chars / chars_per_token) + SYSTEM_OVERHEAD_TOKENS
+    total_tokens = int(total_chars / chars_per_token) + get_system_overhead_tokens()
 
     # Convert char breakdown to token breakdown
     token_breakdown = {
@@ -339,7 +371,8 @@ def calibrate_ratio(messages: list[Message]) -> float | None:
         return None
 
     exact_tokens = usage["total"]
-    if exact_tokens <= SYSTEM_OVERHEAD_TOKENS:
+    overhead = get_system_overhead_tokens()
+    if exact_tokens <= overhead:
         return None
 
     # Count content chars (same way as heuristic)
@@ -357,7 +390,7 @@ def calibrate_ratio(messages: list[Message]) -> float | None:
             if isinstance(content, str):
                 total_chars += len(content)
 
-    content_tokens = exact_tokens - SYSTEM_OVERHEAD_TOKENS
+    content_tokens = exact_tokens - overhead
     if content_tokens <= 0:
         return None
 

@@ -28,7 +28,7 @@ from .helpers import is_ssh_session, shell_quote
 from .registry import PRESCRIPTIONS
 from .session import find_claude_pid, find_current_session, find_sessions, load_messages, save_messages
 from .team import TeamState, extract_team_state, inject_team_recovery, write_team_checkpoint
-from .tokens import quick_token_estimate
+from .tokens import default_token_thresholds, quick_token_estimate
 
 
 def _resolve_session_by_id(session_id: str) -> dict | None:
@@ -211,6 +211,15 @@ def start_guard(
         sys.exit(1)
 
     session_path = sess["path"]
+
+    # Default to token-based thresholds when none specified
+    if threshold_tokens is None:
+        from .tokens import detect_context_window
+        messages_for_model = load_messages(session_path)
+        context_window = detect_context_window(messages_for_model)
+        threshold_tokens, soft_threshold_tokens = default_token_thresholds(context_window)
+    elif soft_threshold_tokens is None:
+        soft_threshold_tokens = int(threshold_tokens * 0.6)
 
     print(f"\n  COZEMPIC GUARD v3")
     print(f"  ═══════════════════════════════════════════════════════════════════")
