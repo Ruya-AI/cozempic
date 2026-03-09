@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import platform
+import signal
 import subprocess
 import sys
 import time
@@ -511,6 +512,13 @@ def _pid_file(cwd: str) -> Path:
     return Path("/tmp") / f"cozempic_guard_{slug}.pid"
 
 
+def _session_file(cwd: str) -> Path:
+    """Return the session file path that records which session the guard is watching."""
+    import hashlib
+    slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
+    return Path("/tmp") / f"cozempic_guard_{slug}_session.txt"
+
+
 def _is_guard_running(cwd: str) -> int | None:
     """Check if a guard daemon is already running for this project.
 
@@ -528,6 +536,7 @@ def _is_guard_running(cwd: str) -> int | None:
     except (ValueError, ProcessLookupError, PermissionError):
         # Stale PID file — clean it up
         pid_path.unlink(missing_ok=True)
+        _session_file(cwd).unlink(missing_ok=True)
         return None
 
 
@@ -555,13 +564,31 @@ def start_guard_daemon(
 
     existing_pid = _is_guard_running(cwd)
     if existing_pid:
-        return {
-            "started": False,
-            "pid": existing_pid,
-            "pid_file": str(_pid_file(cwd)),
-            "log_file": None,
-            "already_running": True,
-        }
+        # Check whether the existing guard is watching the same session
+        sess_path = _session_file(cwd)
+        old_session = sess_path.read_text().strip() if sess_path.exists() else None
+
+        if session_id is not None and old_session != session_id:
+            # Session changed — kill the old guard and start a new one
+            print(
+                f"  Replacing guard (session changed: "
+                f"{old_session[:8] if old_session else '?'} → {session_id[:8]})"
+            )
+            try:
+                os.kill(existing_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            time.sleep(1)
+            _pid_file(cwd).unlink(missing_ok=True)
+            sess_path.unlink(missing_ok=True)
+        else:
+            return {
+                "started": False,
+                "pid": existing_pid,
+                "pid_file": str(_pid_file(cwd)),
+                "log_file": None,
+                "already_running": True,
+            }
 
     import hashlib
     slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
@@ -606,8 +633,10 @@ def start_guard_daemon(
             cwd=cwd,
         )
 
-    # Write PID file
+    # Write PID file and session file
     pid_path.write_text(str(proc.pid))
+    if session_id is not None:
+        _session_file(cwd).write_text(session_id)
 
     return {
         "started": True,
