@@ -656,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version="%(prog)s 0.9.0")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
+    parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
 
     session_help = "Session ID, UUID prefix, path, or 'current' for auto-detect"
@@ -710,8 +711,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_guard.add_argument("--threshold", type=float, default=50.0, help="Hard threshold in MB — full prune + reload (default: 50)")
     p_guard.add_argument("--soft-threshold", type=float, default=None, help="Soft threshold in MB — gentle prune, no reload (default: 60%% of --threshold)")
     p_guard.add_argument("--interval", type=int, default=30, help="Check interval in seconds (default: 30)")
-    p_guard.add_argument("--threshold-tokens", type=int, default=None, help="Hard threshold in tokens (checked alongside --threshold)")
-    p_guard.add_argument("--soft-threshold-tokens", type=int, default=None, help="Soft threshold in tokens (checked alongside --soft-threshold)")
+    p_guard.add_argument("--threshold-tokens", type=int, default=None, help="Hard threshold in tokens (default: 75%% of context window)")
+    p_guard.add_argument("--soft-threshold-tokens", type=int, default=None, help="Soft threshold in tokens (default: 45%% of context window)")
     p_guard.add_argument("--no-reload", action="store_true", help="Prune without auto-reload at hard threshold")
     p_guard.add_argument("--no-reactive", action="store_true", help="Disable reactive overflow recovery (kqueue/polling watcher)")
     p_guard.add_argument("--daemon", action="store_true", help="Run in background (PID file prevents double-starts)")
@@ -736,9 +737,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # Set context window override if provided
+    # Set overrides via env vars (used by tokens.py)
     if args.context_window:
         os.environ["COZEMPIC_CONTEXT_WINDOW"] = str(args.context_window)
+    if args.system_overhead_tokens:
+        os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
 
     if not args.command:
         parser.print_help()
