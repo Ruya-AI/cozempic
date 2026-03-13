@@ -214,19 +214,28 @@ def start_guard(
 
     session_path = sess["path"]
 
+    # Detect context window from session data (used for display + overflow scaling)
+    from .tokens import detect_context_window, DEFAULT_HARD_TOKEN_PCT
+    messages_for_model = load_messages(session_path)
+    context_window = detect_context_window(messages_for_model)
+
     # Default to token-based thresholds when none specified
     if threshold_tokens is None:
-        from .tokens import detect_context_window
-        messages_for_model = load_messages(session_path)
-        context_window = detect_context_window(messages_for_model)
         threshold_tokens, soft_threshold_tokens = default_token_thresholds(context_window)
     elif soft_threshold_tokens is None:
         soft_threshold_tokens = int(threshold_tokens * 0.6)
+
+    # Format context window for display
+    if context_window >= 1_000_000:
+        ctx_str = f"{context_window / 1_000_000:.1f}M"
+    else:
+        ctx_str = f"{context_window / 1_000:.0f}K"
 
     print(f"\n  COZEMPIC GUARD v3")
     print(f"  ═══════════════════════════════════════════════════════════════════")
     print(f"  Session:     {session_path.name}")
     print(f"  Size:        {sess['size'] / 1024 / 1024:.1f}MB")
+    print(f"  Context:     {ctx_str}")
     print(f"  Soft:        {soft_threshold_mb}MB (gentle prune, no reload)")
     print(f"  Hard:        {threshold_mb}MB (full prune + {'reload' if auto_reload else 'no reload'})")
     if soft_threshold_tokens is not None:
@@ -248,9 +257,15 @@ def start_guard(
         from .overflow import CircuitBreaker, OverflowRecovery
         from .watcher import JsonlWatcher
 
+        # Scale danger thresholds based on context window size
+        danger_mb = round(threshold_mb * 1.8, 1)
+        danger_tokens = int(context_window * 0.90) if context_window else None
+
         breaker = CircuitBreaker(session_id=sess["session_id"])
         recovery = OverflowRecovery(
             session_path, sess["session_id"], cwd or os.getcwd(), breaker,
+            danger_threshold_mb=danger_mb,
+            danger_threshold_tokens=danger_tokens,
         )
         overflow_watcher = JsonlWatcher(
             str(session_path), on_growth=recovery.on_file_growth,

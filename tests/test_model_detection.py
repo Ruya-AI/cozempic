@@ -111,6 +111,49 @@ class TestDetectContextWindow(unittest.TestCase):
         with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "not_a_number"}):
             self.assertEqual(detect_context_window(messages), 200_000)
 
+    # ─── 1M context window tests ────────────────────────────────────────────
+
+    def test_opus_46_1m_exact_match(self):
+        """claude-opus-4-6[1m] should return 1M context."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_sonnet_46_1m_exact_match(self):
+        """claude-sonnet-4-6[1m] should return 1M context."""
+        messages = [make_assistant_with_model(0, "claude-sonnet-4-6[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_opus_45_1m_exact_match(self):
+        """claude-opus-4-5[1m] should return 1M context."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-5[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_haiku_45_1m_exact_match(self):
+        """claude-haiku-4-5[1m] should return 1M context."""
+        messages = [make_assistant_with_model(0, "claude-haiku-4-5[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_1m_versioned_prefix_match(self):
+        """claude-opus-4-6-20260301[1m] should match via prefix logic."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_1m_sonnet_versioned_prefix_match(self):
+        """claude-sonnet-4-6-20260301[1m] should match via prefix logic."""
+        messages = [make_assistant_with_model(0, "claude-sonnet-4-6-20260301[1m]")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_versioned_200k_not_confused_with_1m(self):
+        """claude-opus-4-6-20260301 (no [1m]) should stay 200K."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301")]
+        self.assertEqual(detect_context_window(messages), 200_000)
+
+    def test_env_override_beats_1m_model(self):
+        """Env var override should take priority over [1m] model detection."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]")]
+        with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "500000"}):
+            self.assertEqual(detect_context_window(messages), 500_000)
+
 
 class TestGetContextWindowOverride(unittest.TestCase):
 
@@ -142,6 +185,48 @@ class TestEstimateSessionTokensWithModel(unittest.TestCase):
         messages = [make_assistant_with_model(0, "claude-sonnet-4-6", input_tokens=100000)]
         te = estimate_session_tokens(messages)
         self.assertEqual(te.context_pct, 50.0)
+
+    def test_1m_model_context_pct(self):
+        """100K tokens on a 1M window should be 10%."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]", input_tokens=100000)]
+        te = estimate_session_tokens(messages)
+        self.assertEqual(te.model, "claude-opus-4-6[1m]")
+        self.assertEqual(te.context_window, 1_000_000)
+        self.assertEqual(te.context_pct, 10.0)
+
+    def test_1m_model_500k_tokens(self):
+        """500K tokens on a 1M window should be 50%."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]", input_tokens=500000)]
+        te = estimate_session_tokens(messages)
+        self.assertEqual(te.context_pct, 50.0)
+
+
+class TestDetectModel1M(unittest.TestCase):
+    """Test that detect_model() correctly returns [1m]-suffixed model IDs."""
+
+    def test_detects_1m_model(self):
+        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]")]
+        self.assertEqual(detect_model(messages), "claude-opus-4-6[1m]")
+
+    def test_detects_1m_versioned_model(self):
+        messages = [make_assistant_with_model(0, "claude-sonnet-4-6-20260301[1m]")]
+        self.assertEqual(detect_model(messages), "claude-sonnet-4-6-20260301[1m]")
+
+
+class TestDefaultTokenThresholds1M(unittest.TestCase):
+    """Test that token thresholds scale correctly with 1M context."""
+
+    def test_200k_thresholds(self):
+        from cozempic.tokens import default_token_thresholds
+        hard, soft = default_token_thresholds(200_000)
+        self.assertEqual(hard, 150_000)   # 75% of 200K
+        self.assertEqual(soft, 90_000)    # 45% of 200K
+
+    def test_1m_thresholds(self):
+        from cozempic.tokens import default_token_thresholds
+        hard, soft = default_token_thresholds(1_000_000)
+        self.assertEqual(hard, 750_000)   # 75% of 1M
+        self.assertEqual(soft, 450_000)   # 45% of 1M
 
 
 if __name__ == "__main__":

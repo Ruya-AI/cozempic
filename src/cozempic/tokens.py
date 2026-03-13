@@ -51,9 +51,17 @@ def default_token_thresholds(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tu
     return hard, soft
 
 # Model → context window mapping
-# Note: claude-opus-4-6 has 200K by default. 1M is beta-only via API header.
-# Use COZEMPIC_CONTEXT_WINDOW env var or --context-window flag to override.
+# Claude Code appends "[1m]" to model IDs when using extended 1M context.
+# Standard models use 200K. Use COZEMPIC_CONTEXT_WINDOW env var or
+# --context-window flag to override.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Extended 1M context variants (Claude Code appends [1m] suffix)
+    "claude-opus-4-6[1m]": 1_000_000,
+    "claude-opus-4-5[1m]": 1_000_000,
+    "claude-sonnet-4-6[1m]": 1_000_000,
+    "claude-sonnet-4-5[1m]": 1_000_000,
+    "claude-haiku-4-5[1m]": 1_000_000,
+    # Standard 200K context
     "claude-opus-4-6": 200_000,
     "claude-opus-4-5": 200_000,
     "claude-sonnet-4-6": 200_000,
@@ -107,8 +115,14 @@ def detect_context_window(messages: list[Message]) -> int:
 
     Priority:
     1. COZEMPIC_CONTEXT_WINDOW env var (user override)
-    2. Model detection from session data
+    2. Model detection from session data (exact match, then prefix match)
     3. DEFAULT_CONTEXT_WINDOW (200K)
+
+    Handles model ID variants:
+    - "claude-opus-4-6[1m]" → 1M (exact match)
+    - "claude-opus-4-6-20260301[1m]" → 1M (prefix match with bracket-aware logic)
+    - "claude-opus-4-6" → 200K (exact match)
+    - "claude-opus-4-6-20260301" → 200K (prefix match)
     """
     override = get_context_window_override()
     if override:
@@ -119,10 +133,33 @@ def detect_context_window(messages: list[Message]) -> int:
         # Exact match first
         if model in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[model]
-        # Prefix match for versioned model IDs (e.g. claude-opus-4-6-20260101)
+
+        # Prefix match for versioned model IDs.
+        # For bracket-suffixed models (e.g. "claude-opus-4-6-20260301[1m]"),
+        # check [1m]-suffixed keys first (they appear first in the dict),
+        # then standard keys. The prefix "claude-opus-4-6[1m]" won't match
+        # "claude-opus-4-6-20260301[1m]" via startswith, so we also try
+        # stripping the bracket suffix and matching the base, then re-applying.
+        bracket_suffix = ""
+        base_model = model
+        bracket_pos = model.find("[")
+        if bracket_pos != -1:
+            bracket_suffix = model[bracket_pos:]  # e.g. "[1m]"
+            base_model = model[:bracket_pos]      # e.g. "claude-opus-4-6-20260301"
+
+        # Try prefix match: base_model starts with a known key's base
         for prefix, window in MODEL_CONTEXT_WINDOWS.items():
-            if model.startswith(prefix):
+            prefix_base = prefix.split("[")[0] if "[" in prefix else prefix
+            prefix_bracket = prefix[len(prefix_base):] if "[" in prefix else ""
+            if base_model.startswith(prefix_base) and bracket_suffix == prefix_bracket:
                 return window
+
+        # Fallback: try without bracket suffix (model may not have one)
+        if not bracket_suffix:
+            for prefix, window in MODEL_CONTEXT_WINDOWS.items():
+                if "[" not in prefix and model.startswith(prefix):
+                    return window
+
     return DEFAULT_CONTEXT_WINDOW
 
 

@@ -25,7 +25,15 @@ COZEMPIC_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "SESSION_ID=$(cat | python3 -c \"import sys,json; print(json.load(sys.stdin).get('session_id',''))\" 2>/dev/null); cozempic guard --daemon ${SESSION_ID:+--session $SESSION_ID} 2>/dev/null || true",
+                    "command": (
+                        "INPUT=$(cat); "
+                        "SESSION_ID=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('session_id',''))\" 2>/dev/null); "
+                        "CTX_WIN=$(echo \"$INPUT\" | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('context_window',{}).get('context_window_size',''))\" 2>/dev/null); "
+                        "cozempic guard --daemon "
+                        "${SESSION_ID:+--session $SESSION_ID} "
+                        "${CTX_WIN:+--context-window $CTX_WIN} "
+                        "2>/dev/null || true"
+                    ),
                 }
             ],
         },
