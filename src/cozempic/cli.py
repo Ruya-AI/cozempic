@@ -625,6 +625,15 @@ def cmd_init(args):
     print()
 
 
+def cmd_completions(args):
+    """Generate shell completion scripts."""
+    from .completion import bash_completion, zsh_completion
+    if args.shell == "bash":
+        print(bash_completion())
+    elif args.shell == "zsh":
+        print(zsh_completion())
+
+
 def cmd_formulary(args):
     print("\n  COZEMPIC FORMULARY")
     print("  ═══════════════════════════════════════════════════════════════════")
@@ -734,12 +743,16 @@ def build_parser() -> argparse.ArgumentParser:
     # formulary
     sub.add_parser("formulary", help="Show all strategies & prescriptions")
 
+    # completions
+    p_comp = sub.add_parser("completions", help="Generate shell completion script")
+    p_comp.add_argument("shell", choices=["bash", "zsh"], help="Shell type")
+
     return parser
 
 
 _SUBCOMMANDS = {
     "list", "current", "diagnose", "treat", "strategy", "reload",
-    "checkpoint", "guard", "init", "doctor", "formulary",
+    "checkpoint", "guard", "init", "doctor", "formulary", "completions",
 }
 
 
@@ -809,6 +822,7 @@ def main():
         "init": cmd_init,
         "doctor": cmd_doctor,
         "formulary": cmd_formulary,
+        "completions": cmd_completions,
     }
 
     commands[args.command](args)
