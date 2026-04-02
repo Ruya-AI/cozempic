@@ -240,7 +240,8 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
         cache_read = usage.get("cache_read_input_tokens", 0)
 
         # The cumulative context size is the sum of all input components
-        total = input_tok + cache_create + cache_read
+        # plus the output tokens from the last turn.
+        total = input_tok + cache_create + cache_read + output_tok
 
         return {
             "input_tokens": input_tok,
@@ -424,7 +425,8 @@ def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDO
             input_tok = usage.get("input_tokens", 0)
             cache_create = usage.get("cache_creation_input_tokens", 0)
             cache_read = usage.get("cache_read_input_tokens", 0)
-            return input_tok + cache_create + cache_read
+            output_tok = usage.get("output_tokens", 0)
+            return input_tok + cache_create + cache_read + output_tok
 
     except (OSError, UnicodeDecodeError):
         pass
