@@ -209,8 +209,8 @@ def _save_settings(path: Path, settings: dict) -> None:
             if orig_mode is not None and hasattr(_os, "fchmod"):
                 try:
                     _os.fchmod(f.fileno(), orig_mode)
-                except OSError:
-                    pass
+                except (OSError, AttributeError):
+                    pass  # fchmod unsupported (rare — including Windows, where the attr is absent)
         _os.replace(tmp_path, path)
     except Exception:
         try:

@@ -401,6 +401,34 @@ class TestAtomicWrite(unittest.TestCase):
             actual = stat.S_IMODE(os.stat(path).st_mode)
             self.assertEqual(actual, 0o644, f"permissions changed to {oct(actual)}")
 
+    def test_save_settings_on_missing_fchmod(self):
+        """Windows lacks os.fchmod; AttributeError must not abort the write.
+
+        Regression for: https://github.com/Ruya-AI/cozempic/issues/80
+        """
+        from cozempic.init import _save_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            (Path(tmp) / ".claude").mkdir()
+            # Force AttributeError on fchmod (mimics Windows)
+            with mock.patch(
+                "os.fchmod", side_effect=AttributeError("module 'os' has no attribute 'fchmod'")
+            ):
+                _save_settings(path, {"hooks": {"SessionStart": []}})
+            loaded = json.loads(path.read_text())
+            self.assertEqual(loaded, {"hooks": {"SessionStart": []}})
+
+    def test_save_settings_on_fchmod_oserror(self):
+        """fchmod may raise OSError on some filesystems; it must be swallowed."""
+        from cozempic.init import _save_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            (Path(tmp) / ".claude").mkdir()
+            with mock.patch("os.fchmod", side_effect=OSError(95, "Operation not supported")):
+                _save_settings(path, {"hooks": {"SessionStart": []}})
+            loaded = json.loads(path.read_text())
+            self.assertEqual(loaded, {"hooks": {"SessionStart": []}})
+
 
 class TestWireHooksGracefulParseFailure(unittest.TestCase):
     def test_malformed_settings_returns_error_not_crash(self):
