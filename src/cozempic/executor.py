@@ -223,6 +223,8 @@ def run_prescription(
     messages: list[Message],
     strategy_names: list[str],
     config: dict,
+    *,
+    enable_floor: bool = True,
 ) -> tuple[list[Message], list[StrategyResult]]:
     """Run strategies sequentially, each on the result of the previous.
 
@@ -232,6 +234,10 @@ def run_prescription(
       1. Run each strategy in order.
       2. (P0-C) ``enforce_floor`` re-adds must-preserve messages dropped by
          strategies — root, last-K turns, conversation survival cap.
+         Controlled by the explicit ``enable_floor`` keyword arg; default
+         True. The keyword is the ONLY production switch — review finding
+         H-2 removed the prior ``_disable_floor_for_test`` config-dict
+         escape hatch which was reachable from any caller.
       3. ``fix_orphaned_tool_results`` removes orphaned tool_result blocks.
          Runs AFTER the floor so floor re-adds (which can resurrect a
          ``user`` carrying a ``tool_result`` whose paired ``tool_use`` was
@@ -241,9 +247,6 @@ def run_prescription(
       4. (P0-B) ``validate_post_prune`` runs C1–C6 structural checks. If
          any fails, propagate ``PruneValidationError`` to the caller; the
          caller (guard / cli) is responsible for skipping the save.
-
-    The internal flag ``_disable_floor_for_test`` skips step 2 for the test
-    that verifies the validation gate alone catches a missing root.
     """
     from .safety import enforce_floor, validate_post_prune
     from .config import load_config
@@ -268,7 +271,7 @@ def run_prescription(
 
     # Step 2: floor preservation — re-add must-preserve messages.
     cfg = load_config()
-    if not config.get("_disable_floor_for_test"):
+    if enable_floor:
         current = enforce_floor(messages, current, cfg=cfg.floor)
 
     # Step 3: orphaned tool_result cleanup. Runs AFTER floor so a re-added

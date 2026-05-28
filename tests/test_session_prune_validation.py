@@ -564,10 +564,63 @@ class TestExecutorWiresValidationAndFloor(unittest.TestCase):
                 run_prescription(
                     before,
                     ["test-drop-all-users"],
-                    {"_disable_floor_for_test": True},
+                    {},
+                    enable_floor=False,
                 )
         finally:
             STRATEGIES.pop("test-drop-all-users", None)
+
+    def test_run_prescription_ignores_config_floor_bypass_flag(self):
+        """H-2: any caller setting `_disable_floor_for_test=True` in the
+        production config dict MUST NOT bypass the floor. The bypass is
+        only reachable via the explicit `enable_floor=False` kwarg now.
+        """
+        from cozempic.executor import run_prescription
+        from cozempic.registry import strategy, STRATEGIES
+        from cozempic.types import PruneAction, StrategyResult
+
+        @strategy("test-drop-most-users-h2", "Test only", "gentle", "n/a")
+        def _drop_most(messages, config):  # noqa: ANN001
+            actions = []
+            users = [(idx, m, s) for idx, m, s in messages
+                     if m.get("type") == "user"]
+            for idx, m, size in users[:-1]:
+                actions.append(PruneAction(
+                    line_index=idx, action="remove", reason="t",
+                    original_bytes=size, pruned_bytes=0,
+                ))
+            return StrategyResult(
+                strategy_name="test-drop-most-users-h2", actions=actions,
+                original_bytes=sum(b for _, _, b in messages),
+                pruned_bytes=sum(a.original_bytes for a in actions),
+                messages_affected=len(actions),
+                messages_removed=len(actions),
+                messages_replaced=0,
+                summary="",
+            )
+
+        try:
+            before = _build_clean_session(n_turns=50, include_metadata=False)
+            # Pass the stale flag in a production-style config dict; default
+            # enable_floor=True must override it.
+            after, _ = run_prescription(
+                before,
+                ["test-drop-most-users-h2"],
+                {"_disable_floor_for_test": True},
+            )
+            # Floor MUST have run; users must satisfy the 50% floor.
+            n_users_before = sum(
+                1 for _, m, _ in before if m.get("type") == "user"
+            )
+            n_users_after = sum(
+                1 for _, m, _ in after if m.get("type") == "user"
+            )
+            self.assertGreaterEqual(
+                n_users_after / max(n_users_before, 1), 0.50,
+                f"floor was bypassed by config flag: {n_users_after}/{n_users_before}",
+            )
+        finally:
+            STRATEGIES.pop("test-drop-most-users-h2", None)
 
     def test_run_prescription_floor_re_adds_root_when_strategy_drops_it(self):
         """With the floor enabled (default), the executor re-adds the root
