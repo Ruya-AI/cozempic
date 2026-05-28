@@ -237,6 +237,42 @@ After `cozempic init`, these hooks are wired automatically:
 - **Sibling tool_use protection** — tool_use blocks are kept when their tool_result is kept
 - **Team messages protected** — Task, TaskCreate, SendMessage never pruned
 - **Strategies compose sequentially** — each runs on the output of the previous
+- **Active-session idle guard** — `cozempic treat`/`reload` and the guard daemon refuse to prune sessions modified within the last 24h. Override with `--force` (CLI) or set `COZEMPIC_MIN_IDLE_HOURS=0` (env). Overflow recovery (90% emergency) bypasses the guard automatically.
+- **Floor preservation** — each prune is post-processed to guarantee the root message, the last 50 user + 50 assistant turns, and at least 50% of conversation messages survive. The last `ai-title` / `last-prompt` / `permission-mode` singletons are tagged and protected before strategies run.
+- **Post-prune structural validation** — six checks (C1–C6) run before `save_messages` writes: parent chain resolves, root preserved, ≥1 user + ≥1 assistant survive, last compact_boundary preserved, last permission-mode preserved, last last-prompt preserved. A failure aborts the save and exits with code 5.
+
+### Tunables
+
+Configuration sources (precedence: env > `~/.cozempic/config.json` > default):
+
+| Knob | Default | Range | Override |
+|------|---------|-------|----------|
+| `min_idle_hours` | `24.0` | `[0.0, 168.0]` | `COZEMPIC_MIN_IDLE_HOURS` |
+| `floor.max_user_assistant_drop_pct` | `0.50` | `(0.0, 1.0)` | `COZEMPIC_FLOOR_MAX_DROP_PCT` |
+| `floor.preserve_last_k_turns` | `50` | `[1, 1000]` | `COZEMPIC_FLOOR_PRESERVE_LAST_K` |
+
+Example `~/.cozempic/config.json`:
+
+```json
+{
+  "min_idle_hours": 12.0,
+  "floor": {
+    "max_user_assistant_drop_pct": 0.40,
+    "preserve_last_k_turns": 100
+  }
+}
+```
+
+### Exit codes (`treat`, `reload`)
+
+| Code | Reason |
+|------|--------|
+| 0 | Success |
+| 1 | Generic error (unknown prescription, missing session) |
+| 2 | Another prune cycle holds the lock — retry shortly |
+| 3 | Session changed mid-prune (Claude appended new lines) |
+| 4 | Active-session guard refused — session modified <24h ago; pass `--force` to override |
+| 5 | Post-prune validation failed — pruned file would not replay cleanly |
 
 ## Example Output
 
