@@ -664,7 +664,12 @@ def start_guard(
                 if result.get("team_name"):
                     print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
 
-                if result.get("saved_mb", 0) <= 0 or result.get("futile_reload_skipped"):
+                if result.get("active_session_refused"):
+                    # P0-A: refusal upfront is not "an empty hard prune" — the
+                    # cycle never ran. Do not advance the K-counter; the daemon
+                    # stays alive and retries on the next interval.
+                    pass
+                elif result.get("saved_mb", 0) <= 0 or result.get("futile_reload_skipped"):
                     consecutive_empty_hard_prunes += 1
 
                     # GAP-D: emit one-shot diagnostic when reload was skipped
@@ -884,6 +889,7 @@ def guard_prune_cycle(
     cwd: str = "",
     session_id: str | None = None,
     claude_pid: int | None = None,
+    force: bool = False,
 ) -> dict:
     """Execute a single guard prune cycle.
 
@@ -892,9 +898,18 @@ def guard_prune_cycle(
     Claude appends while pruning is in progress are preserved in the output
     (or the cycle is deferred on conflict).
 
+    ``force=True`` overrides the active-session idle guard — used by the
+    reactive overflow recovery path (the 90% emergency case where pruning an
+    active session IS the intent).
+
     Returns dict with: saved_mb, team_name, team_messages, reloading, checkpoint_path
     """
     from .tokens import estimate_session_tokens, calibrate_ratio
+    from .safety import (
+        ActiveSessionError,
+        assert_session_idle_or_force,
+        resolve_min_idle_hours,
+    )
 
     _no_change = {
         "saved_mb": 0.0,
@@ -906,6 +921,25 @@ def guard_prune_cycle(
         "backup_path": None,
         "reloading": False,
     }
+
+    # P0-A: active-session idle guard. Runs BEFORE _PruneLock acquisition so a
+    # refused cycle does not block other consumers of the lock. K-counter
+    # does NOT advance on refusal (the active_session_refused key tells the
+    # daemon's outer loop to skip the K increment).
+    try:
+        assert_session_idle_or_force(
+            session_path,
+            min_idle_hours=resolve_min_idle_hours(),
+            force=force,
+        )
+    except ActiveSessionError as exc:
+        print(
+            f"  [{_now()}] Prune refused — session active "
+            f"(mtime {exc.idle_minutes:.1f} min ago, threshold "
+            f"{exc.threshold_hours}h). Use --force to override.",
+            file=sys.stderr,
+        )
+        return {**_no_change, "active_session_refused": True}
 
     try:
         with _PruneLock(session_path):

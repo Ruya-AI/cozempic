@@ -210,13 +210,17 @@ class OverflowRecovery:
             file=sys.stderr,
         )
 
-        # 3. Run the prune cycle (team-protect, backup, checkpoint)
+        # 3. Run the prune cycle (team-protect, backup, checkpoint).
+        # P0-A: overflow recovery IS the emergency / active-session case — it
+        # fires at the 90% reactive threshold. Pass force=True so the
+        # active-session idle guard does not refuse the prune.
         result = guard_prune_cycle(
             session_path=self.session_path,
             rx_name=rx,
             auto_reload=False,  # We handle reload ourselves
             cwd=self.cwd,
             session_id=self.session_id,
+            force=True,
         )
 
         after_mb = self.session_path.stat().st_size / 1024 / 1024

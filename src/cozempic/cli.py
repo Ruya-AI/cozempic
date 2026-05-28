@@ -318,6 +318,25 @@ def cmd_treat(args):
         print("  Note: exact usage data was stripped — post-treatment token count is estimated.")
 
     if args.execute:
+        # P0-A: active-session idle guard. Refuses to prune a session whose
+        # mtime is within the configured threshold (default 24h) unless
+        # --force is passed. Runs BEFORE the background-task check so the
+        # operator sees the safety guard message first.
+        from .safety import (
+            ActiveSessionError,
+            assert_session_idle_or_force,
+            resolve_min_idle_hours,
+        )
+        try:
+            assert_session_idle_or_force(
+                path,
+                min_idle_hours=resolve_min_idle_hours(),
+                force=getattr(args, "force", False),
+            )
+        except ActiveSessionError as exc:
+            print(f"  {exc}", file=sys.stderr)
+            sys.exit(4)
+
         # Check for active background tasks before writing
         from .helpers import find_active_background_tasks
         active_tasks = find_active_background_tasks(messages)
@@ -553,6 +572,23 @@ def cmd_reload(args):
 
         # Step 1: Apply treatment
         path = sess["path"]
+
+        # P0-A: active-session idle guard. Refuses to prune a session whose
+        # mtime is within the configured threshold unless --force is passed.
+        from .safety import (
+            ActiveSessionError,
+            assert_session_idle_or_force,
+            resolve_min_idle_hours,
+        )
+        try:
+            assert_session_idle_or_force(
+                path,
+                min_idle_hours=resolve_min_idle_hours(),
+                force=getattr(args, "force", False),
+            )
+        except ActiveSessionError as exc:
+            print(f"  {exc}", file=sys.stderr)
+            sys.exit(4)
         # Snapshot BEFORE load so append-conflict detection works (Claude may write
         # mid-prune; we need the file state at this exact instant for diff classification).
         snapshot = snapshot_session(path)
@@ -1187,6 +1223,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_treat.add_argument("--execute", action="store_true", help="Apply changes (default is dry-run)")
     p_treat.add_argument("--project", help="Filter by project name")
     p_treat.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"], help="Thinking block mode")
+    p_treat.add_argument(
+        "--force", action="store_true",
+        help="Override the active-session idle guard (refuses to prune sessions "
+             "modified within COZEMPIC_MIN_IDLE_HOURS hours, default 24).",
+    )
 
     # strategy
     p_strat = sub.add_parser("strategy", help="Run single strategy")
@@ -1209,6 +1250,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="If another reload is in flight, wait up to SECS for it to finish "
              "(default: 30 if --wait passed with no value). Without --wait, "
              "we fail fast with exit code 2.",
+    )
+    p_reload.add_argument(
+        "--force", action="store_true",
+        help="Override the active-session idle guard (refuses to prune sessions "
+             "modified within COZEMPIC_MIN_IDLE_HOURS hours, default 24).",
     )
 
     # checkpoint
