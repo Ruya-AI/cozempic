@@ -381,7 +381,11 @@ def cmd_treat(args):
         # Prevents corruption when the guard daemon is mid-prune on the same session.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages,
+                    create_backup=True, snapshot=snapshot,
+                    messages_before_prune=messages,
+                )
         except PruneLockError:
             print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
             sys.exit(2)
@@ -455,7 +459,11 @@ def cmd_strategy(args):
         # detection. Same protection as cmd_treat.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages,
+                    create_backup=True, snapshot=snapshot,
+                    messages_before_prune=messages,
+                )
         except PruneLockError:
             print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
             sys.exit(2)
@@ -664,7 +672,11 @@ def cmd_reload(args):
         # cmd_reload raced guard_prune_cycle's auto-fire at the 55% threshold.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages,
+                    create_backup=True, snapshot=snapshot,
+                    messages_before_prune=messages,
+                )
         except PruneLockError:
             print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
             sys.exit(2)

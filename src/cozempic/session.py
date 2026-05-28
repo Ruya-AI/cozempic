@@ -658,6 +658,7 @@ def save_messages(
     messages: list[Message],
     create_backup: bool = True,
     snapshot: _FileSnapshot | None = None,
+    messages_before_prune: list[Message] | None = None,
 ) -> Path | None:
     """Save messages back to JSONL, optionally creating a timestamped backup.
 
@@ -671,6 +672,15 @@ def save_messages(
     - "conflict"   — prefix was mutated (rewrite or truncation); raises
                      PruneConflictError.  The backup is NOT created and the
                      original file is left untouched.
+
+    REVIEW-max D.12: ``messages_before_prune`` is the pre-prune message list
+    (what the pruner loaded before its strategies ran). When provided AND the
+    file state is ``"appended"``, the post-append re-validation uses the
+    REAL pre-prune set as the "before" for ``validate_post_prune`` — so the
+    full C1–C7 suite fires against the merged ``(pruned + delta)`` set.
+    Without it (``None``), the re-validation falls back to a weak C1-only
+    check using ``merged_before == merged_after``. The default preserves
+    backward compatibility for any third-party caller of ``save_messages``.
 
     Returns the backup path if created, else None.
     """
@@ -747,13 +757,15 @@ def save_messages(
                              len(raw.encode("utf-8"))),
                         )
                     merged_after = list(messages) + delta_messages
-                    # The "before" set is the pre-prune original file. We
-                    # don't have it here, so reconstruct an upper bound by
-                    # treating the merged-after as both: validate_post_prune
-                    # is conditional on the type/uuid existing in msgs_before,
-                    # so we synthesize a permissive "before" by adding the
-                    # delta entries to the in-memory messages.
-                    merged_before = list(messages) + delta_messages
+                    # REVIEW-max D.12: when the caller threaded the pre-prune
+                    # message list through, use it as the real "before" so
+                    # the full C1–C7 suite fires against the merged set.
+                    # Without it, fall back to the H-3 weak check (msgs_before
+                    # == msgs_after) which only catches C1 dangling-parent.
+                    if messages_before_prune is not None:
+                        merged_before = list(messages_before_prune) + delta_messages
+                    else:
+                        merged_before = list(messages) + delta_messages
                     try:
                         validate_post_prune(merged_before, merged_after)
                     except PruneValidationError:

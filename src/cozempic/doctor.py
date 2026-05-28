@@ -740,7 +740,11 @@ def fix_orphaned_tool_results() -> str:
         if orphans > 0:
             try:
                 with _PruneLock(path):
-                    save_messages(path, fixed_messages, create_backup=True, snapshot=snapshot)
+                    save_messages(
+                        path, fixed_messages,
+                        create_backup=True, snapshot=snapshot,
+                        messages_before_prune=messages,
+                    )
                 total_fixed += orphans
                 sessions_fixed += 1
             except PruneLockError:

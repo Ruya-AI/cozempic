@@ -1039,7 +1039,11 @@ def guard_prune_cycle(
                 if not team_state.is_empty():
                     project_dir = session_path.parent
                     checkpoint_path = write_team_checkpoint(team_state, project_dir)
-                backup = save_messages(session_path, pruned_messages, create_backup=True, snapshot=snap)
+                backup = save_messages(
+                    session_path, pruned_messages,
+                    create_backup=True, snapshot=snap,
+                    messages_before_prune=messages,
+                )
                 if backup:
                     cleanup_old_backups(session_path, keep=3)
                 return {
@@ -1065,7 +1069,11 @@ def guard_prune_cycle(
                 checkpoint_path = write_team_checkpoint(team_state, project_dir)
 
             # Save pruned session — snapshot enables append-aware atomic write
-            backup = save_messages(session_path, pruned_messages, create_backup=True, snapshot=snap)
+            backup = save_messages(
+                    session_path, pruned_messages,
+                    create_backup=True, snapshot=snap,
+                    messages_before_prune=messages,
+                )
 
             # Cap backup retention at 3 files to prevent disk fill (#19)
             if backup:
