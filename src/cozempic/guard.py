@@ -959,10 +959,23 @@ def guard_prune_cycle(
             pre_te = estimate_session_tokens(messages)
             pre_ratio = calibrate_ratio(messages)
 
-            # Prune with team protection
-            pruned_messages, results, team_state = prune_with_team_protect(
-                messages, rx_name=rx_name, config=config,
-            )
+            # Prune with team protection. P0-B: post-prune validation may
+            # raise PruneValidationError — catch it here, log the failure
+            # reason + evidence, and return _no_change without writing. The
+            # K-counter does NOT advance (the prune was aborted before save,
+            # not because it failed to save bytes).
+            from .safety import PruneValidationError
+            try:
+                pruned_messages, results, team_state = prune_with_team_protect(
+                    messages, rx_name=rx_name, config=config,
+                )
+            except PruneValidationError as exc:
+                print(
+                    f"  [{_now()}] Prune aborted — validation failed: "
+                    f"{exc.reason} (evidence={exc.evidence})",
+                    file=sys.stderr,
+                )
+                return {**_no_change, "validation_failed": True}
 
             final_bytes = sum(b for _, _, b in pruned_messages)
             saved_bytes = original_bytes - final_bytes

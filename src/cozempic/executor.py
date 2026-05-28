@@ -188,9 +188,22 @@ def run_prescription(
     """Run strategies sequentially, each on the result of the previous.
 
     This ensures replacements compose correctly when multiple strategies
-    modify the same message. After all strategies run, a validation pass
-    removes any orphaned tool_result blocks to prevent API 400 errors.
+    modify the same message. After all strategies run, the pipeline is:
+
+      1. Run each strategy in order.
+      2. ``fix_orphaned_tool_results`` removes orphaned tool_result blocks.
+      3. (P0-C) ``enforce_floor`` re-adds must-preserve messages dropped by
+         strategies — root, last-K turns, conversation survival cap.
+      4. (P0-B) ``validate_post_prune`` runs C1–C6 structural checks. If
+         any fails, propagate ``PruneValidationError`` to the caller; the
+         caller (guard / cli) is responsible for skipping the save.
+
+    The internal flag ``_disable_floor_for_test`` skips step 3 for the test
+    that verifies the validation gate alone catches a missing root.
     """
+    from .safety import enforce_floor, validate_post_prune
+    from .config import load_config
+
     current = messages
     results: list[StrategyResult] = []
     for sname in strategy_names:
@@ -203,7 +216,7 @@ def run_prescription(
             current = execute_actions(current, sr.actions)
             del old_current  # Free previous list immediately
 
-    # Post-treatment validation: fix orphaned tool_results
+    # Step 2: orphaned tool_result cleanup.
     current, orphans = fix_orphaned_tool_results(current)
     if orphans > 0:
         results.append(StrategyResult(
@@ -216,5 +229,13 @@ def run_prescription(
             messages_replaced=orphans,
             summary=f"Fixed {orphans} orphaned tool_result block(s)",
         ))
+
+    # Step 3: floor preservation — re-add must-preserve messages.
+    cfg = load_config()
+    if not config.get("_disable_floor_for_test"):
+        current = enforce_floor(messages, current, cfg=cfg.floor)
+
+    # Step 4: structural validation. Raises PruneValidationError on failure.
+    validate_post_prune(messages, current)
 
     return current, results

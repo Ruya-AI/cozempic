@@ -290,7 +290,16 @@ def cmd_treat(args):
     pre_te = estimate_session_tokens(messages)
     pre_ratio = calibrate_ratio(messages)
 
-    new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+    # P0-B: post-prune validation may raise PruneValidationError on a prune
+    # that would not replay cleanly. Catch + exit 5 — distinct from existing
+    # 2 (lock), 3 (conflict), 4 (active-session refusal).
+    from .safety import PruneValidationError
+    try:
+        new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+    except PruneValidationError as exc:
+        print(f"  {exc}", file=sys.stderr)
+        print(f"  Evidence: {exc.evidence}", file=sys.stderr)
+        sys.exit(5)
     final_bytes = sum(b for _, _, b in new_messages)
     final_count = len(new_messages)
 
@@ -605,7 +614,14 @@ def cmd_reload(args):
         pre_te = estimate_session_tokens(messages)
         pre_ratio = calibrate_ratio(messages)
 
-        new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+        # P0-B: post-prune validation. Catch + exit 5.
+        from .safety import PruneValidationError
+        try:
+            new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+        except PruneValidationError as exc:
+            print(f"  {exc}", file=sys.stderr)
+            print(f"  Evidence: {exc.evidence}", file=sys.stderr)
+            sys.exit(5)
         final_bytes = sum(b for _, _, b in new_messages)
         final_count = len(new_messages)
 

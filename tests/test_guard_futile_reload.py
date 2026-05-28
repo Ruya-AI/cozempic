@@ -32,11 +32,19 @@ if str(SRC) not in sys.path:
 # ---------------------------------------------------------------------------
 
 def _make_session_file(tmpdir: Path, size_bytes: int = 200_000) -> Path:
-    """Create a fake JSONL session file of approximately size_bytes."""
+    """Create a fake JSONL session file of approximately size_bytes.
+
+    Sets the file mtime to >24h ago so the active-session idle guard
+    (introduced 2026-05-28) does not refuse the prune. Tests that want to
+    exercise the active-session guard explicitly set their own mtime.
+    """
+    import time, os
     path = tmpdir / "fake_session.jsonl"
     line = '{"type":"user","message":{"content":"' + "x" * 100 + '"}}\n'
     lines_needed = max(1, size_bytes // len(line.encode()))
     path.write_text(line * lines_needed)
+    aged = time.time() - 25 * 3600
+    os.utime(path, (aged, aged))
     return path
 
 

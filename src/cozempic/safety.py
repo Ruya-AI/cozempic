@@ -132,25 +132,220 @@ class PruneValidationError(Exception):
         super().__init__(f"Pruned session would not replay cleanly: {reason}")
 
 
+def _last_of_type(messages: list[tuple[int, dict, int]], msg_type: str) -> dict | None:
+    """Return the last message dict whose ``type`` equals ``msg_type``."""
+    last: dict | None = None
+    for _, msg, _ in messages:
+        if msg.get("type") == msg_type:
+            last = msg
+    return last
+
+
+def _last_compact_boundary(
+    messages: list[tuple[int, dict, int]],
+) -> dict | None:
+    last: dict | None = None
+    for _, msg, _ in messages:
+        if (msg.get("type") == "system"
+                and msg.get("subtype") == "compact_boundary"):
+            last = msg
+    return last
+
+
 def validate_post_prune(
     msgs_before: list[tuple[int, dict, int]],
     msgs_after: list[tuple[int, dict, int]],
     *,
     strict: bool = True,
 ) -> None:
-    """Validate the pruned message list. Implementation lands in commit 2."""
-    raise NotImplementedError(
-        "validate_post_prune is implemented in commit 2 (P0-B)"
+    """Validate the pruned message list. Raise PruneValidationError on failure.
+
+    Checks (fail-fast, in order):
+      C1. parentUuid resolution — every non-null parentUuid in msgs_after must
+          point to a uuid that exists in msgs_after.
+      C2. Root preserved — if msgs_before had at least one parentUuid=null
+          entry, msgs_after MUST also have at least one.
+      C3. Conversation survival — ≥1 user AND ≥1 assistant survives.
+      C4. compact_boundary — if msgs_before had a system/subtype=
+          compact_boundary entry, the LAST such entry MUST survive.
+      C5. permission-mode — if msgs_before had permission-mode entries, the
+          LAST one MUST survive.
+      C6. last-prompt — if msgs_before had last-prompt entries, the LAST one
+          MUST survive.
+
+    Each check is CONDITIONAL on its precondition existing in msgs_before —
+    a session that never had a permission-mode entry passes C5 trivially.
+    """
+    surviving_uuids: set[str] = {
+        msg.get("uuid", "") for _, msg, _ in msgs_after if msg.get("uuid")
+    }
+
+    # Check order: semantic checks (C3, C2, C4-C6) run BEFORE the structural
+    # C1 parent-chain probe, because a wholesale conversation wipe or missing
+    # root necessarily breaks the chain for descendants — reporting C1 in
+    # that case would mask the underlying cause. C3 (conversation wipe) is
+    # checked before C2 (root) because the conversation IS the user-visible
+    # symptom; in practice losing every user also loses the root, but the
+    # error is more actionable when reported as "no conversation".
+    # C1 is the structural fallback for the case where root + conversation
+    # + metadata are intact but a middle link was dropped without re-linking.
+
+    # ── C3: conversation survival ───────────────────────────────────────────
+    surviving_user = sum(
+        1 for _, m, _ in msgs_after if m.get("type") == "user"
     )
+    surviving_asst = sum(
+        1 for _, m, _ in msgs_after if m.get("type") == "assistant"
+    )
+    before_user = any(m.get("type") == "user" for _, m, _ in msgs_before)
+    before_asst = any(m.get("type") == "assistant" for _, m, _ in msgs_before)
+    if (before_user and surviving_user == 0) or (
+        before_asst and surviving_asst == 0
+    ):
+        raise PruneValidationError(
+            reason=(
+                f"conversation wiped — surviving users={surviving_user}, "
+                f"assistants={surviving_asst}"
+            ),
+            evidence={
+                "failed_check": "C3",
+                "surviving_user_count": surviving_user,
+                "surviving_assistant_count": surviving_asst,
+            },
+        )
+
+    # ── C2: root preserved ──────────────────────────────────────────────────
+    before_has_root = any(
+        msg.get("parentUuid") is None for _, msg, _ in msgs_before
+    )
+    after_has_root = any(
+        msg.get("parentUuid") is None for _, msg, _ in msgs_after
+    )
+    if before_has_root and not after_has_root:
+        raise PruneValidationError(
+            reason="session root (parentUuid=null) was dropped",
+            evidence={
+                "failed_check": "C2",
+                "before_count": len(msgs_before),
+                "after_count": len(msgs_after),
+            },
+        )
+
+    # ── C4: last compact_boundary preserved ─────────────────────────────────
+    last_before_cb = _last_compact_boundary(msgs_before)
+    if last_before_cb is not None:
+        last_after_cb = _last_compact_boundary(msgs_after)
+        if last_after_cb is None or (
+            last_after_cb.get("uuid") != last_before_cb.get("uuid")
+        ):
+            raise PruneValidationError(
+                reason="last compact_boundary entry was dropped",
+                evidence={
+                    "failed_check": "C4",
+                    "expected_uuid": last_before_cb.get("uuid"),
+                    "actual_uuid": (
+                        last_after_cb.get("uuid") if last_after_cb else None
+                    ),
+                },
+            )
+
+    # ── C5: last permission-mode preserved ──────────────────────────────────
+    last_before_pm = _last_of_type(msgs_before, "permission-mode")
+    if last_before_pm is not None:
+        last_after_pm = _last_of_type(msgs_after, "permission-mode")
+        if last_after_pm is None or (
+            last_after_pm.get("uuid") != last_before_pm.get("uuid")
+        ):
+            raise PruneValidationError(
+                reason="last permission-mode entry was dropped",
+                evidence={
+                    "failed_check": "C5",
+                    "expected_uuid": last_before_pm.get("uuid"),
+                    "actual_uuid": (
+                        last_after_pm.get("uuid") if last_after_pm else None
+                    ),
+                },
+            )
+
+    # ── C6: last last-prompt preserved ──────────────────────────────────────
+    last_before_lp = _last_of_type(msgs_before, "last-prompt")
+    if last_before_lp is not None:
+        last_after_lp = _last_of_type(msgs_after, "last-prompt")
+        if last_after_lp is None or (
+            last_after_lp.get("uuid") != last_before_lp.get("uuid")
+        ):
+            raise PruneValidationError(
+                reason="last last-prompt entry was dropped",
+                evidence={
+                    "failed_check": "C6",
+                    "expected_uuid": last_before_lp.get("uuid"),
+                    "actual_uuid": (
+                        last_after_lp.get("uuid") if last_after_lp else None
+                    ),
+                },
+            )
+
+    # ── C1: parent chain resolves ───────────────────────────────────────────
+    # Defense-in-depth fallback. The executor's _relink_parent_chain step
+    # SHOULD ensure every surviving parentUuid resolves; this re-verifies.
+    for _, msg, _ in msgs_after:
+        parent = msg.get("parentUuid")
+        if parent is None:
+            continue
+        if parent not in surviving_uuids:
+            raise PruneValidationError(
+                reason=(
+                    f"parentUuid {parent!r} on uuid {msg.get('uuid')!r} "
+                    f"does not resolve to a surviving message"
+                ),
+                evidence={
+                    "failed_check": "C1",
+                    "dangling_uuid": msg.get("uuid"),
+                    "dangling_parent": parent,
+                    "surviving_count": len(surviving_uuids),
+                },
+            )
 
 
 def simulate_replay_readiness(
     messages: list[tuple[int, dict, int]],
 ) -> tuple[bool, str]:
-    """Structural replay probe. Implementation lands in commit 2."""
-    raise NotImplementedError(
-        "simulate_replay_readiness is implemented in commit 2 (P0-B)"
-    )
+    """Structural probe: walk the parentUuid graph as Claude Code's resume would.
+
+    Returns ``(ok, reason)``. ``ok=False`` indicates the session would not
+    bootstrap cleanly — e.g., missing root, dangling parentUuid chain, or no
+    conversational content. ``ok=True`` returns reason="".
+
+    This is a pure-Python simulation. No Claude binary is spawned.
+    """
+    if not messages:
+        return False, "empty message list"
+
+    surviving_uuids: set[str] = {
+        m.get("uuid", "") for _, m, _ in messages if m.get("uuid")
+    }
+    roots = [m for _, m, _ in messages if m.get("parentUuid") is None]
+    if not roots:
+        return False, "no root (no parentUuid=null entry)"
+
+    # Walk every entry; chain must resolve.
+    for _, msg, _ in messages:
+        parent = msg.get("parentUuid")
+        if parent is None:
+            continue
+        if parent not in surviving_uuids:
+            return False, (
+                f"chain break: parentUuid {parent!r} on uuid "
+                f"{msg.get('uuid')!r} does not resolve"
+            )
+
+    # Conversation must include at least one user AND one assistant.
+    has_user = any(m.get("type") == "user" for _, m, _ in messages)
+    has_asst = any(m.get("type") == "assistant" for _, m, _ in messages)
+    if not (has_user and has_asst):
+        return False, "no conversation (zero users or zero assistants)"
+
+    return True, ""
 
 
 # ── P0-C — Floor preservation (implemented in commit 3) ────────────────────
@@ -163,6 +358,6 @@ def enforce_floor(
     cfg: FloorConfig,
 ) -> list[tuple[int, dict, int]]:
     """Re-add must-preserve messages dropped by strategies. Implemented in commit 3."""
-    raise NotImplementedError(
-        "enforce_floor is implemented in commit 3 (P0-C)"
-    )
+    # Stub for commit 2 — pass through unchanged so the validation pipeline
+    # is exercisable. Real implementation lands in commit 3 (P0-C).
+    return msgs_after
