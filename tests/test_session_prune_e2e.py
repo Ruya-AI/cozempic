@@ -108,16 +108,21 @@ class TestE2ERegressionForResumeBreakBug(unittest.TestCase):
                 f"dangling parentUuid {parent!r} on uuid {msg.get('uuid')!r}",
             )
 
-        # ── 6. File-size reduction in [30%, 80%] ────────────────────────────
+        # ── 6. File-size reduction in [30%, 90%] ────────────────────────────
+        # The upper bound exists to catch the documented bug shape (98% loss
+        # in the fannyugc corruption). The synthetic fixture has ~80% of its
+        # entries as small attachments below the boundary, so post-floor
+        # gentle naturally hits ~84% reduction; we cap at 90% to leave
+        # headroom while still detecting the destructive prune.
         reduction_pct = 1.0 - (after_bytes / max(before_bytes, 1))
         self.assertGreaterEqual(
             reduction_pct, 0.30,
             f"gentle reduced only {reduction_pct:.0%}; expected ≥30%",
         )
         self.assertLessEqual(
-            reduction_pct, 0.80,
-            f"gentle reduced {reduction_pct:.0%}; expected ≤80% (anything more "
-            f"is the destructive bug)",
+            reduction_pct, 0.90,
+            f"gentle reduced {reduction_pct:.0%}; expected ≤90% (anything more "
+            f"is the destructive bug — 98% loss in fannyugc)",
         )
 
 
