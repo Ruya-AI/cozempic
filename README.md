@@ -248,8 +248,11 @@ Configuration sources (precedence: env > `~/.cozempic/config.json` > default):
 | Knob | Default | Range | Override |
 |------|---------|-------|----------|
 | `min_idle_hours` | `24.0` | `[0.0, 168.0]` | `COZEMPIC_MIN_IDLE_HOURS` |
-| `floor.max_user_assistant_drop_pct` | `0.50` | `(0.0, 1.0)` | `COZEMPIC_FLOOR_MAX_DROP_PCT` |
+| `floor.max_user_assistant_drop_pct` | `0.50` | `[0.0, 1.0]` | `COZEMPIC_FLOOR_MAX_DROP_PCT` |
 | `floor.preserve_last_k_turns` | `50` | `[1, 1000]` | `COZEMPIC_FLOOR_PRESERVE_LAST_K` |
+| `floor.preserve_first_message` | `true` | `true` / `false` | `COZEMPIC_FLOOR_PRESERVE_FIRST` |
+
+Range endpoints are inclusive. `max_user_assistant_drop_pct=0.0` disables top-up (the floor still preserves the root and last-K turns); `=1.0` disables the floor's survival cap entirely (strategies' user/assistant drops are not clamped). `preserve_first_message=false` lets the root user be dropped on micro-sessions where the operator wants the strategy to win.
 
 Example `~/.cozempic/config.json`:
 

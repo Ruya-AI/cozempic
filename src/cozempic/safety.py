@@ -140,7 +140,8 @@ class PruneValidationError(Exception):
 
     ``reason`` is a human-readable summary. ``evidence`` is a dict that
     callers (guard daemon, CLI) log; it always contains a ``failed_check``
-    key matching one of ``"C1".."C6"`` so log aggregators can group failures.
+    key matching one of ``"C1".."C7"`` so log aggregators can group failures.
+    C7 was added by REVIEW-max E.4 (ai-title last-of-type preservation).
     """
 
     def __init__(self, reason: str, evidence: dict):
@@ -177,11 +178,14 @@ def validate_post_prune(
 ) -> None:
     """Validate the pruned message list. Raise PruneValidationError on failure.
 
-    Checks (fail-fast, in order):
+    Checks (fail-fast, in order C3 → C2 → C4 → C5 → C6 → C7 → C1 — semantic
+    checks before structural so the failure attribution is actionable):
+
       C1. parentUuid resolution — every non-null parentUuid in msgs_after must
           point to a uuid that exists in msgs_after.
-      C2. Root preserved — if msgs_before had at least one parentUuid=null
-          entry, msgs_after MUST also have at least one.
+      C2. Root preserved — REVIEW-max H-1 + B.11: at least one of the
+          ORIGINAL ``parentUuid=null`` uuids from msgs_before must survive
+          (multi-root sessions supported via set-intersection).
       C3. Conversation survival — ≥1 user AND ≥1 assistant survives.
       C4. compact_boundary — if msgs_before had a system/subtype=
           compact_boundary entry, the LAST such entry MUST survive.
@@ -189,6 +193,9 @@ def validate_post_prune(
           LAST one MUST survive.
       C6. last-prompt — if msgs_before had last-prompt entries, the LAST one
           MUST survive.
+      C7. ai-title — REVIEW-max E.4: if msgs_before had ai-title entries,
+          the LAST one MUST survive (mirrors C5/C6 for the third member of
+          executor._LAST_OF_TYPE_PROTECTED).
 
     Each check is CONDITIONAL on its precondition existing in msgs_before —
     a session that never had a permission-mode entry passes C5 trivially.
@@ -518,7 +525,12 @@ def enforce_floor(
         for idx, m, size in msgs_before
         if m.get("uuid")
     }
-    tool_use_id_to_owner: dict[str, str] = {}
+    # REVIEW-round3 G.M4: both maps are set-valued (additive). Per the
+    # Anthropic API, a given tool_use id has exactly ONE owning message,
+    # but the defensive symmetry guards against malformed or replayed
+    # sessions where the same id appears in multiple entries (would
+    # otherwise silently keep only the last write).
+    tool_use_id_to_owner: dict[str, set[str]] = {}
     tool_use_id_to_results: dict[str, set[str]] = {}
     for _, m, _ in msgs_before:
         u = m.get("uuid", "")
@@ -535,7 +547,7 @@ def enforce_floor(
             if btype == "tool_use":
                 tid = block.get("id", "")
                 if tid:
-                    tool_use_id_to_owner[tid] = u
+                    tool_use_id_to_owner.setdefault(tid, set()).add(u)
             elif btype == "tool_result":
                 tid = block.get("tool_use_id", "")
                 if tid:
@@ -565,9 +577,10 @@ def enforce_floor(
                             new_additions.add(p)
                 elif btype == "tool_result":
                     tid = block.get("tool_use_id", "")
-                    owner = tool_use_id_to_owner.get(tid)
-                    if owner and owner not in must_preserve:
-                        new_additions.add(owner)
+                    owners = tool_use_id_to_owner.get(tid, set())
+                    for owner in owners:
+                        if owner not in must_preserve:
+                            new_additions.add(owner)
         if not new_additions:
             break
         must_preserve.update(new_additions)

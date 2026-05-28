@@ -244,8 +244,9 @@ def run_prescription(
          strategy-dropped) are cleaned by orphan-fix before the final save.
          Review finding C-1: pre-swap order shipped JSONL with orphans →
          Anthropic API 400 on resume.
-      4. (P0-B) ``validate_post_prune`` runs C1–C6 structural checks. If
-         any fails, propagate ``PruneValidationError`` to the caller; the
+      4. (P0-B) ``validate_post_prune`` runs C1–C7 structural checks
+         (C7 added by REVIEW-max E.4 for ai-title last-of-type). If any
+         fails, propagate ``PruneValidationError`` to the caller; the
          caller (guard / cli) is responsible for skipping the save.
     """
     from .safety import enforce_floor, validate_post_prune

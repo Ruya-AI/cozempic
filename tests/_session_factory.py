@@ -16,8 +16,9 @@ import string
 from pathlib import Path
 from typing import Callable
 
-import pytest
-
+# REVIEW-round3 G.N6: pytest is NOT imported at module top so this file
+# stays usable from zero-dep reproducer scripts. The pytest fixture lives
+# in conftest.py (G.N1: single canonical location).
 from cozempic.helpers import msg_bytes
 
 
@@ -235,9 +236,3 @@ def write_jsonl(messages: list[dict], path: Path) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for m in messages:
             f.write(json.dumps(m, separators=(",", ":")) + "\n")
-
-
-@pytest.fixture
-def realistic_session_factory() -> Callable[..., list[dict]]:
-    """Factory fixture: callable that builds a fresh session per test."""
-    return make_realistic_session

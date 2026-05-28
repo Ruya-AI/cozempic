@@ -817,8 +817,14 @@ def cleanup_old_backups(session_path: Path, keep: int = 3) -> int:
 
     Prevents disk fill when the guard fires many prune cycles (#19).
     Returns the number of files deleted.
+
+    REVIEW-round3 G.N3: glob is anchored to the YYYYMMDD_HHMMSS timestamp
+    shape so sister sessions whose stem PREFIXES this one (e.g. ``abc``
+    vs ``abc-2``) cannot have their backups deleted by mistake. The
+    timestamp character class ``[0-9]`` rules out the ``-`` separator
+    that prefix-collision relies on.
     """
-    pattern = f"{session_path.stem}.*.jsonl.bak"
+    pattern = f"{session_path.stem}.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.bak"
     bak_files = sorted(
         session_path.parent.glob(pattern),
         key=lambda p: p.stat().st_mtime,
