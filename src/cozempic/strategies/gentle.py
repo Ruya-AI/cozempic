@@ -14,7 +14,7 @@ def _no_op(name: str, total_orig: int, summary: str) -> StrategyResult:
     return StrategyResult(name, [], total_orig, 0, 0, 0, 0, summary)
 
 
-@strategy("compact-summary-collapse", "Remove all pre-compaction messages (already in the summary)", "gentle", "85-95%")
+@strategy("compact-summary-collapse", "Remove all pre-compaction messages (already in the summary)", "gentle", "50-90% (floor-clamped)")
 def strategy_compact_summary_collapse(messages: list[Message], config: dict) -> StrategyResult:
     """Remove everything before the last compact_boundary.
 
@@ -41,8 +41,14 @@ def strategy_compact_summary_collapse(messages: list[Message], config: dict) -> 
     if last_boundary_msg.get("hasPreservedSegment"):
         return _no_op("compact-summary-collapse", total_orig, "Skipped (hasPreservedSegment=True)")
 
-    # Metadata singletons: keep if they only appear before the boundary
-    _META_TYPES = {"last-prompt", "pr-link", "custom-title", "ai-title", "attribution-snapshot"}
+    # Metadata singletons: keep if they only appear before the boundary.
+    # permission-mode added 2026-05-28 (P0-D defense-in-depth): without it,
+    # this strategy strips every permission-mode entry when none appear
+    # post-boundary, breaking resume bootstrap.
+    _META_TYPES = {
+        "last-prompt", "pr-link", "custom-title", "ai-title",
+        "attribution-snapshot", "permission-mode",
+    }
     post_meta_types = {msg.get("type") for _, msg, _ in messages[last_boundary_pos:]}
 
     actions: list[PruneAction] = []

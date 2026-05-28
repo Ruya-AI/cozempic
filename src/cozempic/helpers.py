@@ -287,6 +287,11 @@ def is_protected(msg: dict) -> bool:
         return True
     if msg.get("__cozempic_team_protected__"):
         return True
+    # P0-D — last-of-type metadata singleton (ai-title / last-prompt /
+    # permission-mode). Tagged in place by executor._tag_last_of_metadata_types
+    # before strategies run; stripped after run_prescription completes.
+    if msg.get("__cozempic_metadata_singleton__"):
+        return True
     return False
 
 

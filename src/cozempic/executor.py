@@ -7,6 +7,45 @@ from .registry import STRATEGIES
 from .types import Message, PruneAction, StrategyResult
 
 
+# P0-D — last-of-type metadata singleton protection.
+# The LAST occurrence of each of these types is tagged before strategies run
+# so is_protected() skips them. The tag is internal-only and stripped before
+# run_prescription returns (it MUST NOT persist to disk).
+_LAST_OF_TYPE_PROTECTED: frozenset[str] = frozenset({
+    "ai-title",
+    "last-prompt",
+    "permission-mode",
+})
+_SINGLETON_TAG: str = "__cozempic_metadata_singleton__"
+
+
+def _tag_last_of_metadata_types(messages: list[Message]) -> None:
+    """Mark the LAST occurrence of each protected-singleton type.
+
+    Mutates ``messages`` in place: sets ``msg[_SINGLETON_TAG] = True`` on the
+    latest entry per type. ``is_protected()`` honors this tag so subsequent
+    strategies skip the entry. ``_strip_metadata_singleton_tags`` MUST be
+    called before returning from ``run_prescription`` to ensure the tag does
+    not leak to disk.
+    """
+    last_pos: dict[str, int] = {}
+    for pos, (_, msg, _) in enumerate(messages):
+        t = msg.get("type", "")
+        if t in _LAST_OF_TYPE_PROTECTED:
+            last_pos[t] = pos
+    for t, pos in last_pos.items():
+        # messages is a list of (idx, dict, size) tuples; we mutate the dict.
+        _, msg, _ = messages[pos]
+        msg[_SINGLETON_TAG] = True
+
+
+def _strip_metadata_singleton_tags(messages: list[Message]) -> None:
+    """Remove the internal singleton tag from every message. In-place."""
+    for _, msg, _ in messages:
+        if _SINGLETON_TAG in msg:
+            msg.pop(_SINGLETON_TAG, None)
+
+
 def execute_actions(
     messages: list[Message],
     actions: list[PruneAction],
@@ -204,6 +243,12 @@ def run_prescription(
     from .safety import enforce_floor, validate_post_prune
     from .config import load_config
 
+    # Step 0 (P0-D): tag last-of-type metadata singletons so strategies that
+    # honor is_protected() skip them. This is the structural protection for
+    # permission-mode (the most-load-bearing of the three for resume bootstrap)
+    # plus ai-title and last-prompt.
+    _tag_last_of_metadata_types(messages)
+
     current = messages
     results: list[StrategyResult] = []
     for sname in strategy_names:
@@ -237,5 +282,11 @@ def run_prescription(
 
     # Step 4: structural validation. Raises PruneValidationError on failure.
     validate_post_prune(messages, current)
+
+    # Step 5 (P0-D): strip the internal singleton tag from every surviving
+    # entry so it does not leak to the saved JSONL. Also strip from
+    # msgs_before — the tag was applied in place there too.
+    _strip_metadata_singleton_tags(current)
+    _strip_metadata_singleton_tags(messages)
 
     return current, results

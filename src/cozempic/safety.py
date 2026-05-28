@@ -460,7 +460,14 @@ def enforce_floor(
     merged.sort(key=lambda t: t[0])
 
     # ── Step 4: re-link parent chains ────────────────────────────────────────
-    # Some entries in msgs_after may have had their parentUuid re-pointed
-    # away from a now-re-added message; re-running the relink with no
-    # removals leaves valid pointers untouched.
-    return _relink_parent_chain(msgs_before, merged, removals=set())
+    # Compute the effective removals: any uuid in msgs_before that is NOT in
+    # the merged result. Re-added entries may have their original
+    # parentUuid pointing to a still-removed ancestor; relink resolves the
+    # chain forward to a surviving uuid (or None).
+    merged_uuids = {m.get("uuid", "") for _, m, _ in merged if m.get("uuid")}
+    effective_removals: set[int] = set()
+    for idx, msg, _ in msgs_before:
+        u = msg.get("uuid", "")
+        if u and u not in merged_uuids:
+            effective_removals.add(idx)
+    return _relink_parent_chain(msgs_before, merged, removals=effective_removals)
