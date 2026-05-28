@@ -24,6 +24,7 @@ P0-D — Last-of-type metadata singleton protection (commit 4):
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from .config import FloorConfig, resolve_min_idle_hours
@@ -314,6 +315,29 @@ def validate_post_prune(
                 },
             )
 
+    # ── C7: last ai-title preserved ─────────────────────────────────────────
+    # REVIEW-max E.4: ai-title is one of executor._LAST_OF_TYPE_PROTECTED
+    # singletons. The tag-based pre-pass protects it from strategies but
+    # validate_post_prune had no corresponding C5/C6-style check, so any
+    # path that bypasses the singleton tag would silently drop the last
+    # ai-title. Mirror C5/C6 here for defense in depth.
+    last_before_at = _last_of_type(msgs_before, "ai-title")
+    if last_before_at is not None:
+        last_after_at = _last_of_type(msgs_after, "ai-title")
+        if last_after_at is None or (
+            last_after_at.get("uuid") != last_before_at.get("uuid")
+        ):
+            raise PruneValidationError(
+                reason="last ai-title entry was dropped",
+                evidence={
+                    "failed_check": "C7",
+                    "expected_uuid": last_before_at.get("uuid"),
+                    "actual_uuid": (
+                        last_after_at.get("uuid") if last_after_at else None
+                    ),
+                },
+            )
+
     # ── C1: parent chain resolves ───────────────────────────────────────────
     # Defense-in-depth fallback. The executor's _relink_parent_chain step
     # SHOULD ensure every surviving parentUuid resolves; this re-verifies.
@@ -443,12 +467,17 @@ def enforce_floor(
 
     # (c) Top up user/assistant survival to the floor cap (most-recent first).
     # The cap is on the dropped fraction, so survival ≥ (1 - max_drop_pct).
+    # REVIEW-max E.6: use math.ceil for the survival-target rounding (the
+    # previous integer-add magic offset was fragile on edge sizes). Skip
+    # the cap entirely on micro-sessions (total < 2) — the floor is meant
+    # to protect against bulk-prune disasters, not override the user's
+    # intent on single-message sessions.
     survival_floor_pct = 1.0 - float(cfg.max_user_assistant_drop_pct)
     if survival_floor_pct > 0.0:
         for kind, in_order in (("user", users_in_order),
                                 ("assistant", asst_in_order)):
             total = len(in_order)
-            if total == 0:
+            if total < 2:
                 continue
             # Count what we already preserve (in kept OR in must_preserve).
             preserved = 0
@@ -456,7 +485,7 @@ def enforce_floor(
                 u = m.get("uuid", "")
                 if u and (u in kept_uuids or u in must_preserve):
                     preserved += 1
-            target = int(survival_floor_pct * total + 0.999999)
+            target = math.ceil(survival_floor_pct * total)
             if preserved >= target:
                 continue
             # Walk msgs_before from newest to oldest, adding entries until

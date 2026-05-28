@@ -100,6 +100,17 @@ def _read_config_file() -> dict[str, Any]:
         return {}
 
 
+def _resolve_min_idle_hours_with(file_data: dict[str, Any]) -> float:
+    """Resolve min_idle_hours given pre-read config file data."""
+    lo, hi = _MIN_IDLE_HOURS_RANGE
+    raw_env = os.environ.get("COZEMPIC_MIN_IDLE_HOURS")
+    if raw_env is not None and raw_env != "":
+        return _clamp_float(raw_env, lo, hi, _MIN_IDLE_HOURS_DEFAULT)
+    if "min_idle_hours" in file_data:
+        return _clamp_float(file_data["min_idle_hours"], lo, hi, _MIN_IDLE_HOURS_DEFAULT)
+    return _MIN_IDLE_HOURS_DEFAULT
+
+
 def resolve_min_idle_hours() -> float:
     """Resolve the active min_idle_hours from env → file → default.
 
@@ -108,27 +119,19 @@ def resolve_min_idle_hours() -> float:
       2. ``min_idle_hours`` key in ``~/.cozempic/config.json``
       3. Default (24.0)
 
-    Invalid values (garbage strings, out of [0.0, 168.0]) at every layer fall
-    back to the default — never to the lower layer. This avoids the surprise
-    where a misconfigured env var resurrects a stale config file value.
+    Invalid values (garbage strings, out of [0.0, 168.0], NaN, ±inf) at
+    every layer fall back to the default — never to the lower layer. This
+    avoids the surprise where a misconfigured env var resurrects a stale
+    config file value.
     """
-    lo, hi = _MIN_IDLE_HOURS_RANGE
-
-    raw_env = os.environ.get("COZEMPIC_MIN_IDLE_HOURS")
-    if raw_env is not None and raw_env != "":
-        return _clamp_float(raw_env, lo, hi, _MIN_IDLE_HOURS_DEFAULT)
-
-    file_data = _read_config_file()
-    if "min_idle_hours" in file_data:
-        return _clamp_float(file_data["min_idle_hours"], lo, hi, _MIN_IDLE_HOURS_DEFAULT)
-
-    return _MIN_IDLE_HOURS_DEFAULT
+    return _resolve_min_idle_hours_with(_read_config_file())
 
 
-def _resolve_floor() -> FloorConfig:
-    file_data = _read_config_file().get("floor", {}) or {}
-    if not isinstance(file_data, dict):
-        file_data = {}
+def _resolve_floor_with(file_data: dict[str, Any]) -> FloorConfig:
+    """Resolve FloorConfig given pre-read config file data."""
+    floor_data = file_data.get("floor", {}) or {}
+    if not isinstance(floor_data, dict):
+        floor_data = {}
 
     # max_user_assistant_drop_pct
     raw_env = os.environ.get("COZEMPIC_FLOOR_MAX_DROP_PCT")
@@ -136,9 +139,9 @@ def _resolve_floor() -> FloorConfig:
         drop_pct = _clamp_float(
             raw_env, *_FLOOR_MAX_DROP_PCT_RANGE, _FLOOR_MAX_DROP_PCT_DEFAULT,
         )
-    elif "max_user_assistant_drop_pct" in file_data:
+    elif "max_user_assistant_drop_pct" in floor_data:
         drop_pct = _clamp_float(
-            file_data["max_user_assistant_drop_pct"],
+            floor_data["max_user_assistant_drop_pct"],
             *_FLOOR_MAX_DROP_PCT_RANGE,
             _FLOOR_MAX_DROP_PCT_DEFAULT,
         )
@@ -151,9 +154,9 @@ def _resolve_floor() -> FloorConfig:
         last_k = _clamp_int(
             raw_env, *_FLOOR_PRESERVE_LAST_K_RANGE, _FLOOR_PRESERVE_LAST_K_DEFAULT,
         )
-    elif "preserve_last_k_turns" in file_data:
+    elif "preserve_last_k_turns" in floor_data:
         last_k = _clamp_int(
-            file_data["preserve_last_k_turns"],
+            floor_data["preserve_last_k_turns"],
             *_FLOOR_PRESERVE_LAST_K_RANGE,
             _FLOOR_PRESERVE_LAST_K_DEFAULT,
         )
@@ -167,9 +170,22 @@ def _resolve_floor() -> FloorConfig:
     )
 
 
+def _resolve_floor() -> FloorConfig:
+    """Backwards-compat wrapper kept for legacy callers (none in-tree)."""
+    return _resolve_floor_with(_read_config_file())
+
+
 def load_config() -> Config:
-    """Load the active runtime config (env → file → default)."""
+    """Load the active runtime config (env → file → default).
+
+    REVIEW-max E.9: reads ``~/.cozempic/config.json`` exactly ONCE and
+    passes the parsed dict to both resolvers. The prior implementation
+    re-read the file inside each resolver — wasteful and a TOCTOU
+    window where mid-cycle config edits flipped floor behavior between
+    the two reads.
+    """
+    file_data = _read_config_file()
     return Config(
-        min_idle_hours=resolve_min_idle_hours(),
-        floor=_resolve_floor(),
+        min_idle_hours=_resolve_min_idle_hours_with(file_data),
+        floor=_resolve_floor_with(file_data),
     )

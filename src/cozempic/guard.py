@@ -954,6 +954,27 @@ def guard_prune_cycle(
 
     try:
         with _PruneLock(session_path):
+            # REVIEW-max E.14: re-check mtime AFTER lock acquisition to close
+            # the TOCTOU window between the upfront idle gate and the prune.
+            # Claude may have appended bytes between the first check and the
+            # lock. The second check is the authoritative one — same threshold,
+            # same force-override semantics. Refusal here is structurally
+            # identical to the upfront refusal (no K-counter advance).
+            try:
+                assert_session_idle_or_force(
+                    session_path,
+                    min_idle_hours=resolve_min_idle_hours(),
+                    force=force,
+                )
+            except ActiveSessionError as exc:
+                print(
+                    f"  [{_now()}] Prune refused (post-lock recheck) — "
+                    f"session became active (mtime {exc.idle_minutes:.1f} min "
+                    f"ago, threshold {exc.threshold_hours}h).",
+                    file=sys.stderr,
+                )
+                return {**_no_change, "active_session_refused": True}
+
             # Snapshot before load so we can detect Claude appending mid-prune
             snap = snapshot_session(session_path)
 
