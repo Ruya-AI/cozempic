@@ -750,6 +750,14 @@ def fix_orphaned_tool_results() -> str:
                 # Session changed mid-fix — skip rather than corrupt
                 skipped_sessions.append(sess["session_id"])
                 continue
+            except Exception as exc:  # REVIEW-max A.1
+                # PruneValidationError (H-3 post-append re-validation) or any
+                # other downstream failure — skip rather than crash the
+                # batch doctor run; the per-session backup is preserved.
+                if exc.__class__.__name__ == "PruneValidationError":
+                    skipped_sessions.append(sess["session_id"])
+                    continue
+                raise
 
     skipped_note = ""
     if skipped_sessions:

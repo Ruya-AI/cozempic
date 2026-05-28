@@ -240,8 +240,16 @@ def cmd_current(args):
         print_diagnosis(diag, sess["path"])
 
         print("  Estimated Savings by Prescription:")
+        # REVIEW-max A.7: per-prescription dry-run loop must NOT abort on a
+        # single PruneValidationError — the diagnostic should report every
+        # prescription so the operator sees the full picture.
+        from .safety import PruneValidationError
         for rx_name, strategy_names in PRESCRIPTIONS.items():
-            new_msgs, _ = run_prescription(messages, strategy_names, {})
+            try:
+                new_msgs, _ = run_prescription(messages, strategy_names, {})
+            except PruneValidationError as exc:
+                print(f"    {rx_name:<15} (validation failed: {exc.evidence.get('failed_check', '?')})")
+                continue
             final_bytes = sum(b for _, _, b in new_msgs)
             total_saved = diag["total_bytes"] - final_bytes
             pct = fmt_pct(total_saved, diag["total_bytes"])
@@ -256,8 +264,15 @@ def cmd_diagnose(args):
     print_diagnosis(diag, path)
 
     print("  Estimated Savings by Prescription:")
+    # REVIEW-max A.7: per-prescription dry-run loop must NOT abort on a
+    # single PruneValidationError.
+    from .safety import PruneValidationError
     for rx_name, strategy_names in PRESCRIPTIONS.items():
-        new_msgs, _ = run_prescription(messages, strategy_names, {})
+        try:
+            new_msgs, _ = run_prescription(messages, strategy_names, {})
+        except PruneValidationError as exc:
+            print(f"    {rx_name:<15} (validation failed: {exc.evidence.get('failed_check', '?')})")
+            continue
         final_bytes = sum(b for _, _, b in new_msgs)
         total_saved = diag["total_bytes"] - final_bytes
         pct = fmt_pct(total_saved, diag["total_bytes"])

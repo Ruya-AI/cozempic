@@ -259,44 +259,50 @@ def run_prescription(
 
     current = messages
     results: list[StrategyResult] = []
-    for sname in strategy_names:
-        if sname not in STRATEGIES:
-            continue
-        sr = STRATEGIES[sname].func(current, config)
-        results.append(sr)
-        if sr.actions:
-            old_current = current
-            current = execute_actions(current, sr.actions)
-            del old_current  # Free previous list immediately
+    # REVIEW-max A.3: wrap from this point in try/finally so the singleton-tag
+    # strip ALWAYS runs even if a downstream step (validation) raises. Without
+    # the finally, a PruneValidationError leaves the caller's input list
+    # carrying the internal __cozempic_metadata_singleton__ flag, which would
+    # then leak to disk on the next successful save_messages call.
+    try:
+        for sname in strategy_names:
+            if sname not in STRATEGIES:
+                continue
+            sr = STRATEGIES[sname].func(current, config)
+            results.append(sr)
+            if sr.actions:
+                old_current = current
+                current = execute_actions(current, sr.actions)
+                del old_current  # Free previous list immediately
 
-    # Step 2: floor preservation — re-add must-preserve messages.
-    cfg = load_config()
-    if enable_floor:
-        current = enforce_floor(messages, current, cfg=cfg.floor)
+        # Step 2: floor preservation — re-add must-preserve messages.
+        cfg = load_config()
+        if enable_floor:
+            current = enforce_floor(messages, current, cfg=cfg.floor)
 
-    # Step 3: orphaned tool_result cleanup. Runs AFTER floor so a re-added
-    # ``user`` carrying a ``tool_result`` whose paired ``tool_use`` is still
-    # missing has its orphan block stripped before save.
-    current, orphans = fix_orphaned_tool_results(current)
-    if orphans > 0:
-        results.append(StrategyResult(
-            strategy_name="orphan-fix",
-            actions=[],
-            original_bytes=0,
-            pruned_bytes=0,
-            messages_affected=orphans,
-            messages_removed=0,
-            messages_replaced=orphans,
-            summary=f"Fixed {orphans} orphaned tool_result block(s)",
-        ))
+        # Step 3: orphaned tool_result cleanup. Runs AFTER floor so a re-added
+        # ``user`` carrying a ``tool_result`` whose paired ``tool_use`` is still
+        # missing has its orphan block stripped before save.
+        current, orphans = fix_orphaned_tool_results(current)
+        if orphans > 0:
+            results.append(StrategyResult(
+                strategy_name="orphan-fix",
+                actions=[],
+                original_bytes=0,
+                pruned_bytes=0,
+                messages_affected=orphans,
+                messages_removed=0,
+                messages_replaced=orphans,
+                summary=f"Fixed {orphans} orphaned tool_result block(s)",
+            ))
 
-    # Step 4: structural validation. Raises PruneValidationError on failure.
-    validate_post_prune(messages, current)
-
-    # Step 5 (P0-D): strip the internal singleton tag from every surviving
-    # entry so it does not leak to the saved JSONL. Also strip from
-    # msgs_before — the tag was applied in place there too.
-    _strip_metadata_singleton_tags(current)
-    _strip_metadata_singleton_tags(messages)
+        # Step 4: structural validation. Raises PruneValidationError on failure.
+        validate_post_prune(messages, current)
+    finally:
+        # Step 5 (P0-D): strip the internal singleton tag from every surviving
+        # entry so it does not leak to the saved JSONL. Also strip from
+        # msgs_before — the tag was applied in place there too.
+        _strip_metadata_singleton_tags(current)
+        _strip_metadata_singleton_tags(messages)
 
     return current, results

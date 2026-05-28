@@ -304,12 +304,20 @@ def prune_with_team_protect(
             msg_dict["__cozempic_team_protected__"] = True
             tagged_indices.append(id(msg_dict))
 
-    # 4. Prune full list — team messages are protected, no list splitting needed
-    pruned_messages, results = run_prescription(messages, strategy_names, config)
-
-    # 5. Remove tags from surviving messages
-    for _, msg_dict, _ in pruned_messages:
-        msg_dict.pop("__cozempic_team_protected__", None)
+    # REVIEW-max A.15: wrap run_prescription in try/finally so the team-tag
+    # cleanup ALWAYS runs even on PruneValidationError. Without the finally,
+    # a raised exception leaves the caller's input list carrying the
+    # __cozempic_team_protected__ flag which would leak to disk on the next
+    # successful save_messages call.
+    try:
+        # 4. Prune full list — team messages are protected, no list splitting
+        pruned_messages, results = run_prescription(messages, strategy_names, config)
+    finally:
+        # 5. Remove tags from the original input list (covers every tagged
+        # entry, surviving or not — the cleanup must NOT depend on
+        # pruned_messages, which may not exist on the exception path).
+        for _, msg_dict, _ in messages:
+            msg_dict.pop("__cozempic_team_protected__", None)
 
     # 6. Inject team recovery messages at the end
     pruned_messages = inject_team_recovery(pruned_messages, team_state)
@@ -664,10 +672,12 @@ def start_guard(
                 if result.get("team_name"):
                     print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
 
-                if result.get("active_session_refused"):
-                    # P0-A: refusal upfront is not "an empty hard prune" — the
-                    # cycle never ran. Do not advance the K-counter; the daemon
-                    # stays alive and retries on the next interval.
+                if result.get("active_session_refused") or result.get("validation_failed"):
+                    # P0-A + REVIEW-max A.8: refusal upfront (active-session
+                    # guard) and validation_failed (post-prune or post-append
+                    # structural check) are both "the cycle never ran" — do
+                    # NOT advance the K-counter; the daemon stays alive and
+                    # retries on the next interval.
                     pass
                 elif result.get("saved_mb", 0) <= 0 or result.get("futile_reload_skipped"):
                     consecutive_empty_hard_prunes += 1
@@ -907,6 +917,7 @@ def guard_prune_cycle(
     from .tokens import estimate_session_tokens, calibrate_ratio
     from .safety import (
         ActiveSessionError,
+        PruneValidationError,
         assert_session_idle_or_force,
         resolve_min_idle_hours,
     )
@@ -964,7 +975,6 @@ def guard_prune_cycle(
             # reason + evidence, and return _no_change without writing. The
             # K-counter does NOT advance (the prune was aborted before save,
             # not because it failed to save bytes).
-            from .safety import PruneValidationError
             try:
                 pruned_messages, results, team_state = prune_with_team_protect(
                     messages, rx_name=rx_name, config=config,
@@ -1046,6 +1056,18 @@ def guard_prune_cycle(
     except PruneConflictError as exc:
         print(f"  [{_now()}] Prune deferred — conflict detected: {exc}", file=sys.stderr)
         return _no_change
+    except PruneValidationError as exc:
+        # REVIEW-max A.1: save_messages re-runs validate_post_prune after the
+        # append-delta merge (H-3) and raises PruneValidationError if Claude
+        # wrote an orphan mid-prune. Catch here so the daemon stays alive and
+        # the K-counter does NOT advance (A.8 — same carve-out as
+        # active_session_refused: the prune never completed).
+        print(
+            f"  [{_now()}] Prune aborted at save — validation failed: "
+            f"{exc.reason} (evidence={exc.evidence})",
+            file=sys.stderr,
+        )
+        return {**_no_change, "validation_failed": True}
 
     # Track lifetime savings
     tokens_saved = pre_te.total - post_te.total if pre_te.total and post_te.total else 0
