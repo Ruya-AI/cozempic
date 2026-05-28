@@ -18,6 +18,7 @@ not crash because the operator stashed a stale env var in their shell rc.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -58,10 +59,17 @@ class Config:
 
 
 def _clamp_float(value: float, lo: float, hi: float, default: float) -> float:
-    """Return value if it lies in [lo, hi] inclusive, else default."""
+    """Return value if it lies in [lo, hi] inclusive, else default.
+
+    REVIEW-max B.2: explicitly reject NaN and infinities BEFORE the range
+    check — NaN compares False to every threshold so a naive `v < lo or
+    v > hi` lets it through and downstream arithmetic silently propagates.
+    """
     try:
         v = float(value)
     except (TypeError, ValueError):
+        return default
+    if math.isnan(v) or math.isinf(v):
         return default
     if v < lo or v > hi:
         return default

@@ -67,6 +67,9 @@ class ActiveSessionError(Exception):
         )
 
 
+_CLOCK_SKEW_TOLERANCE_SECONDS = 300.0  # 5 minutes
+
+
 def is_session_idle(path: Path, min_idle_hours: float) -> tuple[bool, float]:
     """Return ``(is_idle, minutes_since_last_mtime)``.
 
@@ -76,6 +79,13 @@ def is_session_idle(path: Path, min_idle_hours: float) -> tuple[bool, float]:
 
     A missing file is treated as idle (nothing to protect) and reports
     ``minutes`` as ``inf`` so callers can log a meaningful value.
+
+    REVIEW-max B.13: an mtime more than ``_CLOCK_SKEW_TOLERANCE_SECONDS``
+    in the future is a clock-skew anomaly (NTP correction, DST shift,
+    filesystem with a faster clock than the host). Treat that as idle so
+    the daemon does not refuse pruning for up to 25h while the clock
+    catches up. A small future delta (< tolerance) is treated as elapsed=0
+    to handle benign sub-second skew.
     """
     import time
 
@@ -84,7 +94,13 @@ def is_session_idle(path: Path, min_idle_hours: float) -> tuple[bool, float]:
     except (FileNotFoundError, OSError):
         return True, float("inf")
 
-    elapsed_seconds = max(0.0, time.time() - mtime)
+    delta = time.time() - mtime
+    if delta < -_CLOCK_SKEW_TOLERANCE_SECONDS:
+        # Clock-skew anomaly: treat as idle. Report minutes as 0 to avoid
+        # downstream arithmetic surprises.
+        return True, 0.0
+
+    elapsed_seconds = max(0.0, delta)
     elapsed_minutes = elapsed_seconds / 60.0
     threshold_minutes = float(min_idle_hours) * 60.0
     return elapsed_minutes >= threshold_minutes, elapsed_minutes
@@ -218,23 +234,27 @@ def validate_post_prune(
     # Review finding H-1: a structural `any(parentUuid is None)` check is
     # bypassed by _relink_parent_chain re-pointing dead-end chains to None
     # (executor.py:135). When the original root is dropped, descendants
-    # become pseudo-roots and the structural check silently passes. Capture
-    # the ORIGINAL root uuid from msgs_before and require it survives.
-    original_root_uuid: str | None = None
+    # become pseudo-roots and the structural check silently passes.
+    # REVIEW-max B.11: collect ALL parentUuid=null uuids from msgs_before
+    # (resume-of-resume sessions legitimately have multiple). Require that
+    # AT LEAST ONE of them survives. Dropping older roots is fine as long
+    # as a valid anchor remains.
+    original_root_uuids: set[str] = set()
     for _, msg, _ in msgs_before:
         if msg.get("parentUuid") is None and msg.get("uuid"):
-            original_root_uuid = msg["uuid"]
-            break
-    if original_root_uuid is not None and original_root_uuid not in surviving_uuids:
+            original_root_uuids.add(msg["uuid"])
+    if original_root_uuids and not (original_root_uuids & surviving_uuids):
         raise PruneValidationError(
             reason=(
-                f"original session root uuid {original_root_uuid!r} was "
-                f"dropped (a re-linked descendant may now have "
-                f"parentUuid=None but the semantic root is gone)"
+                f"every original session root uuid was dropped "
+                f"(expected one of {sorted(original_root_uuids)} to survive; "
+                f"a re-linked descendant may now have parentUuid=None "
+                f"but the semantic root anchor is gone)"
             ),
             evidence={
                 "failed_check": "C2",
-                "expected_root_uuid": original_root_uuid,
+                "expected_root_uuid": sorted(original_root_uuids)[0],
+                "expected_root_uuids": sorted(original_root_uuids),
                 "before_count": len(msgs_before),
                 "after_count": len(msgs_after),
             },
@@ -297,9 +317,12 @@ def validate_post_prune(
     # ── C1: parent chain resolves ───────────────────────────────────────────
     # Defense-in-depth fallback. The executor's _relink_parent_chain step
     # SHOULD ensure every surviving parentUuid resolves; this re-verifies.
+    # REVIEW-max B.10: treat falsy parentUuid (None, "", 0, ...) as
+    # equivalent to None — empty string isn't a chain reference and was
+    # producing spurious C1 failures on tools that emit "" for absent links.
     for _, msg, _ in msgs_after:
         parent = msg.get("parentUuid")
-        if parent is None:
+        if not parent:
             continue
         if parent not in surviving_uuids:
             raise PruneValidationError(
