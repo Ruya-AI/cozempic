@@ -130,7 +130,24 @@ class _PruneLock:
         return self
 
     def __exit__(self, *_) -> None:
+        # REVIEW-round3 F.N2: unlink the lock file BEFORE releasing flock.
+        # Otherwise another process can `open()` + `flock()` the same path
+        # between our LOCK_UN and our unlink, and our unlink then deletes
+        # THEIR lock file — leaving them holding a stale inode while a
+        # fourth process creates a fresh file and acquires its own flock,
+        # breaking mutual exclusion across the cluster of contenders.
+        #
+        # Ordering invariant inside the holder's critical section:
+        #   1. unlink while still holding flock — sealed atomic
+        #   2. LOCK_UN — release advisory lock
+        #   3. close fh — drop the open-file descriptor
+        # Steps 2 and 3 must come AFTER unlink so no concurrent waiter can
+        # interleave a new acquire on the same path.
         if self._fh is not None:
+            try:
+                self._lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             try:
                 import fcntl
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
@@ -138,7 +155,13 @@ class _PruneLock:
                 pass
             self._fh.close()
             self._fh = None
-        self._lock_path.unlink(missing_ok=True)
+        else:
+            # No-fcntl platform fallback (Windows): still clean up the
+            # leftover lock file the __enter__ path may have created.
+            try:
+                self._lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def get_claude_dir() -> Path:

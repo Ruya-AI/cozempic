@@ -573,7 +573,20 @@ def enforce_floor(
         must_preserve.update(new_additions)
 
     # ── Step 3: re-insert dropped must-preserve entries in line-index order ──
+    # REVIEW-round3 F.N4: ``to_re_add`` excludes any uuid present in
+    # msgs_after's kept_uuids — so an in-place REPLACEMENT (same uuid,
+    # modified payload) is by construction never re-inserted from
+    # msgs_before. This block was the documented risk surface: ensure
+    # to_re_add and kept_uuids are disjoint as an explicit invariant,
+    # because future closure passes (Group C.5) could add already-kept
+    # uuids to must_preserve and rely on the subtraction silently fixing
+    # the duplication. Make the invariant load-bearing with an assert.
     to_re_add = must_preserve - kept_uuids
+    assert kept_uuids.isdisjoint(to_re_add), (
+        "enforce_floor invariant violated: a kept (possibly replaced) "
+        "uuid was scheduled for re-insertion from msgs_before. Re-inserting "
+        "would silently revert any strategy replacement."
+    )
     if not to_re_add:
         return msgs_after
 

@@ -77,9 +77,28 @@ def _clamp_float(value: float, lo: float, hi: float, default: float) -> float:
 
 
 def _clamp_int(value: int, lo: int, hi: int, default: int) -> int:
+    """Return value coerced to int and clamped to [lo, hi] inclusive.
+
+    REVIEW-round3 F.M1: class-of-bug fold from B.2. ``int(float('inf'))``
+    raises ``OverflowError`` (not in the prior except tuple) so an inf env
+    var would crash the daemon at config-load time. NaN / inf string tokens
+    short-circuit before conversion so the fall-back path is uniform with
+    ``_clamp_float``.
+    """
+    # Short-circuit on string tokens that float() accepts but produce
+    # non-finite values (inf, -inf, nan in any case).
+    if isinstance(value, str):
+        tok = value.strip().lower()
+        if tok in ("inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
+                   "nan", "+nan", "-nan"):
+            return default
+    if isinstance(value, float):
+        import math
+        if math.isnan(value) or math.isinf(value):
+            return default
     try:
         v = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if v < lo or v > hi:
         return default
@@ -163,11 +182,34 @@ def _resolve_floor_with(file_data: dict[str, Any]) -> FloorConfig:
     else:
         last_k = _FLOOR_PRESERVE_LAST_K_DEFAULT
 
+    # REVIEW-round3 F.N7: preserve_first_message must read from file_data
+    # and the env var override. The prior hardcoded True silently ignored
+    # the user's config setting. Per E.6 prior decision (micro-session
+    # carve-out), False is now a legitimate value the operator may pick.
+    raw_env = os.environ.get("COZEMPIC_FLOOR_PRESERVE_FIRST")
+    if raw_env is not None and raw_env != "":
+        preserve_first = _parse_bool(raw_env, default=True)
+    elif "preserve_first_message" in floor_data:
+        preserve_first = bool(floor_data["preserve_first_message"])
+    else:
+        preserve_first = True
+
     return FloorConfig(
         max_user_assistant_drop_pct=drop_pct,
         preserve_last_k_turns=last_k,
-        preserve_first_message=True,
+        preserve_first_message=preserve_first,
     )
+
+
+def _parse_bool(raw: str, *, default: bool) -> bool:
+    """Permissive bool parse for env strings. Accepts 0/1, true/false,
+    yes/no, on/off (case-insensitive). Unparseable values return ``default``."""
+    tok = raw.strip().lower()
+    if tok in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if tok in ("0", "false", "no", "off", "n", "f"):
+        return False
+    return default
 
 
 def _resolve_floor() -> FloorConfig:
