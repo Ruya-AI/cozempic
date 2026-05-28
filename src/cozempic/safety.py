@@ -501,17 +501,82 @@ def enforce_floor(
                 must_preserve.add(u)
                 preserved += 1
 
-    # ── Step 3: re-insert dropped must-preserve entries in line-index order ──
-    to_re_add = must_preserve - kept_uuids
-    if not to_re_add:
-        return msgs_after
-
-    # Look up the ORIGINAL entries from msgs_before by uuid.
+    # REVIEW-max C.5: pair-counterpart closure. When the floor re-adds a
+    # message whose content references a tool_use/tool_result pair, the
+    # paired counterpart (the message holding the OTHER end of the pair)
+    # must also be in must_preserve. Otherwise the downstream orphan-fix
+    # strips the lone block and may drop the floor-rescued message entirely
+    # if that block was its only content.
+    #
+    # Build two maps over msgs_before:
+    #   tool_use_id_to_owner   — every tool_use.id → owning msg uuid
+    #   tool_use_id_to_results — tool_use_id consumed by tool_result(s) →
+    #                            owning msg uuids
+    # Then iterate until no new uuids are added (closure typically 1-hop).
     before_by_uuid: dict[str, tuple[int, dict, int]] = {
         m.get("uuid", ""): (idx, m, size)
         for idx, m, size in msgs_before
         if m.get("uuid")
     }
+    tool_use_id_to_owner: dict[str, str] = {}
+    tool_use_id_to_results: dict[str, set[str]] = {}
+    for _, m, _ in msgs_before:
+        u = m.get("uuid", "")
+        if not u:
+            continue
+        inner = m.get("message", {})
+        content = inner.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "tool_use":
+                tid = block.get("id", "")
+                if tid:
+                    tool_use_id_to_owner[tid] = u
+            elif btype == "tool_result":
+                tid = block.get("tool_use_id", "")
+                if tid:
+                    tool_use_id_to_results.setdefault(tid, set()).add(u)
+
+    # Closure pass: for each must_preserve uuid, fan out to its paired
+    # counterparts. Repeat until stable.
+    while True:
+        new_additions: set[str] = set()
+        for u in must_preserve:
+            entry = before_by_uuid.get(u)
+            if entry is None:
+                continue
+            _, m, _ = entry
+            content = m.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    tid = block.get("id", "")
+                    paired = tool_use_id_to_results.get(tid, set())
+                    for p in paired:
+                        if p not in must_preserve:
+                            new_additions.add(p)
+                elif btype == "tool_result":
+                    tid = block.get("tool_use_id", "")
+                    owner = tool_use_id_to_owner.get(tid)
+                    if owner and owner not in must_preserve:
+                        new_additions.add(owner)
+        if not new_additions:
+            break
+        must_preserve.update(new_additions)
+
+    # ── Step 3: re-insert dropped must-preserve entries in line-index order ──
+    to_re_add = must_preserve - kept_uuids
+    if not to_re_add:
+        return msgs_after
+
     re_add_entries = [before_by_uuid[u] for u in to_re_add if u in before_by_uuid]
 
     # Merge sorted by line index. This preserves the JSONL line order
