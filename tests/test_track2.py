@@ -306,7 +306,14 @@ class TestRegistryPrescriptions(unittest.TestCase):
 class TestPrescriptionIntegration(unittest.TestCase):
 
     def test_gentle_with_boundary(self):
-        """Full gentle prescription on a session with compact boundary."""
+        """Full gentle prescription on a session with compact boundary.
+
+        Post-2026-05-28 fix (PR — session pruner resumable state): the floor
+        preserves the first message, last K conversational turns, and at
+        least 50% of users + assistants. On this tiny 2-user / 2-assistant
+        fixture the floor re-adds the pre-boundary user/assistant; the
+        attribution-snapshot still drops because it isn't conversational.
+        """
         messages = [
             make_user(0, "old"),
             make_assistant(1, "old resp"),
@@ -317,14 +324,15 @@ class TestPrescriptionIntegration(unittest.TestCase):
             make_assistant(6, "new resp"),
         ]
         result_msgs, results = run_prescription(messages, PRESCRIPTIONS["gentle"], {})
-        # Pre-boundary messages (0, 1) + attribution (2) should be removed
         result_indices = {idx for idx, _, _ in result_msgs}
-        self.assertNotIn(0, result_indices)
-        self.assertNotIn(1, result_indices)
+        # Attribution-snapshot (not floor-protected) is still dropped.
         self.assertNotIn(2, result_indices)
-        # Post-boundary content should remain
+        # Post-boundary content remains.
         self.assertIn(5, result_indices)
         self.assertIn(6, result_indices)
+        # Pre-boundary conversation is now floor-protected (root + last-K).
+        self.assertIn(0, result_indices)
+        self.assertIn(1, result_indices)
 
     def test_gentle_without_boundary(self):
         """Gentle prescription without boundary should still run other strategies."""
