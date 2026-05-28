@@ -357,7 +357,110 @@ def enforce_floor(
     *,
     cfg: FloorConfig,
 ) -> list[tuple[int, dict, int]]:
-    """Re-add must-preserve messages dropped by strategies. Implemented in commit 3."""
-    # Stub for commit 2 — pass through unchanged so the validation pipeline
-    # is exercisable. Real implementation lands in commit 3 (P0-C).
-    return msgs_after
+    """Re-add must-preserve messages dropped by strategies.
+
+    Algorithm (PLAN § 2.4):
+
+      1. Compute ``kept_uuids`` = uuids present in ``msgs_after``.
+      2. Identify ``must_preserve_uuids`` from ``msgs_before``:
+         (a) First parentUuid=null message (if ``preserve_first_message``).
+         (b) Last ``preserve_last_k_turns`` user + assistant by line order.
+         (c) Enough additional user/assistant to bring survival ≥
+             ``(1 - max_user_assistant_drop_pct)``, most-recent first.
+      3. For each must-preserve uuid not in kept: re-insert the ORIGINAL
+         msgs_before entry at the position that preserves line-index
+         ordering (so the JSONL stays roughly chronological).
+      4. Re-run executor._relink_parent_chain to fix any newly-broken
+         pointers (re-adding a message can resurrect a uuid that other
+         messages were dangling against).
+
+    A replaced-in-place message (same uuid, modified payload) is in
+    ``kept_uuids`` already, so the floor does NOT undo the replacement —
+    the truncated version stays.
+    """
+    from .executor import _relink_parent_chain
+
+    # ── Step 1 ──────────────────────────────────────────────────────────────
+    kept_uuids: set[str] = {
+        m.get("uuid", "") for _, m, _ in msgs_after if m.get("uuid")
+    }
+
+    # ── Step 2: must-preserve ───────────────────────────────────────────────
+    must_preserve: set[str] = set()
+
+    if cfg.preserve_first_message:
+        for _, msg, _ in msgs_before:
+            if msg.get("parentUuid") is None and msg.get("uuid"):
+                must_preserve.add(msg["uuid"])
+                break
+
+    # (b) Last K user + assistant by line order.
+    users_in_order = [
+        (idx, m) for idx, m, _ in msgs_before if m.get("type") == "user"
+    ]
+    asst_in_order = [
+        (idx, m) for idx, m, _ in msgs_before if m.get("type") == "assistant"
+    ]
+    last_k = max(0, int(cfg.preserve_last_k_turns))
+    for _, m in users_in_order[-last_k:] if last_k > 0 else []:
+        if m.get("uuid"):
+            must_preserve.add(m["uuid"])
+    for _, m in asst_in_order[-last_k:] if last_k > 0 else []:
+        if m.get("uuid"):
+            must_preserve.add(m["uuid"])
+
+    # (c) Top up user/assistant survival to the floor cap (most-recent first).
+    # The cap is on the dropped fraction, so survival ≥ (1 - max_drop_pct).
+    survival_floor_pct = 1.0 - float(cfg.max_user_assistant_drop_pct)
+    if survival_floor_pct > 0.0:
+        for kind, in_order in (("user", users_in_order),
+                                ("assistant", asst_in_order)):
+            total = len(in_order)
+            if total == 0:
+                continue
+            # Count what we already preserve (in kept OR in must_preserve).
+            preserved = 0
+            for _, m in in_order:
+                u = m.get("uuid", "")
+                if u and (u in kept_uuids or u in must_preserve):
+                    preserved += 1
+            target = int(survival_floor_pct * total + 0.999999)
+            if preserved >= target:
+                continue
+            # Walk msgs_before from newest to oldest, adding entries until
+            # we hit the target.
+            for _, m in reversed(in_order):
+                if preserved >= target:
+                    break
+                u = m.get("uuid", "")
+                if not u:
+                    continue
+                if u in kept_uuids or u in must_preserve:
+                    continue
+                must_preserve.add(u)
+                preserved += 1
+
+    # ── Step 3: re-insert dropped must-preserve entries in line-index order ──
+    to_re_add = must_preserve - kept_uuids
+    if not to_re_add:
+        return msgs_after
+
+    # Look up the ORIGINAL entries from msgs_before by uuid.
+    before_by_uuid: dict[str, tuple[int, dict, int]] = {
+        m.get("uuid", ""): (idx, m, size)
+        for idx, m, size in msgs_before
+        if m.get("uuid")
+    }
+    re_add_entries = [before_by_uuid[u] for u in to_re_add if u in before_by_uuid]
+
+    # Merge sorted by line index. This preserves the JSONL line order
+    # invariant the downstream code (save_messages, _relink_parent_chain)
+    # relies on.
+    merged = list(msgs_after) + re_add_entries
+    merged.sort(key=lambda t: t[0])
+
+    # ── Step 4: re-link parent chains ────────────────────────────────────────
+    # Some entries in msgs_after may have had their parentUuid re-pointed
+    # away from a now-re-added message; re-running the relink with no
+    # removals leaves valid pointers untouched.
+    return _relink_parent_chain(msgs_before, merged, removals=set())

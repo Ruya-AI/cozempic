@@ -493,47 +493,47 @@ class TestExecutorWiresValidationAndFloor(unittest.TestCase):
     """run_prescription must invoke floor + validation before returning."""
 
     def test_run_prescription_aborts_on_validation_failure(self):
-        """If a strategy combo produces an invalid post-prune list, run_prescription
-        must raise PruneValidationError BEFORE save_messages is called.
+        """If a strategy combo produces an invalid post-prune list,
+        run_prescription must raise PruneValidationError BEFORE save_messages
+        is called.
 
-        Built by registering a synthetic strategy that wipes the root message.
+        Drops every user message and disables the floor — C3 (conversation
+        survival) fires inside run_prescription.
         """
         from cozempic.executor import run_prescription
-        from cozempic.registry import strategy, STRATEGIES, PRESCRIPTIONS
+        from cozempic.registry import strategy, STRATEGIES
         from cozempic.safety import PruneValidationError  # type: ignore
         from cozempic.types import PruneAction, StrategyResult
 
-        @strategy("test-drop-root", "Test only: drops the root", "gentle", "100%")
-        def _drop_root(messages, config):  # noqa: ANN001
+        @strategy("test-drop-all-users", "Test only: drops all users", "gentle", "100%")
+        def _drop_all_users(messages, config):  # noqa: ANN001
             actions = []
             for idx, msg, size in messages:
-                if msg.get("parentUuid") is None:
+                if msg.get("type") == "user":
                     actions.append(PruneAction(
                         line_index=idx, action="remove",
                         reason="test", original_bytes=size, pruned_bytes=0,
                     ))
             return StrategyResult(
-                strategy_name="test-drop-root", actions=actions,
+                strategy_name="test-drop-all-users", actions=actions,
                 original_bytes=sum(b for _, _, b in messages),
                 pruned_bytes=sum(a.original_bytes for a in actions),
                 messages_affected=len(actions),
                 messages_removed=len(actions),
                 messages_replaced=0,
-                summary="dropped root",
+                summary="dropped all users",
             )
 
         try:
             before = _build_clean_session(n_turns=5)
             with self.assertRaises(PruneValidationError):
-                # No floor would normally re-add the root; this test asserts
-                # that even if it slipped through, validation catches it.
                 run_prescription(
                     before,
-                    ["test-drop-root"],
+                    ["test-drop-all-users"],
                     {"_disable_floor_for_test": True},
                 )
         finally:
-            STRATEGIES.pop("test-drop-root", None)
+            STRATEGIES.pop("test-drop-all-users", None)
 
     def test_run_prescription_floor_re_adds_root_when_strategy_drops_it(self):
         """With the floor enabled (default), the executor re-adds the root
