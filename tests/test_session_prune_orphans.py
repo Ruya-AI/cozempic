@@ -57,12 +57,19 @@ class TestFloorDoesNotResurrectOrphans(unittest.TestCase):
         #   200 user/assistant filler turns
         messages: list[tuple[int, dict, int]] = []
         line = 0
+        # u_tool also carries a text block so that orphan-fix stripping the
+        # tool_result leaves a non-empty content list — otherwise orphan-fix
+        # drops the entire message and we lose the root, masking the bug we
+        # want to demonstrate.
         messages.append(_msg(line, {
             "type": "user", "uuid": u_tool_uuid, "parentUuid": None,
             "message": {
                 "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": TOOL_USE_ID,
-                             "content": "ok"}],
+                "content": [
+                    {"type": "text", "text": "root prompt"},
+                    {"type": "tool_result", "tool_use_id": TOOL_USE_ID,
+                     "content": "ok"},
+                ],
             },
         }))
         line += 1

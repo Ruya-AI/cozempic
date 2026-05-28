@@ -204,7 +204,16 @@ class TestParentChainResolution(unittest.TestCase):
 
 
 class TestRootPreservation(unittest.TestCase):
-    """C2 — if msgs_before had a parentUuid=null root, msgs_after MUST too."""
+    """C2 — the ORIGINAL parentUuid=null root uuid MUST survive.
+
+    Review finding H-1: a structural check (`any(parentUuid is None)`) is
+    bypassed by ``executor._relink_parent_chain`` which re-points dead-end
+    chains to ``None`` (executor.py:135 returns None on dead-end). So a
+    descendant whose original parent was dropped becomes a new pseudo-root,
+    and the structural C2 silently passes even though the semantic root is
+    gone. The fixed C2 captures ``original_root_uuid`` from ``msgs_before``
+    and requires it to be in the surviving uuids.
+    """
 
     def test_fails_when_root_is_dropped(self):
         from cozempic.safety import PruneValidationError, validate_post_prune  # type: ignore
@@ -216,6 +225,31 @@ class TestRootPreservation(unittest.TestCase):
         with self.assertRaises(PruneValidationError) as ctx:
             validate_post_prune(before, after)
         self.assertEqual(ctx.exception.evidence.get("failed_check"), "C2")
+
+    def test_fails_when_original_root_dropped_but_pseudo_root_present(self):
+        """H-1 reproducer: a descendant gets parentUuid=None after re-link,
+        but the original root uuid is gone — C2 must still fire."""
+        from cozempic.safety import PruneValidationError, validate_post_prune  # type: ignore
+
+        before = _build_clean_session(n_turns=5)
+        # Strategy drops the original root u0; _relink_parent_chain re-points
+        # u0's descendants to parentUuid=None. Model that by:
+        #   - omitting u0 from msgs_after
+        #   - flipping the next entry's parentUuid from "u0" to None to mimic
+        #     the relink behaviour (pseudo-root introduced).
+        rewired: list = []
+        for idx, msg, size in before:
+            if msg.get("uuid") == "u0":
+                continue
+            payload = dict(msg)
+            if payload.get("parentUuid") == "u0":
+                payload["parentUuid"] = None
+            rewired.append((idx, payload, msg_bytes(payload)))
+
+        with self.assertRaises(PruneValidationError) as ctx:
+            validate_post_prune(before, rewired)
+        self.assertEqual(ctx.exception.evidence.get("failed_check"), "C2")
+        self.assertEqual(ctx.exception.evidence.get("expected_root_uuid"), "u0")
 
     def test_passes_when_root_preserved_even_if_others_dropped(self):
         from cozempic.safety import validate_post_prune  # type: ignore

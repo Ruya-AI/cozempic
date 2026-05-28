@@ -214,18 +214,27 @@ def validate_post_prune(
             },
         )
 
-    # ── C2: root preserved ──────────────────────────────────────────────────
-    before_has_root = any(
-        msg.get("parentUuid") is None for _, msg, _ in msgs_before
-    )
-    after_has_root = any(
-        msg.get("parentUuid") is None for _, msg, _ in msgs_after
-    )
-    if before_has_root and not after_has_root:
+    # ── C2: original root uuid preserved ────────────────────────────────────
+    # Review finding H-1: a structural `any(parentUuid is None)` check is
+    # bypassed by _relink_parent_chain re-pointing dead-end chains to None
+    # (executor.py:135). When the original root is dropped, descendants
+    # become pseudo-roots and the structural check silently passes. Capture
+    # the ORIGINAL root uuid from msgs_before and require it survives.
+    original_root_uuid: str | None = None
+    for _, msg, _ in msgs_before:
+        if msg.get("parentUuid") is None and msg.get("uuid"):
+            original_root_uuid = msg["uuid"]
+            break
+    if original_root_uuid is not None and original_root_uuid not in surviving_uuids:
         raise PruneValidationError(
-            reason="session root (parentUuid=null) was dropped",
+            reason=(
+                f"original session root uuid {original_root_uuid!r} was "
+                f"dropped (a re-linked descendant may now have "
+                f"parentUuid=None but the semantic root is gone)"
+            ),
             evidence={
                 "failed_check": "C2",
+                "expected_root_uuid": original_root_uuid,
                 "before_count": len(msgs_before),
                 "after_count": len(msgs_after),
             },
