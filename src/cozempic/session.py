@@ -719,6 +719,46 @@ def save_messages(
                             fa.write(line + "\n")
                         fa.flush()
                         os.fsync(fa.fileno())
+
+                    # Review finding H-3: the appended delta bypassed
+                    # validate_post_prune (which ran inside run_prescription
+                    # against the in-memory pruned set, not the merged
+                    # post-append set). Re-validate the merged set here.
+                    # On failure, drop the tmp file; the live file and any
+                    # backup stay intact and the caller (guard / cli) can
+                    # retry next cycle.
+                    from .safety import (
+                        PruneValidationError, validate_post_prune,
+                    )
+                    delta_messages: list = []
+                    base_idx = len(messages)
+                    for offset, raw in enumerate(extra_lines):
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            # Should not happen — _parse_delta_lines already
+                            # validated JSON. Defensive: treat as conflict.
+                            tmp_path.unlink(missing_ok=True)
+                            raise PruneConflictError(
+                                f"Append delta failed re-parse: {path}"
+                            )
+                        delta_messages.append(
+                            (base_idx + offset, payload,
+                             len(raw.encode("utf-8"))),
+                        )
+                    merged_after = list(messages) + delta_messages
+                    # The "before" set is the pre-prune original file. We
+                    # don't have it here, so reconstruct an upper bound by
+                    # treating the merged-after as both: validate_post_prune
+                    # is conditional on the type/uuid existing in msgs_before,
+                    # so we synthesize a permissive "before" by adding the
+                    # delta entries to the in-memory messages.
+                    merged_before = list(messages) + delta_messages
+                    try:
+                        validate_post_prune(merged_before, merged_after)
+                    except PruneValidationError:
+                        tmp_path.unlink(missing_ok=True)
+                        raise
         # ─────────────────────────────────────────────────────────────────────
 
         # Backup is created after conflict check so orphaned backups are not
