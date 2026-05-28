@@ -12,6 +12,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .safety import PruneValidationError
 from .session import find_sessions, get_claude_dir, get_claude_json_path
 
 
@@ -754,14 +755,11 @@ def fix_orphaned_tool_results() -> str:
                 # Session changed mid-fix — skip rather than corrupt
                 skipped_sessions.append(sess["session_id"])
                 continue
-            except Exception as exc:  # REVIEW-max A.1
-                # PruneValidationError (H-3 post-append re-validation) or any
-                # other downstream failure — skip rather than crash the
-                # batch doctor run; the per-session backup is preserved.
-                if exc.__class__.__name__ == "PruneValidationError":
-                    skipped_sessions.append(sess["session_id"])
-                    continue
-                raise
+            except PruneValidationError:  # REVIEW-max A.1 — H-3 post-append re-validation
+                # Skip rather than crash the batch doctor run; the per-session
+                # backup is preserved.
+                skipped_sessions.append(sess["session_id"])
+                continue
 
     skipped_note = ""
     if skipped_sessions:
