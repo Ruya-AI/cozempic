@@ -424,11 +424,8 @@ def simulate_replay_readiness(
 
     Genuinely single-list-detectable errors that remain:
     - Empty message list.
-    - A parentUuid that IS defined in this file (``parent in surviving_uuids``)
-      but the message it was supposed to be on is missing: not detectable in a
-      single-list context (surviving_uuids IS the full list, so all present
-      parents resolve). This case cannot arise on a well-formed list; it is only
-      detectable in the two-list ``validate_post_prune`` interface.
+    - No chain anchor (every message's parentUuid resolves within the file in a
+      cycle, with no null or external entry point).
     - No conversational content (zero user + assistant messages).
     """
     if not messages:
@@ -449,19 +446,6 @@ def simulate_replay_readiness(
     )
     if not has_anchor:
         return False, "no chain anchor (no parentUuid=null or external entry; possible cycle)"
-
-    # Walk every entry: skip if parent is absent from the file (cross-session
-    # anchor — not a break). Only flag if a parent IS defined in this file but
-    # is missing (structural corruption not representable in a valid single list
-    # — included for defence-in-depth against future corrupt input).
-    for _, msg, _ in messages:
-        parent = msg.get("parentUuid")
-        if parent is None:
-            continue
-        if parent not in surviving_uuids:
-            # Parent not defined in this file → cross-session anchor. Not a break.
-            continue
-        # parent IS in surviving_uuids → it is present. No break here.
 
     # Conversation must include at least one user AND one assistant.
     has_user = any(m.get("type") == "user" for _, m, _ in messages)
