@@ -467,6 +467,42 @@ class TestC1BaselineRelative(unittest.TestCase):
 
         self.assertEqual(ctx.exception.evidence.get("failed_check"), "C1")
 
+    def test_c1_does_not_fire_on_zero_removal_resumed_session(self):
+        """L-2: zero-removal prune of a resumed session must NOT raise C1.
+
+        This is Junaid's EXACT named bug: `cozempic treat -rx gentle` on a
+        resumed/forked session where the strategy removes nothing → exit 5.
+
+        Setup: msgs_before == msgs_after (zero-removal prune). The session's
+        first message has parentUuid pointing to the parent session (external UUID,
+        never defined in this file). With before_uuids == surviving_uuids, the
+        old `_has_baseline=False` guard incorrectly fired C1. The correct fix
+        (unconditional baseline-relative: skip if parent not in before_uuids)
+        handles this: external-uuid is not in before_uuids → skip.
+        """
+        from cozempic.safety import validate_post_prune  # type: ignore
+
+        msgs = [
+            # Cross-session anchor: first message references the parent session's
+            # last message UUID (not present in this file).
+            {"type": "user", "uuid": "u1",
+             "parentUuid": "parent-session-uuid-00000000000000000",
+             "message": {"role": "user", "content": "hi after resume"}},
+            {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "hello"}]}},
+            {"type": "ai-title", "uuid": "t1", "parentUuid": "a1",
+             "title": "Resumed session"},
+            {"type": "last-prompt", "uuid": "lp1", "parentUuid": "a1",
+             "text": "hi after resume"},
+            {"type": "permission-mode", "uuid": "pm1", "parentUuid": "a1",
+             "mode": "default"},
+        ]
+        packed = self._pack(msgs)
+        # Zero-removal prune: msgs_before == msgs_after (gentle strategy found nothing
+        # to remove). This is Junaid's exact reported case.
+        validate_post_prune(packed, packed)  # must NOT raise — prune introduced no break
+
 
 class TestSimulateReplayReadiness(unittest.TestCase):
     """simulate_replay_readiness behavior with cross-session pointers.

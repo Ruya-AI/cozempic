@@ -352,39 +352,43 @@ def validate_post_prune(
     # equivalent to None — empty string isn't a chain reference and was
     # producing spurious C1 failures on tools that emit "" for absent links.
     #
-    # PR #102 fix — baseline-relative check (mirrors C2 at line 250–269):
-    # A parentUuid that is absent from BOTH msgs_before AND surviving_uuids
-    # (i.e., was never in this session at all) is a cross-session pointer
-    # (resumed/forked session anchor to a parent session) — not a regression
-    # introduced by this prune. Only raise when the parent was present before
-    # (in before_uuids) but is absent after (not in surviving_uuids).
+    # PR #102 fix — unconditionally baseline-relative (mirrors C2 at 250–269):
+    # Skip any parent absent from before_uuids (never existed in this session
+    # before the prune) — it is a cross-session pointer (resumed/forked session
+    # anchor to a parent session) and is NOT a regression introduced by this prune.
+    # Only raise when the parent WAS in before_uuids (existed pre-prune) but is
+    # absent from surviving_uuids (the prune removed it, breaking the chain).
+    #
+    # Correctness in the H-3 append-conflict path: when save_messages detects that
+    # Claude appended new lines mid-prune, it calls validate_post_prune(merged_before,
+    # merged_after) where merged_before = (messages_before_prune or pruned) + delta.
+    # When the caller threads the real pre-prune messages as messages_before_prune
+    # (already done at session.py:788 for guard_prune_cycle and cmd_treat), before_uuids
+    # includes the removed UUIDs and C1 fires correctly on prune-introduced breaks.
+    # When messages_before_prune is None (H-3 weak-check fallback), merged_before =
+    # pruned + delta so before_uuids == surviving_uuids; C1 is then effectively a
+    # no-op for already-removed parents. This is acceptable: the weak-check path is
+    # documented in session.py:786 as intentionally limited.
     before_uuids: set[str] = {
         msg.get("uuid", "") for _, msg, _ in msgs_before if msg.get("uuid")
     }
-    # Baseline mode: msgs_before contains MORE UUIDs than msgs_after, meaning
-    # a real prune happened and before_uuids faithfully represents the pre-prune
-    # state. In this mode we can safely skip cross-session pointers (absent from
-    # both sets). When before_uuids == surviving_uuids (H-3 fallback path where
-    # save_messages constructs merged_before = pruned + delta), we cannot
-    # distinguish cross-session from pruned-away, so fall back to strict C1.
-    _has_baseline = not before_uuids.issubset(surviving_uuids) or not surviving_uuids.issubset(before_uuids)
     for _, msg, _ in msgs_after:
         parent = msg.get("parentUuid")
         if not parent:
             continue
         if parent not in surviving_uuids:
-            if _has_baseline and parent not in before_uuids:
-                # In baseline mode: parent was NEVER in this file (absent from both
-                # before and after) — cross-session pointer, not a prune-introduced break.
+            if parent not in before_uuids:
+                # Parent was never in this file before the prune —
+                # cross-session pointer (e.g., resumed session's external anchor).
+                # The prune introduced no break here; skip.
                 continue
-            # Either:
-            # (a) Baseline mode: parent was in before_uuids but pruned away — chain break.
-            # (b) Fallback mode (before≈after): parent absent from both — strict C1.
+            # Parent was in before_uuids (existed pre-prune) but is absent
+            # after — the prune introduced this chain break. Raise C1.
             raise PruneValidationError(
                 reason=(
                     f"parentUuid {parent!r} on uuid {msg.get('uuid')!r} "
-                    f"{'resolved before prune but is absent after' if _has_baseline else 'does not resolve to a surviving message'} — "
-                    f"{'prune introduced a chain break' if _has_baseline else 'dangling parent'}"
+                    f"resolved before prune but is absent after — "
+                    f"prune introduced a chain break"
                 ),
                 evidence={
                     "failed_check": "C1",
@@ -405,6 +409,25 @@ def simulate_replay_readiness(
     conversational content. ``ok=True`` returns reason="".
 
     This is a pure-Python simulation. No Claude binary is spawned.
+
+    .. note:: Known limitation (PR #102, surfaced to Junaid):
+        This function receives only a single ``messages`` list (no before/after
+        split). Any ``parentUuid`` that is absent from ``surviving_uuids`` is
+        reported as a chain break — including cross-session pointers from
+        resumed/forked sessions whose root message references the parent
+        session's last UUID (a UUID that is legitimately external to this file).
+
+        The correct baseline-relative fix is implemented in
+        ``validate_post_prune`` (which has both ``msgs_before`` and
+        ``msgs_after``). ``simulate_replay_readiness`` currently has **zero
+        production callers** (confirmed by full-repo grep: only imported in
+        ``tests/``), so the false positive has no production blast radius today.
+        A future single-list fix (e.g., tolerate an anchor parentUuid on the
+        chain head whose UUID never appears elsewhere in the same file) is
+        feasible but deferred pending Junaid's concurrence.
+
+        Callers that need cross-session-pointer tolerance should use
+        ``validate_post_prune`` with the real pre-prune ``msgs_before``.
     """
     if not messages:
         return False, "empty message list"
@@ -416,26 +439,8 @@ def simulate_replay_readiness(
     if not roots:
         return False, "no root (no parentUuid=null entry)"
 
-    # Walk every entry; chain must resolve.
-    # PR #102 note: cross-session pointers (parentUuid pointing to a parent
-    # session's message) appear as unresolved UUIDs here. We detect these by
-    # checking whether the parent UUID is defined as ANY message's uuid in this
-    # same file. If it's not defined in this file AND not in surviving_uuids,
-    # it's a cross-session pointer — not a chain break.
-    # If it WAS defined in this file (appears in surviving_uuids) but is now
-    # absent, that's a genuine removal — but since surviving_uuids contains
-    # all UUIDs in the passed messages, a parent in surviving_uuids IS present.
-    # A parent not in surviving_uuids: either cross-session or removed.
-    # We use the uuids_in_file set (all UUIDs that appear as message.uuid)
-    # to distinguish "never defined here" (cross-session) from "removed".
-    # For this function (single-list, no before/after), we can only detect
-    # "defined in file but not in surviving" — which means it was present in
-    # an adjacent messages set not passed here. Since surviving_uuids IS built
-    # from the same messages, any uuid in surviving_uuids resolves. Any uuid
-    # NOT in surviving_uuids: either cross-session OR the message was pruned.
-    # Without a before-list, we can't distinguish them here.
-    # The PLAN §2.5 fix applies to validate_post_prune (which has both lists).
-    # simulate_replay_readiness keeps the original behaviour for robustness.
+    # Walk every entry; chain must resolve within the passed list.
+    # See the module note above for the known cross-session-pointer false positive.
     for _, msg, _ in messages:
         parent = msg.get("parentUuid")
         if parent is None:

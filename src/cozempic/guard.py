@@ -1484,11 +1484,17 @@ def _terminate_claude(
     # R-2: capture flags NOW, before the kill. _detect_claude_flags(claude_pid)
     # returns "" once the process is dead. Store on the module-level cache so
     # _resume_claude can retrieve them without re-querying a dead PID.
+    # M-3: pop the cache on any early return that doesn't call _resume_claude
+    # (FAILED_TO_DIE, secondary ALREADY_GONE) so the dict stays bounded.
     _original_flags_cache[claude_pid] = _detect_claude_flags(claude_pid)
+
+    def _pop_flags_cache() -> None:
+        _original_flags_cache.pop(claude_pid, None)
 
     if term_env == "tmux":
         if not _is_claude_process(claude_pid, session_path=session_path):
             print(f"  WARNING: PID {claude_pid} no longer Claude — skipping tmux terminate.")
+            _pop_flags_cache()
             return "ALREADY_GONE"
         pane = os.environ.get("TMUX_PANE", "")
         print(f"  tmux detected — sending /exit...")
@@ -1506,12 +1512,14 @@ def _terminate_claude(
             exited = _wait_for_exit(claude_pid, timeout=5.0)
         if not exited:
             print(f"  PID {claude_pid} still alive after /exit + SIGTERM — FAILED_TO_DIE.")
+            _pop_flags_cache()
             return "FAILED_TO_DIE"
         return "TERMINATED"
 
     if term_env == "screen":
         if not _is_claude_process(claude_pid, session_path=session_path):
             print(f"  WARNING: PID {claude_pid} no longer Claude — skipping screen terminate.")
+            _pop_flags_cache()
             return "ALREADY_GONE"
         screen_session = os.environ.get("STY", "")
         print(f"  screen detected — sending /exit...")
@@ -1529,6 +1537,7 @@ def _terminate_claude(
             exited = _wait_for_exit(claude_pid, timeout=5.0)
         if not exited:
             print(f"  PID {claude_pid} still alive after /exit + SIGTERM — FAILED_TO_DIE.")
+            _pop_flags_cache()
             return "FAILED_TO_DIE"
         return "TERMINATED"
 
@@ -1560,6 +1569,7 @@ def _terminate_claude(
 
     if not exited:
         print(f"  PID {claude_pid} still alive after SIGTERM+SIGKILL — FAILED_TO_DIE.")
+        _pop_flags_cache()
         return "FAILED_TO_DIE"
     return "TERMINATED"
 

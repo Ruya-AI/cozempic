@@ -215,6 +215,16 @@ class OverflowRecovery:
         # Lock-order invariant: _ReloadLock ⊃ _PruneLock. Acquire _ReloadLock
         # here (outer), then guard_prune_cycle(auto_reload=False) acquires only
         # _PruneLock (inner).
+        #
+        # M-2 trade-off: unlike the daemon path (where the futile-reload check
+        # at guard.py:1061/1078 precedes _terminate_claude), overflow terminates
+        # Claude BEFORE knowing the prune is worthwhile. If the session is
+        # dominated by immutable tool-result blocks and prune frees ~0 bytes,
+        # Claude is killed and resumed into an unchanged-overflow session. This
+        # is bounded by the circuit breaker (max 3 recoveries in 5 min) and is
+        # the accepted trade-off for the 90% emergency reactive path: eliminating
+        # the #106 race (os.replace on a live fd) takes priority over avoiding
+        # a futile kill. A cheap pre-kill futility estimate could be added later.
         claude_pid = self.claude_pid if self.claude_pid is not None else find_claude_pid()
 
         if claude_pid:
@@ -233,6 +243,17 @@ class OverflowRecovery:
                         print(
                             f"  [{now}] Terminate failed (PID {claude_pid} refused to exit). "
                             f"Skipping prune to avoid #106 race.",
+                            file=sys.stderr,
+                        )
+                        self.breaker.record_recovery(rx, before_mb, before_mb)
+                        return
+
+                    if term_status == "SKIPPED_SSH":
+                        # SSH session: Claude is still alive (no kill was sent).
+                        # Do NOT os.replace a live file — same #106 race as FAILED_TO_DIE.
+                        # _terminate_claude already printed manual-resume instructions.
+                        print(
+                            f"  [{now}] SSH session — skipping prune on live file (#106).",
                             file=sys.stderr,
                         )
                         self.breaker.record_recovery(rx, before_mb, before_mb)

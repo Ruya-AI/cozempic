@@ -95,10 +95,18 @@ class TestSaveMessagesRevalidatesAppendDelta(unittest.TestCase):
             #    (we skip that for this isolated test). The pruned set is:
             pruned = [m for m in messages if m[1].get("uuid") != "u1"]
 
+            # PR #102 C-1 fix: C1 is now unconditionally baseline-relative.
+            # `messages_before_prune` must be the REAL pre-prune messages so
+            # `before_uuids` contains u1 (which was pruned). Without it,
+            # merged_before = pruned + delta (no u1), so before_uuids lacks u1,
+            # and C1 skips the a_late parentUuid as a cross-session pointer.
+            # This mirrors how guard_prune_cycle and cmd_treat actually call
+            # save_messages (they always thread the real pre-prune list).
             with self.assertRaises(PruneValidationError):
                 save_messages(
                     session_path, pruned,
                     create_backup=False, snapshot=snap,
+                    messages_before_prune=messages,  # real pre-prune state (required for C-1)
                 )
 
             # 5. The live file must remain at its appended state (NOT replaced

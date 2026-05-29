@@ -194,6 +194,37 @@ class TestOverflowTerminateFirst(unittest.TestCase):
             ),
         )
 
+    def test_overflow_skipped_ssh_aborts(self):
+        """L-3 / H-1 fix: SKIPPED_SSH must abort overflow recovery (no prune).
+
+        In an SSH session _terminate_claude returns SKIPPED_SSH — Claude is
+        still alive (no kill was sent). Calling guard_prune_cycle → save_messages
+        → os.replace on a LIVE JSONL is the exact #106 race the PR claims to fix.
+        The fix treats SKIPPED_SSH identically to FAILED_TO_DIE: abort recovery.
+        """
+        prune_called = []
+
+        def fake_terminate(pid, **kw):
+            return "SKIPPED_SSH"
+
+        recovery = self._make_recovery()
+
+        with patch("cozempic.guard.guard_prune_cycle",
+                   side_effect=lambda **kw: prune_called.append(True) or {}), \
+             patch("cozempic.guard._terminate_claude", side_effect=fake_terminate), \
+             patch("cozempic.session.find_claude_pid", return_value=FAKE_PID), \
+             patch("cozempic.guard.checkpoint_team"):
+            recovery._do_recover()
+
+        self.assertEqual(
+            prune_called, [],
+            msg=(
+                f"guard_prune_cycle must NOT be called when _terminate_claude returns "
+                f"SKIPPED_SSH — Claude is still alive on SSH, os.replace on live JSONL "
+                f"= #106 race. prune_called={prune_called}."
+            ),
+        )
+
 
 class TestRace106Regression(unittest.TestCase):
     """P5 — #106 race: append after classify must be preserved or refused.
