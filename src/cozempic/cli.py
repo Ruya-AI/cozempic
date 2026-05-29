@@ -454,6 +454,29 @@ def cmd_strategy(args):
         print()
 
     if args.execute:
+        # PR #102 P4 — idle gate: refuse to execute on an active session unless
+        # --force is passed. Mirrors cmd_treat's protection. Active-session guard
+        # runs BEFORE lock acquisition (same as guard_prune_cycle) so a refused
+        # execute doesn't block other consumers of the prune lock.
+        from .safety import (
+            ActiveSessionError,
+            assert_session_idle_or_force,
+            resolve_min_idle_hours,
+        )
+        try:
+            assert_session_idle_or_force(
+                path,
+                min_idle_hours=resolve_min_idle_hours(),
+                force=getattr(args, "force", False),
+            )
+        except ActiveSessionError as exc:
+            print(
+                f"  Aborted — session active (mtime {exc.idle_minutes:.1f} min ago, "
+                f"threshold {exc.threshold_hours}h). Use --force to override.",
+                file=sys.stderr,
+            )
+            sys.exit(4)
+
         new_messages = execute_actions(messages, sr.actions)
         # Acquire per-session prune lock + pass snapshot for append-conflict
         # detection. Same protection as cmd_treat.
@@ -1300,6 +1323,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_strat.add_argument("--verbose", "-v", action="store_true", help="Show action details")
     p_strat.add_argument("--project", help="Filter by project name")
     p_strat.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"])
+    p_strat.add_argument(
+        "--force", action="store_true",
+        help="Override the active-session idle guard (refuses to execute on sessions "
+             "modified within COZEMPIC_MIN_IDLE_HOURS hours, default 24).",
+    )
 
     # reload
     p_reload = sub.add_parser("reload", help="Treat current session and auto-resume after exit")

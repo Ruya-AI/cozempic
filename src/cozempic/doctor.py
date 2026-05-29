@@ -726,6 +726,12 @@ def fix_orphaned_tool_results() -> str:
     sessions_fixed = 0
     skipped_sessions = []
 
+    from .safety import (
+        ActiveSessionError,
+        assert_session_idle_or_force,
+        resolve_min_idle_hours,
+    )
+
     for sess in sessions:
         try:
             count = _count_orphaned_tool_results(sess["path"])
@@ -734,8 +740,23 @@ def fix_orphaned_tool_results() -> str:
         except (OSError, UnicodeDecodeError):
             continue
 
-        from .executor import fix_orphaned_tool_results as _fix
         path = sess["path"]
+
+        # PR #102 P4 — idle gate: never modify an active session in a batch
+        # doctor run. The doctor operates over ALL sessions; silently skipping
+        # active ones is safer than os.replacing a live JSONL. force=False is
+        # intentional — doctor is a batch command, not a targeted user override.
+        try:
+            assert_session_idle_or_force(
+                path,
+                min_idle_hours=resolve_min_idle_hours(),
+                force=False,
+            )
+        except ActiveSessionError:
+            skipped_sessions.append(sess["session_id"])
+            continue
+
+        from .executor import fix_orphaned_tool_results as _fix
         # Take snapshot BEFORE load_messages so append-conflict detection
         # in save_messages can correctly identify if Claude wrote new lines
         # between our load and save.
