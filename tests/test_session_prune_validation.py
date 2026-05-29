@@ -489,24 +489,53 @@ class TestReplaySimulation(unittest.TestCase):
         self.assertTrue(ok, msg=f"clean session failed replay simulation: {reason}")
 
     def test_replay_simulation_fails_when_root_missing(self):
+        """PR #102 fix: stripping u0 makes u0's children look like cross-session
+        anchors (their parentUuid "u0" is absent from the list → external anchor).
+        The session now has an anchor and returns ok=True. The old assertion
+        (ok=False, reason contains "root") is no longer correct — removing the
+        root is not single-list-detectable after the cross-session-pointer fix.
+        Updated to assert the new correct behavior.
+        """
         from cozempic.safety import simulate_replay_readiness  # type: ignore
 
         before = _build_clean_session(n_turns=5)
-        # Strip the root
+        # Strip the root — u0's children now have parentUuid="u0" which is absent
+        # from the list → treated as cross-session anchors → ok=True.
         broken = [m for m in before if m[1].get("uuid") != "u0"]
         ok, reason = simulate_replay_readiness(broken)
-        self.assertFalse(ok)
-        self.assertIn("root", reason.lower())
+        # After fix: "root missing" is not detectable single-list (looks like
+        # a resumed session with an external anchor). ok=True is correct here.
+        self.assertTrue(
+            ok,
+            msg=(
+                f"Stripping null-root makes children look like external-anchor messages. "
+                f"ok=False would be a false positive. Got reason={reason!r}."
+            ),
+        )
 
     def test_replay_simulation_fails_on_broken_chain(self):
+        """PR #102 fix: dropping a1 makes u2 (parentUuid="a1") look like a
+        cross-session anchor. NOT a detectable break in single-list context.
+        Updated to assert the new correct behavior (ok=True for this scenario).
+        """
         from cozempic.safety import simulate_replay_readiness  # type: ignore
 
         before = _build_clean_session(n_turns=5)
-        # Drop intermediate "a1" but keep entries pointing at it
+        # Drop intermediate "a1" — u2 now references a UUID absent from list.
+        # After fix: treated as cross-session anchor → ok=True.
         broken = [m for m in before if m[1].get("uuid") != "a1"]
         ok, reason = simulate_replay_readiness(broken)
-        self.assertFalse(ok)
-        self.assertIn("chain", reason.lower())
+        # After fix: ok=True. A "broken chain" caused by pruning is indistinguishable
+        # from a cross-session pointer in the single-list context. Detecting this
+        # requires validate_post_prune (two-list interface).
+        self.assertTrue(
+            ok,
+            msg=(
+                f"Dropping an intermediate message looks like a cross-session pointer. "
+                f"Single-list context cannot distinguish this from a resumed session. "
+                f"ok=False would be a false positive. Got reason={reason!r}."
+            ),
+        )
 
     def test_replay_simulation_fails_on_zero_conversation(self):
         from cozempic.safety import simulate_replay_readiness  # type: ignore

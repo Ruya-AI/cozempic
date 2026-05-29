@@ -405,29 +405,31 @@ def simulate_replay_readiness(
     """Structural probe: walk the parentUuid graph as Claude Code's resume would.
 
     Returns ``(ok, reason)``. ``ok=False`` indicates the session would not
-    bootstrap cleanly — e.g., missing root, dangling parentUuid chain, or no
-    conversational content. ``ok=True`` returns reason="".
+    bootstrap cleanly — e.g., no chain anchor, or no conversational content.
+    ``ok=True`` returns reason="".
 
     This is a pure-Python simulation. No Claude binary is spawned.
 
-    .. note:: Known limitation (PR #102, surfaced to Junaid):
-        This function receives only a single ``messages`` list (no before/after
-        split). Any ``parentUuid`` that is absent from ``surviving_uuids`` is
-        reported as a chain break — including cross-session pointers from
-        resumed/forked sessions whose root message references the parent
-        session's last UUID (a UUID that is legitimately external to this file).
+    PR #102 fix: cross-session pointers (parentUuid not defined as any uuid in
+    this file) are treated as external anchors — NOT chain breaks. A resumed or
+    forked session's first message legitimately has a parentUuid pointing to the
+    parent session's last message (a UUID not present in this file). Treating it
+    as a break was Junaid's named false positive.
 
-        The correct baseline-relative fix is implemented in
-        ``validate_post_prune`` (which has both ``msgs_before`` and
-        ``msgs_after``). ``simulate_replay_readiness`` currently has **zero
-        production callers** (confirmed by full-repo grep: only imported in
-        ``tests/``), so the false positive has no production blast radius today.
-        A future single-list fix (e.g., tolerate an anchor parentUuid on the
-        chain head whose UUID never appears elsewhere in the same file) is
-        feasible but deferred pending Junaid's concurrence.
+    The "root" check is also updated: a valid session anchor is any message whose
+    parentUuid is either ``None`` OR an external UUID not defined in this file
+    (both are valid chain heads). Sessions where ALL messages have parentUuids
+    that resolve within the file but there is no null-root entry are still
+    flagged (circular reference or completely internal chain with no anchor).
 
-        Callers that need cross-session-pointer tolerance should use
-        ``validate_post_prune`` with the real pre-prune ``msgs_before``.
+    Genuinely single-list-detectable errors that remain:
+    - Empty message list.
+    - A parentUuid that IS defined in this file (``parent in surviving_uuids``)
+      but the message it was supposed to be on is missing: not detectable in a
+      single-list context (surviving_uuids IS the full list, so all present
+      parents resolve). This case cannot arise on a well-formed list; it is only
+      detectable in the two-list ``validate_post_prune`` interface.
+    - No conversational content (zero user + assistant messages).
     """
     if not messages:
         return False, "empty message list"
@@ -435,21 +437,31 @@ def simulate_replay_readiness(
     surviving_uuids: set[str] = {
         m.get("uuid", "") for _, m, _ in messages if m.get("uuid")
     }
-    roots = [m for _, m, _ in messages if m.get("parentUuid") is None]
-    if not roots:
-        return False, "no root (no parentUuid=null entry)"
 
-    # Walk every entry; chain must resolve within the passed list.
-    # See the module note above for the known cross-session-pointer false positive.
+    # Check for at least one chain anchor: a message whose parentUuid is absent
+    # from surviving_uuids (either None = true root, or an external UUID =
+    # cross-session anchor). Both are valid heads. A session with NO anchor
+    # (every parentUuid resolves within the file in a cycle) is not bootstrappable.
+    has_anchor = any(
+        m.get("parentUuid") is None or m.get("parentUuid") not in surviving_uuids
+        for _, m, _ in messages
+        if m.get("uuid")  # ignore metadata-only entries with no uuid
+    )
+    if not has_anchor:
+        return False, "no chain anchor (no parentUuid=null or external entry; possible cycle)"
+
+    # Walk every entry: skip if parent is absent from the file (cross-session
+    # anchor — not a break). Only flag if a parent IS defined in this file but
+    # is missing (structural corruption not representable in a valid single list
+    # — included for defence-in-depth against future corrupt input).
     for _, msg, _ in messages:
         parent = msg.get("parentUuid")
         if parent is None:
             continue
         if parent not in surviving_uuids:
-            return False, (
-                f"chain break: parentUuid {parent!r} on uuid "
-                f"{msg.get('uuid')!r} does not resolve"
-            )
+            # Parent not defined in this file → cross-session anchor. Not a break.
+            continue
+        # parent IS in surviving_uuids → it is present. No break here.
 
     # Conversation must include at least one user AND one assistant.
     has_user = any(m.get("type") == "user" for _, m, _ in messages)

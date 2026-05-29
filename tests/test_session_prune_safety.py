@@ -505,49 +505,41 @@ class TestC1BaselineRelative(unittest.TestCase):
 
 
 class TestSimulateReplayReadiness(unittest.TestCase):
-    """simulate_replay_readiness behavior with cross-session pointers.
+    """simulate_replay_readiness — PR #102 fix: cross-session anchors tolerated.
 
-    Note (PR #102): The original PLAN §2.5 called for skipping cross-session
-    pointers in simulate_replay_readiness. After analysis, this is NOT safely
-    implementable: with a single-list API (no before/after), we cannot
-    distinguish "cross-session pointer" from "message was removed and is
-    now absent" — both appear as parentUuid not in surviving_uuids. Applying
-    the skip would break test_replay_simulation_fails_on_broken_chain, which
-    correctly detects removed-message chain breaks.
+    After the PR #102 fix, cross-session pointers (parentUuid not defined as any
+    uuid in the passed list) are treated as external anchors, NOT chain breaks.
+    A resumed/forked session whose first message references the parent session's
+    last UUID now returns ok=True.
 
-    The baseline-relative fix (PLAN P3) WAS correctly applied to
-    validate_post_prune (which has both msgs_before and msgs_after).
-    simulate_replay_readiness remains conservative: any unresolved parentUuid
-    is flagged. Test updated to reflect this design decision.
+    The "root" check also updated: any message whose parentUuid is absent from
+    the file (None or external UUID) is a valid chain anchor. A resumed session
+    with NO parentUuid=None message is valid as long as it has an external anchor.
+
+    Genuinely single-list-detectable failures: empty list, no anchor at all
+    (circular graph), no conversational content.
     """
 
     def _pack(self, raw: list[dict]) -> list[tuple[int, dict, int]]:
         return [(i, m, len(json.dumps(m))) for i, m in enumerate(raw)]
 
     def test_simulate_replay_ok_on_cross_session_pointer(self):
-        """Note: simulate_replay_readiness cannot safely skip cross-session pointers.
+        """Resumed session with external anchor returns ok=True.
 
-        With a single-list API, we can't distinguish "cross-session pointer"
-        (parentUuid never defined in file) from "message removed" (parentUuid
-        was defined but pruned away). Both appear as unresolved parentUuid.
-
-        The baseline-relative fix applies to validate_post_prune (2-list API).
-        This test verifies the actual behavior of simulate_replay_readiness:
-        a session with a chain-break (whether cross-session or removed) returns
-        ok=False.
-
-        The PLAN §3.4 test for this function is superseded by the validate_post_prune
-        fix (C1 baseline-relative) which IS correctly implemented.
+        The first message's parentUuid points outside the file — this is a
+        cross-session anchor for a resumed session and must NOT be a chain break.
         """
         from cozempic.safety import simulate_replay_readiness  # type: ignore
 
-        # Session with all local parents resolved (no cross-session pointer in chain)
+        # Pure resumed session: no parentUuid=None (the external-anchor message
+        # serves as the chain head). This is Junaid's false-positive scenario.
         messages = self._pack([
-            {"type": "user", "uuid": "u1", "parentUuid": None,
-             "message": {"role": "user", "content": "first"}},
+            {"type": "user", "uuid": "u1",
+             "parentUuid": "parent-session-last-uuid-0000000000",
+             "message": {"role": "user", "content": "first resumed turn"}},
             {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
              "message": {"role": "assistant",
-                         "content": [{"type": "text", "text": "r1"}]}},
+                         "content": [{"type": "text", "text": "reply"}]}},
             {"type": "user", "uuid": "u2", "parentUuid": "a1",
              "message": {"role": "user", "content": "second"}},
             {"type": "assistant", "uuid": "a2", "parentUuid": "u2",
@@ -555,32 +547,51 @@ class TestSimulateReplayReadiness(unittest.TestCase):
                          "content": [{"type": "text", "text": "r2"}]}},
         ])
         ok, reason = simulate_replay_readiness(messages)
-        self.assertTrue(ok, f"Clean session should return ok=True. Got: {reason!r}")
+        self.assertTrue(
+            ok,
+            msg=(
+                f"Resumed session with external anchor must return ok=True. "
+                f"Got ok={ok!r}, reason={reason!r}. "
+                f"Cross-session pointers are NOT chain breaks (Junaid's named false positive)."
+            ),
+        )
         self.assertEqual(reason, "")
 
-    def test_simulate_replay_detects_genuine_intrafile_break(self):
-        """A parentUuid not in the passed list returns (False, "chain break: ...").
-        This covers both removed-message chains and cross-session pointers —
-        simulate_replay_readiness cannot distinguish them.
-        """
+    def test_simulate_replay_ok_on_clean_session_with_null_root(self):
+        """Standard session with parentUuid=None root returns ok=True."""
         from cozempic.safety import simulate_replay_readiness  # type: ignore
 
         messages = self._pack([
             {"type": "user", "uuid": "u1", "parentUuid": None,
-             "message": {"role": "user", "content": "root"}},
+             "message": {"role": "user", "content": "first"}},
             {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
              "message": {"role": "assistant",
                          "content": [{"type": "text", "text": "r1"}]}},
-            # a2 references "missing_parent" — not defined anywhere in the list.
-            {"type": "user", "uuid": "u2", "parentUuid": "missing_parent",
-             "message": {"role": "user", "content": "q2"}},
-            {"type": "assistant", "uuid": "a2", "parentUuid": "u2",
-             "message": {"role": "assistant",
-                         "content": [{"type": "text", "text": "r2"}]}},
         ])
         ok, reason = simulate_replay_readiness(messages)
-        self.assertFalse(ok, "Unresolved parentUuid must return ok=False.")
-        self.assertIn("chain", reason.lower())
+        self.assertTrue(ok, f"Clean session should return ok=True. Got: {reason!r}")
+        self.assertEqual(reason, "")
+
+    def test_simulate_replay_fails_on_no_conversation(self):
+        """A list with no user/assistant content returns ok=False.
+        This is genuinely detectable without a before/after split.
+        """
+        from cozempic.safety import simulate_replay_readiness  # type: ignore
+
+        messages = self._pack([
+            {"type": "ai-title", "uuid": "t1", "parentUuid": None, "title": "x"},
+        ])
+        ok, reason = simulate_replay_readiness(messages)
+        self.assertFalse(ok, "Metadata-only list must return ok=False.")
+        self.assertIn("conversation", reason.lower())
+
+    def test_simulate_replay_fails_on_empty_list(self):
+        """Empty message list returns ok=False."""
+        from cozempic.safety import simulate_replay_readiness  # type: ignore
+
+        ok, reason = simulate_replay_readiness([])
+        self.assertFalse(ok)
+        self.assertIn("empty", reason.lower())
 
 
 if __name__ == "__main__":
