@@ -12,6 +12,20 @@ Checkpoint triggers:
   1. Every N seconds (guard daemon)
   2. On demand via `cozempic checkpoint` (hook-driven)
   3. At file size threshold (emergency prune)
+
+PR #102 — Terminate-first restructure:
+  The reload pipeline is now: terminate (kill + wait) → prune + save on the
+  QUIESCED file → resume. This eliminates the #106 TOCTOU race where
+  save_messages (os.replace) raced the live Claude process's fd.
+
+  New split API:
+    _terminate_claude(pid, ...) -> "TERMINATED" | "ALREADY_GONE" | "SKIPPED_SSH" | "FAILED_TO_DIE"
+    _resume_claude(pid, project_dir, ...)   — resume only, no kill
+    _terminate_and_resume(...)              — preserved as thin composition wrapper
+
+  All 4 daemon tiers (HARD1/HARD2/agents-active/SOFT) now pass force=True to
+  guard_prune_cycle so active sessions are actually pruned (idle gate was
+  silently blocking all daemon-managed prunes, see PR #102 § Root Cause).
 """
 
 from __future__ import annotations
