@@ -222,6 +222,9 @@ class TestOverflowDetection(unittest.TestCase):
                 claude_pid=7777,
             )
 
+            # PR #102 P2: overflow now uses _terminate_claude + _resume_claude
+            # instead of _terminate_and_resume. Mock both; _terminate_claude
+            # must be called with the explicit claude_pid.
             with (
                 patch.object(recovery, "detect_overflow", return_value=True),
                 patch("cozempic.guard.guard_prune_cycle", return_value={
@@ -229,15 +232,16 @@ class TestOverflowDetection(unittest.TestCase):
                     "original_tokens": 1000,
                     "final_tokens": 500,
                 }),
-                patch("cozempic.guard._terminate_and_resume") as mock_reload,
+                patch("cozempic.guard._terminate_claude", return_value="TERMINATED") as mock_terminate,
+                patch("cozempic.guard._resume_claude"),
                 patch("cozempic.session.find_claude_pid", return_value=None),
             ):
                 recovery.recover()
 
-            mock_reload.assert_called_once_with(
-                7777, self.tmpdir,
-                session_id="test-explicit-pid",
+            mock_terminate.assert_called_once_with(
+                7777,
                 session_path=self.session_path,
+                session_id="test-explicit-pid",
             )
         finally:
             breaker.reset()

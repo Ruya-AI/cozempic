@@ -353,26 +353,38 @@ def validate_post_prune(
     # producing spurious C1 failures on tools that emit "" for absent links.
     #
     # PR #102 fix — baseline-relative check (mirrors C2 at line 250–269):
-    # Only raise if the parent was present in msgs_before (i.e., the prune
-    # introduced the break). A parentUuid that was absent before AND after
-    # is a cross-session pointer (resumed/forked session anchor to a parent
-    # session) — not a regression introduced by this prune.
+    # A parentUuid that is absent from BOTH msgs_before AND surviving_uuids
+    # (i.e., was never in this session at all) is a cross-session pointer
+    # (resumed/forked session anchor to a parent session) — not a regression
+    # introduced by this prune. Only raise when the parent was present before
+    # (in before_uuids) but is absent after (not in surviving_uuids).
     before_uuids: set[str] = {
         msg.get("uuid", "") for _, msg, _ in msgs_before if msg.get("uuid")
     }
+    # Baseline mode: msgs_before contains MORE UUIDs than msgs_after, meaning
+    # a real prune happened and before_uuids faithfully represents the pre-prune
+    # state. In this mode we can safely skip cross-session pointers (absent from
+    # both sets). When before_uuids == surviving_uuids (H-3 fallback path where
+    # save_messages constructs merged_before = pruned + delta), we cannot
+    # distinguish cross-session from pruned-away, so fall back to strict C1.
+    _has_baseline = not before_uuids.issubset(surviving_uuids) or not surviving_uuids.issubset(before_uuids)
     for _, msg, _ in msgs_after:
         parent = msg.get("parentUuid")
         if not parent:
             continue
-        if parent not in before_uuids:
-            # Parent was never in this file — cross-session pointer, not a break.
-            continue
         if parent not in surviving_uuids:
+            if _has_baseline and parent not in before_uuids:
+                # In baseline mode: parent was NEVER in this file (absent from both
+                # before and after) — cross-session pointer, not a prune-introduced break.
+                continue
+            # Either:
+            # (a) Baseline mode: parent was in before_uuids but pruned away — chain break.
+            # (b) Fallback mode (before≈after): parent absent from both — strict C1.
             raise PruneValidationError(
                 reason=(
                     f"parentUuid {parent!r} on uuid {msg.get('uuid')!r} "
-                    f"resolved before prune but is absent after — "
-                    f"prune introduced a chain break"
+                    f"{'resolved before prune but is absent after' if _has_baseline else 'does not resolve to a surviving message'} — "
+                    f"{'prune introduced a chain break' if _has_baseline else 'dangling parent'}"
                 ),
                 evidence={
                     "failed_check": "C1",
@@ -404,29 +416,35 @@ def simulate_replay_readiness(
     if not roots:
         return False, "no root (no parentUuid=null entry)"
 
-    # Walk every entry; chain must resolve — but only for intra-file parents.
-    # PR #102 fix: cross-session pointers (parentUuid not defined as any
-    # message's uuid in this file) are external anchors and are not chain
-    # breaks. `surviving_uuids` is the full set of UUIDs defined in this
-    # file, so `parent not in surviving_uuids` means it was never defined
-    # here → skip (external pointer). A genuine intra-file break would
-    # require the parent to have been defined in the file but missing —
-    # which cannot happen in simulate_replay_readiness since it takes only
-    # one list (no before/after split). This function defends against future
-    # corrupt input: if a parent appears as a uuid in the same list but is
-    # absent from the set, that IS a break (structural corruption).
+    # Walk every entry; chain must resolve.
+    # PR #102 note: cross-session pointers (parentUuid pointing to a parent
+    # session's message) appear as unresolved UUIDs here. We detect these by
+    # checking whether the parent UUID is defined as ANY message's uuid in this
+    # same file. If it's not defined in this file AND not in surviving_uuids,
+    # it's a cross-session pointer — not a chain break.
+    # If it WAS defined in this file (appears in surviving_uuids) but is now
+    # absent, that's a genuine removal — but since surviving_uuids contains
+    # all UUIDs in the passed messages, a parent in surviving_uuids IS present.
+    # A parent not in surviving_uuids: either cross-session or removed.
+    # We use the uuids_in_file set (all UUIDs that appear as message.uuid)
+    # to distinguish "never defined here" (cross-session) from "removed".
+    # For this function (single-list, no before/after), we can only detect
+    # "defined in file but not in surviving" — which means it was present in
+    # an adjacent messages set not passed here. Since surviving_uuids IS built
+    # from the same messages, any uuid in surviving_uuids resolves. Any uuid
+    # NOT in surviving_uuids: either cross-session OR the message was pruned.
+    # Without a before-list, we can't distinguish them here.
+    # The PLAN §2.5 fix applies to validate_post_prune (which has both lists).
+    # simulate_replay_readiness keeps the original behaviour for robustness.
     for _, msg, _ in messages:
         parent = msg.get("parentUuid")
         if parent is None:
             continue
         if parent not in surviving_uuids:
-            # parent not in surviving_uuids → not defined in this file.
-            # Cross-session pointer — not a chain break.
-            continue
-        # parent IS in surviving_uuids — it was defined and is present.
-        # No break for this message. (The loop only reaches this point when
-        # the parent resolves; non-resolving cross-session pointers are
-        # skipped above.) No action needed.
+            return False, (
+                f"chain break: parentUuid {parent!r} on uuid "
+                f"{msg.get('uuid')!r} does not resolve"
+            )
 
     # Conversation must include at least one user AND one assistant.
     has_user = any(m.get("type") == "user" for _, m, _ in messages)

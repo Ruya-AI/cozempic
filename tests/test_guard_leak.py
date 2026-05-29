@@ -514,21 +514,27 @@ class Test_TerminateAndResumeAcceptsSessionPath(unittest.TestCase):
 
     def test_terminate_and_resume_plumbs_session_path_to_identity_check(self):
         """Static source contract: every _is_claude_process call inside
-        _terminate_and_resume MUST carry session_path."""
+        _terminate_claude MUST carry session_path.
+
+        PR #102 P1: _terminate_and_resume is now a thin composition wrapper
+        (_terminate_claude + _resume_claude). The identity checks live in
+        _terminate_claude; _terminate_and_resume passes session_path through.
+        Test updated to inspect _terminate_claude (where the checks now live).
+        """
         import inspect
         import re as _re
-        from cozempic.guard import _terminate_and_resume
-        src = inspect.getsource(_terminate_and_resume)
+        from cozempic.guard import _terminate_claude
+        src = inspect.getsource(_terminate_claude)
         # Find every _is_claude_process( ... ) invocation and confirm each
         # references session_path. Matches across linebreaks.
         calls = _re.findall(
             r"_is_claude_process\(([^()]*(?:\([^()]*\)[^()]*)*)\)",
             src, flags=_re.DOTALL,
         )
-        self.assertGreater(len(calls), 0, "no identity check found in _terminate_and_resume")
+        self.assertGreater(len(calls), 0, "no identity check found in _terminate_claude")
         missing = [c.strip() for c in calls if "session_path" not in c]
         self.assertEqual(
             missing, [],
-            "these _is_claude_process calls in _terminate_and_resume lack "
+            "these _is_claude_process calls in _terminate_claude lack "
             f"session_path: {missing!r}",
         )

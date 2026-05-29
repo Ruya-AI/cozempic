@@ -99,11 +99,15 @@ class TestMarginalPruneSkipsReload(unittest.TestCase):
 
         from cozempic.guard import guard_prune_cycle
 
+        # PR #102 P1: guard_prune_cycle uses _terminate_claude instead of _terminate_and_resume.
+        # For the GAP-D path (futile reload), neither should be called.
         with patch("cozempic.guard.load_messages", return_value=fake_messages_orig), \
              patch("cozempic.guard.prune_with_team_protect",
                    return_value=(fake_messages_pruned, {}, fake_team_state)), \
              patch("cozempic.guard.save_messages", return_value=None), \
              patch("cozempic.guard.snapshot_session", return_value=MagicMock()), \
+             patch("cozempic.guard._terminate_claude",
+                   side_effect=lambda *a, **kw: terminate_called.append(True) or "TERMINATED"), \
              patch("cozempic.guard._terminate_and_resume",
                    side_effect=lambda *a, **kw: terminate_called.append(True)), \
              patch("cozempic.tokens.estimate_session_tokens",
@@ -132,7 +136,7 @@ class TestMarginalPruneSkipsReload(unittest.TestCase):
         )
         self.assertEqual(
             terminate_called, [],
-            "_terminate_and_resume was called despite marginal savings — reload not suppressed.",
+            "_terminate_claude / _terminate_and_resume called despite marginal savings — reload not suppressed.",
         )
 
 
@@ -172,13 +176,17 @@ class TestSubstantialPruneProceedsWithReload(unittest.TestCase):
 
         from cozempic.guard import guard_prune_cycle
 
+        # PR #102 P1: guard_prune_cycle now uses _terminate_claude + _resume_claude
+        # instead of _terminate_and_resume. Mock both; _terminate_claude returns
+        # "TERMINATED" so the reload pipeline proceeds.
         with patch("cozempic.guard.load_messages", return_value=fake_messages_orig), \
              patch("cozempic.guard.prune_with_team_protect",
                    return_value=(fake_messages_pruned, {}, fake_team_state)), \
              patch("cozempic.guard.save_messages", return_value=None), \
              patch("cozempic.guard.snapshot_session", return_value=MagicMock()), \
-             patch("cozempic.guard._terminate_and_resume",
-                   side_effect=lambda *a, **kw: terminate_called.append(True)), \
+             patch("cozempic.guard._terminate_claude",
+                   side_effect=lambda *a, **kw: terminate_called.append(True) or "TERMINATED"), \
+             patch("cozempic.guard._resume_claude"), \
              patch("cozempic.tokens.estimate_session_tokens",
                    return_value=MagicMock(total=50000)), \
              patch("cozempic.tokens.calibrate_ratio", return_value=0.5):
@@ -194,15 +202,14 @@ class TestSubstantialPruneProceedsWithReload(unittest.TestCase):
             )
 
         # With 15% savings, normal reload path. reloading=True means
-        # _terminate_and_resume was called (which sets reloading via guard loop).
-        # The function itself returns reloading=True after calling _terminate_and_resume.
+        # _terminate_claude was called (which triggers the terminate→save→resume pipeline).
         self.assertFalse(
             result.get("futile_reload_skipped"),
             f"futile_reload_skipped=True for a 15% prune — threshold logic inverted. Result: {result}",
         )
         self.assertTrue(
             terminate_called or result.get("reloading"),
-            f"_terminate_and_resume not called for 15% savings. "
+            f"_terminate_claude not called for 15% savings. "
             f"terminate_called={terminate_called}, result={result}",
         )
 
@@ -260,6 +267,9 @@ class TestMinPruneRatioEnvVarOverride(unittest.TestCase):
                    return_value=(fake_messages_pruned, {}, fake_team_state)), \
              patch("cozempic.guard.save_messages", return_value=None), \
              patch("cozempic.guard.snapshot_session", return_value=MagicMock()), \
+             patch("cozempic.guard._terminate_claude",
+                   side_effect=lambda *a, **kw: terminate_called.append(True) or "TERMINATED"), \
+             patch("cozempic.guard._resume_claude"), \
              patch("cozempic.guard._terminate_and_resume",
                    side_effect=lambda *a, **kw: terminate_called.append(True)), \
              patch("cozempic.tokens.estimate_session_tokens",
@@ -511,6 +521,8 @@ class TestFutileReloadWritesTeamCheckpoint(unittest.TestCase):
              patch("cozempic.guard.save_messages", return_value=None), \
              patch("cozempic.guard.snapshot_session", return_value=MagicMock()), \
              patch("cozempic.guard.write_team_checkpoint", return_value=fake_checkpoint), \
+             patch("cozempic.guard._terminate_claude", return_value="TERMINATED"), \
+             patch("cozempic.guard._resume_claude"), \
              patch("cozempic.guard._terminate_and_resume"), \
              patch("cozempic.tokens.estimate_session_tokens",
                    return_value=MagicMock(total=50000)), \

@@ -136,8 +136,6 @@ class TestOverflowTerminateFirst(unittest.TestCase):
         """_terminate_claude returns FAILED_TO_DIE → guard_prune_cycle NOT called.
 
         Do NOT os.replace a still-live session file. Abort recovery.
-
-        RED: current code doesn't use _terminate_claude at all.
         """
         prune_called = []
 
@@ -146,7 +144,7 @@ class TestOverflowTerminateFirst(unittest.TestCase):
 
         recovery = self._make_recovery()
 
-        with patch("cozempic.overflow.guard_prune_cycle",
+        with patch("cozempic.guard.guard_prune_cycle",
                    side_effect=lambda **kw: prune_called.append(True) or {}), \
              patch("cozempic.guard._terminate_claude", side_effect=fake_terminate), \
              patch("cozempic.session.find_claude_pid", return_value=FAKE_PID), \
@@ -180,7 +178,7 @@ class TestOverflowTerminateFirst(unittest.TestCase):
 
         recovery = self._make_recovery()
 
-        with patch("cozempic.overflow.guard_prune_cycle", side_effect=fake_gpc), \
+        with patch("cozempic.guard.guard_prune_cycle", side_effect=fake_gpc), \
              patch("cozempic.guard._terminate_claude", return_value="ALREADY_GONE"), \
              patch("cozempic.guard._resume_claude",
                    side_effect=lambda *a, **kw: resume_called.append(True)), \

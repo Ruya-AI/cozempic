@@ -66,7 +66,7 @@ class TestReloadWritesInFlightSentinel(unittest.TestCase):
 
         sentinel_written_before_watcher = []
 
-        def _fake_watcher(claude_pid, project_dir, session_id=None):
+        def _fake_watcher(claude_pid, project_dir, session_id=None, **_kw):
             # Record whether sentinel exists at the moment watcher is called
             sentinel_written_before_watcher.append(self.sentinel_path.exists())
 

@@ -122,6 +122,14 @@ def test_fix_orphaned_tool_results_removes_orphan(tmp_path):
     proj_dir.mkdir(parents=True)
     shutil.copy(FIXTURES / "orphaned_tool_results.jsonl", proj_dir / "sess.jsonl")
 
+    # Set mtime to 25 hours ago so the idle gate (default 24h) passes.
+    # PR #102 P4 added an idle gate to fix_orphaned_tool_results; a freshly
+    # copied fixture would be refused without this.
+    import os as _os, time as _time
+    _sess_path = proj_dir / "sess.jsonl"
+    _old_mtime = _time.time() - 25 * 3600
+    _os.utime(_sess_path, (_old_mtime, _old_mtime))
+
     with pytest.MonkeyPatch().context() as mp:
         mp.setattr("cozempic.session.get_projects_dir", lambda: tmp_path / "projects")
 

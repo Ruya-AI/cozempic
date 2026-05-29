@@ -180,7 +180,7 @@ class OverflowRecovery:
             self._recovering = False
 
     def _do_recover(self) -> None:
-        from .guard import checkpoint_team, guard_prune_cycle, _terminate_and_resume
+        from .guard import checkpoint_team, guard_prune_cycle, _terminate_claude, _resume_claude
         from .session import find_claude_pid
 
         now = _now()
@@ -210,76 +210,88 @@ class OverflowRecovery:
             file=sys.stderr,
         )
 
-        # 3. Run the prune cycle (team-protect, backup, checkpoint).
-        # P0-A: overflow recovery IS the emergency / active-session case — it
-        # fires at the 90% reactive threshold. Pass force=True so the
-        # active-session idle guard does not refuse the prune.
-        result = guard_prune_cycle(
-            session_path=self.session_path,
-            rx_name=rx,
-            auto_reload=False,  # We handle reload ourselves
-            cwd=self.cwd,
-            session_id=self.session_id,
-            force=True,
-        )
-
-        after_mb = self.session_path.stat().st_size / 1024 / 1024
-
-        # 4. Pre-flight: if still dangerously large, don't resume
-        if after_mb * 1024 * 1024 > self.danger_threshold_bytes * 0.95:
-            print(
-                f"  [{now}] Post-prune size {after_mb:.1f}MB still too large. "
-                f"Skipping resume.",
-                file=sys.stderr,
-            )
-            self.breaker.record_recovery(rx, before_mb, after_mb)
-            checkpoint_team(session_path=self.session_path, quiet=False)
-            return
-
-        # 5. Record in breaker
-        self.breaker.record_recovery(rx, before_mb, after_mb)
-        orig_tok = result.get("original_tokens")
-        final_tok = result.get("final_tokens")
-        if orig_tok and final_tok:
-            saved_tok = orig_tok - final_tok
-            tok_str = f"{saved_tok / 1000:.1f}K" if saved_tok >= 1000 else str(saved_tok)
-            print(
-                f"  [{now}] Pruned {tok_str} tokens freed "
-                f"({before_mb:.1f}MB → {after_mb:.1f}MB)",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"  [{now}] Pruned {before_mb:.1f}MB → {after_mb:.1f}MB "
-                f"(saved {result['saved_mb']:.1f}MB)",
-                file=sys.stderr,
-            )
-
-        # 6. Terminate Claude + auto-resume
-        # Wave 2: acquire single-flight reload lock. If another reload
-        # pipeline is already in flight (manual `cozempic reload`, guard
-        # threshold-fire, or another overflow recovery instance), defer
-        # ours. The prune output is already saved; the in-flight pipeline
-        # will do the kill+resume.
+        # 3. Terminate-first (PR #102 P2): TERMINATE Claude before pruning so we
+        # never os.replace a live JSONL inode (#106 TOCTOU race).
+        # Lock-order invariant: _ReloadLock ⊃ _PruneLock. Acquire _ReloadLock
+        # here (outer), then guard_prune_cycle(auto_reload=False) acquires only
+        # _PruneLock (inner).
         claude_pid = self.claude_pid if self.claude_pid is not None else find_claude_pid()
+
         if claude_pid:
             from .reload_lock import _ReloadLock, ReloadLockHeld, INIT_OVERFLOW
             try:
                 with _ReloadLock(self.session_id, initiator=INIT_OVERFLOW):
-                    # Pass session_path so the identity check's forked-Claude
-                    # mtime fallback works (happy-path symmetry with
-                    # guard_prune_cycle). The bare-liveness gate in
-                    # _terminate_and_resume still prevents resurrection.
-                    _terminate_and_resume(
-                        claude_pid, self.cwd,
-                        session_id=self.session_id,
+                    # Step 1: TERMINATE (kill + wait, no resume yet)
+                    term_status = _terminate_claude(
+                        claude_pid,
                         session_path=self.session_path,
+                        session_id=self.session_id,
                     )
-                    print(
-                        f"  [{now}] Kill + resume triggered (PID {claude_pid}). "
-                        f"~10s downtime.",
-                        file=sys.stderr,
+
+                    if term_status == "FAILED_TO_DIE":
+                        # Do NOT prune a still-live file — abort recovery.
+                        print(
+                            f"  [{now}] Terminate failed (PID {claude_pid} refused to exit). "
+                            f"Skipping prune to avoid #106 race.",
+                            file=sys.stderr,
+                        )
+                        self.breaker.record_recovery(rx, before_mb, before_mb)
+                        return
+
+                    # Step 2: Prune the now-quiesced file (auto_reload=False:
+                    # terminate already done above; guard_prune_cycle only saves).
+                    result = guard_prune_cycle(
+                        session_path=self.session_path,
+                        rx_name=rx,
+                        auto_reload=False,
+                        cwd=self.cwd,
+                        session_id=self.session_id,
+                        force=True,  # P0-A: overflow is the emergency case
                     )
+
+                    after_mb = self.session_path.stat().st_size / 1024 / 1024
+
+                    # 4. Pre-flight: if still dangerously large, don't resume
+                    if after_mb * 1024 * 1024 > self.danger_threshold_bytes * 0.95:
+                        print(
+                            f"  [{now}] Post-prune size {after_mb:.1f}MB still too large. "
+                            f"Skipping resume.",
+                            file=sys.stderr,
+                        )
+                        self.breaker.record_recovery(rx, before_mb, after_mb)
+                        checkpoint_team(session_path=self.session_path, quiet=False)
+                        return
+
+                    # 5. Record in breaker
+                    self.breaker.record_recovery(rx, before_mb, after_mb)
+                    orig_tok = result.get("original_tokens")
+                    final_tok = result.get("final_tokens")
+                    if orig_tok and final_tok:
+                        saved_tok = orig_tok - final_tok
+                        tok_str = f"{saved_tok / 1000:.1f}K" if saved_tok >= 1000 else str(saved_tok)
+                        print(
+                            f"  [{now}] Pruned {tok_str} tokens freed "
+                            f"({before_mb:.1f}MB → {after_mb:.1f}MB)",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"  [{now}] Pruned {before_mb:.1f}MB → {after_mb:.1f}MB "
+                            f"(saved {result.get('saved_mb', 0):.1f}MB)",
+                            file=sys.stderr,
+                        )
+
+                    # Step 3: Resume — only on TERMINATED (not ALREADY_GONE/SKIPPED_SSH)
+                    if term_status == "TERMINATED":
+                        _resume_claude(claude_pid, self.cwd, session_id=self.session_id)
+                        print(
+                            f"  [{now}] Kill + resume triggered (PID {claude_pid}). "
+                            f"~10s downtime.",
+                            file=sys.stderr,
+                        )
+                    # ALREADY_GONE: anti-resurrection — don't resume.
+                    # SKIPPED_SSH: manual resume printed by _terminate_claude.
+
             except ReloadLockHeld as exc:
                 print(
                     f"  [{now}] Reload deferred — another pipeline in flight "
@@ -287,6 +299,17 @@ class OverflowRecovery:
                     file=sys.stderr,
                 )
         else:
+            # No Claude PID: prune-only on quiesced file (Claude already gone).
+            result = guard_prune_cycle(
+                session_path=self.session_path,
+                rx_name=rx,
+                auto_reload=False,
+                cwd=self.cwd,
+                session_id=self.session_id,
+                force=True,
+            )
+            after_mb = self.session_path.stat().st_size / 1024 / 1024
+            self.breaker.record_recovery(rx, before_mb, after_mb)
             resume_flag = f"--resume {self.session_id}" if self.session_id else "--resume"
             print(
                 f"  [{now}] Could not find Claude PID. Pruned but not reloading.",

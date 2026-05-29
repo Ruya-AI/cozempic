@@ -128,6 +128,20 @@ def _read_min_prune_ratio() -> float:
 
 _MIN_PRUNE_RATIO = _read_min_prune_ratio()
 
+# ── Lock-order invariant (PR #102 §2.1) ─────────────────────────────────────
+# _ReloadLock ⊃ _PruneLock: the reload lock MUST be acquired before the prune
+# lock. Any caller that acquires _PruneLock first and then tries to acquire
+# _ReloadLock will deadlock. Enforce by inspection:
+#
+#   CORRECT:   with _ReloadLock(...):     # outer
+#                  with _PruneLock(...):  # inner
+#                      ...
+#   WRONG:     with _PruneLock(...):      # DO NOT
+#                  with _ReloadLock(...): # acquire in this order
+#                      ...
+#
+# _terminate_claude acquires no lock — it's safe to call from inside _PruneLock.
+
 from ._validation import ConfigError
 from .executor import run_prescription
 from .helpers import is_ssh_session, shell_quote
@@ -619,6 +633,7 @@ def start_guard(
                     cwd=cwd or os.getcwd(),
                     session_id=sess["session_id"],
                     claude_pid=claude_pid,
+                    force=True,  # PR #102 P1: daemon always overrides idle gate
                 )
 
                 if result.get("reloading"):
@@ -653,6 +668,7 @@ def start_guard(
                         auto_reload=False,  # Don't reload — agents are working
                         cwd=cwd or os.getcwd(),
                         session_id=sess["session_id"],
+                        force=True,  # PR #102 P1: daemon always overrides idle gate
                     )
                 else:
                     print(f"  [{_now()}] HARD THRESHOLD (55%): {reason}")
@@ -666,6 +682,7 @@ def start_guard(
                         cwd=cwd or os.getcwd(),
                         session_id=sess["session_id"],
                         claude_pid=claude_pid,
+                        force=True,  # PR #102 P1: daemon always overrides idle gate
                     )
 
                 if result.get("reloading"):
@@ -680,12 +697,17 @@ def start_guard(
                 if result.get("team_name"):
                     print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
 
-                if result.get("active_session_refused") or result.get("validation_failed"):
-                    # P0-A + REVIEW-max A.8: refusal upfront (active-session
-                    # guard) and validation_failed (post-prune or post-append
-                    # structural check) are both "the cycle never ran" — do
-                    # NOT advance the K-counter; the daemon stays alive and
-                    # retries on the next interval.
+                if (
+                    result.get("active_session_refused")
+                    or result.get("validation_failed")
+                    or result.get("terminate_failed")  # R-1: process refused to die — retry next interval
+                ):
+                    # P0-A + REVIEW-max A.8 + R-1: these are all "cycle aborted
+                    # before completion" — do NOT advance K-counter. The daemon
+                    # stays alive and retries on the next interval.
+                    # terminate_failed: _terminate_claude returned FAILED_TO_DIE;
+                    # the daemon is not powerless, just couldn't kill this
+                    # particular Claude right now. Retry next cycle.
                     pass
                 elif result.get("saved_mb", 0) <= 0 or result.get("futile_reload_skipped"):
                     consecutive_empty_hard_prunes += 1
@@ -862,6 +884,7 @@ def start_guard(
                         auto_reload=False,
                         cwd=cwd or os.getcwd(),
                         session_id=sess["session_id"],
+                        force=True,  # PR #102 P1: daemon always overrides idle gate
                     )
 
                     print(f"  Trimmed: {_fmt_prune_result(result)}")
@@ -1076,16 +1099,28 @@ def guard_prune_cycle(
                 project_dir = session_path.parent
                 checkpoint_path = write_team_checkpoint(team_state, project_dir)
 
-            # Save pruned session — snapshot enables append-aware atomic write
-            backup = save_messages(
-                    session_path, pruned_messages,
-                    create_backup=True, snapshot=snap,
-                    messages_before_prune=messages,
-                )
+            # PR #102 P1 terminate-first restructure:
+            # When auto_reload=True and a Claude PID is found, we must TERMINATE
+            # before saving (to prevent #106 race on a live JSONL inode).
+            # Determine reload_pid NOW (inside _PruneLock) so we can decide
+            # whether to defer the save to the terminate-first pipeline.
+            _reload_pid_for_terminate = None
+            if auto_reload:
+                _reload_pid_for_terminate = claude_pid if claude_pid is not None else find_claude_pid()
 
-            # Cap backup retention at 3 files to prevent disk fill (#19)
-            if backup:
-                cleanup_old_backups(session_path, keep=3)
+            if not auto_reload or _reload_pid_for_terminate is None:
+                # No reload intended (or no PID found): save here as before.
+                # When auto_reload=True but no PID: save now (quiesced — Claude gone).
+                backup = save_messages(
+                        session_path, pruned_messages,
+                        create_backup=True, snapshot=snap,
+                        messages_before_prune=messages,
+                    )
+                # Cap backup retention at 3 files to prevent disk fill (#19)
+                if backup:
+                    cleanup_old_backups(session_path, keep=3)
+            else:
+                backup = None  # deferred: terminate-first pipeline saves after kill
 
     except PruneLockError as exc:
         print(f"  [{_now()}] Prune deferred — lock held: {exc}", file=sys.stderr)
@@ -1126,44 +1161,91 @@ def guard_prune_cycle(
         "reloading": False,
     }
 
-    # Trigger reload if configured — terminate Claude then auto-resume.
-    # Wave 2: acquire the single-flight reload lock before spawning the
-    # watcher. If another process (manual `cozempic reload`, overflow
-    # recovery, or another guard daemon instance) is already in the middle
-    # of a reload pipeline, defer ours — the prune itself completed and
-    # the user already has the saved state. Next cycle (or next user-
-    # initiated event) will re-trigger if conditions still warrant.
-    if auto_reload:
-        reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
-        if reload_pid:
-            from .reload_lock import (
-                _ReloadLock, ReloadLockHeld,
-                INIT_GUARD_HARD1, INIT_GUARD_HARD2,
-            )
-            # Pick initiator based on prescription tier — aggressive ==
-            # Hard2 (80% emergency), everything else == Hard1 (55% standard).
-            initiator = INIT_GUARD_HARD2 if rx_name == "aggressive" else INIT_GUARD_HARD1
-            try:
-                with _ReloadLock(session_id or session_path.stem, initiator=initiator):
-                    _terminate_and_resume(
-                        reload_pid, cwd,
-                        session_id=session_id,
-                        session_path=session_path,
-                    )
-                    result["reloading"] = True
-            except ReloadLockHeld as exc:
-                # Another reload pipeline is already in flight — defer.
-                # Prune output is already saved; the in-flight pipeline
-                # will do the kill+resume.
-                print(
-                    f"  Reload deferred — another pipeline in flight "
-                    f"({exc.holder_initiator}, PID {exc.holder_pid})."
+    # Trigger reload if configured — terminate-FIRST, then save on quiesced
+    # file, then resume (PR #102 P1 terminate-first restructure).
+    #
+    # Lock-order invariant documented here for future maintainers:
+    #   _ReloadLock ⊃ _PruneLock — outer lock MUST be acquired first.
+    # _terminate_claude acquires no lock, so acquiring _ReloadLock inside
+    # _PruneLock is safe when the caller doesn't hold _ReloadLock already
+    # (the daemon HARD tiers do NOT pre-acquire _ReloadLock; it's done here).
+    if auto_reload and _reload_pid_for_terminate is not None:
+        # reload_pid was determined inside _PruneLock above.
+        reload_pid = _reload_pid_for_terminate
+        from .reload_lock import (
+            _ReloadLock, ReloadLockHeld,
+            INIT_GUARD_HARD1, INIT_GUARD_HARD2,
+        )
+        initiator = INIT_GUARD_HARD2 if rx_name == "aggressive" else INIT_GUARD_HARD1
+        try:
+            with _ReloadLock(session_id or session_path.stem, initiator=initiator):
+                # Step 1: TERMINATE (kill + wait, no resume yet)
+                term_status = _terminate_claude(
+                    reload_pid,
+                    session_path=session_path,
+                    session_id=session_id,
                 )
-                result["reloading"] = False
-        else:
-            resume_flag = f"--resume {session_id}" if session_id else "--resume"
-            print("  WARNING: Could not find Claude PID. Pruned but not reloading.")
-            print(f"  Restart manually: claude {resume_flag}")
+
+                if term_status == "TERMINATED":
+                    # Step 2: Save on now-QUIESCED file (no live fd → no #106 race)
+                    backup = save_messages(
+                        session_path, pruned_messages,
+                        create_backup=True, snapshot=snap,
+                        messages_before_prune=messages,
+                    )
+                    if backup:
+                        cleanup_old_backups(session_path, keep=3)
+                    # Step 3: Resume the new Claude
+                    _resume_claude(reload_pid, cwd, session_id=session_id)
+                    result["reloading"] = True
+                    result["backup_path"] = str(backup) if backup else None
+
+                elif term_status == "ALREADY_GONE":
+                    # Anti-resurrection: file is quiesced (dead Claude), safe to save.
+                    # Do NOT resume — would resurrect a session the user closed.
+                    backup = save_messages(
+                        session_path, pruned_messages,
+                        create_backup=True, snapshot=snap,
+                        messages_before_prune=messages,
+                    )
+                    if backup:
+                        cleanup_old_backups(session_path, keep=3)
+                    result["reloading"] = False
+                    result["backup_path"] = str(backup) if backup else None
+                    print(f"  Claude was already gone — pruned without resume.")
+
+                else:
+                    # FAILED_TO_DIE or SKIPPED_SSH:
+                    # - FAILED_TO_DIE: do NOT os.replace a still-live file (#106).
+                    #   R-1: terminate_failed=True tells start_guard to skip K-counter
+                    #   advance so the daemon retries next interval.
+                    # - SKIPPED_SSH: manual resume instructions already printed.
+                    return {**_no_change, "terminate_failed": True}
+
+        except ReloadLockHeld as exc:
+            # Another reload pipeline already in flight — defer.
+            # The save has NOT happened yet (deferred path). Save without reload
+            # so the prune output is persisted even though we can't reload now.
+            backup = save_messages(
+                session_path, pruned_messages,
+                create_backup=True, snapshot=snap,
+                messages_before_prune=messages,
+            )
+            if backup:
+                cleanup_old_backups(session_path, keep=3)
+            result["backup_path"] = str(backup) if backup else None
+            print(
+                f"  Reload deferred — another pipeline in flight "
+                f"({exc.holder_initiator}, PID {exc.holder_pid})."
+            )
+            result["reloading"] = False
+
+    elif auto_reload and _reload_pid_for_terminate is None:
+        # auto_reload=True but no PID found — save already happened above.
+        resume_flag = f"--resume {session_id}" if session_id else "--resume"
+        print("  WARNING: Could not find Claude PID. Pruned but not reloading.")
+        print(f"  Restart manually: claude {resume_flag}")
+        result["backup_path"] = str(backup) if backup else None
 
     return result
 
@@ -1338,165 +1420,105 @@ def _wait_for_exit(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def _terminate_and_resume(
+def _terminate_claude(
     claude_pid: int,
-    project_dir: str,
-    session_id: str | None = None,
     session_path: Path | None = None,
-    **_ignored_kwargs: object,
-) -> None:
-    """Gracefully exit Claude and resume in the same terminal where possible.
+    session_id: str | None = None,
+) -> str:
+    """Kill Claude and wait for exit. Returns one of 4 status strings.
 
-    Priority:
-      1. tmux/screen: send-keys "/exit" → wait → send-keys "claude --resume" (same pane)
-      2. Plain terminal: SIGTERM → open new terminal with resume
-      3. SSH: skip terminate, print manual instructions
+    Return values:
+      "TERMINATED"   — process was alive, killed, and confirmed dead.
+      "ALREADY_GONE" — process was already dead or PID was recycled.
+      "SKIPPED_SSH"  — SSH environment detected; no kill attempted.
+      "FAILED_TO_DIE" — kill was sent but process refused to exit within timeout.
 
-    When session_path is supplied, the ps-based identity check in
-    _is_claude_process falls back to JSONL mtime recency — matching the
-    watchdog's behaviour. Without this, a forked subshell whose argv drops
-    the claude-code marker is recognised as alive by the watchdog but
-    rejected by this function, silently skipping the reload.
+    Contract (PR #102 P1 split):
+    - Runs the full anti-resurrection entry gate (_pid_is_alive +
+      _pid_identity_match + _is_claude_process). Returns "ALREADY_GONE"
+      on any failure — dead, recycled PID, or wrong process.
+    - Does NOT write/unlink the reload sentinel (sentinel is _resume_claude's job).
+    - Does NOT call _spawn_reload_watcher or send resume send-keys.
+    - Captures original_flags BEFORE the kill (R-2: PID is dead by the time
+      _resume_claude runs; _detect_claude_flags would return "" on a dead PID).
 
-    ``**_ignored_kwargs`` is accepted for forward-compatibility: test harnesses
-    and future callers may pass rx_name/config/auto_reload without causing a
-    TypeError (blueprint § NEW-1 test compat).
+    Lock-order invariant: _ReloadLock ⊃ _PruneLock — the caller must hold
+    _ReloadLock before acquiring _PruneLock. This function acquires neither.
     """
-    resume_flag = f"--resume {session_id}" if session_id else "--resume"
-
-    # Preserve all CLI flags from the original Claude process
-    original_flags = _detect_claude_flags(claude_pid)
-    resume_cmd = f"claude {original_flags} {resume_flag}".replace("  ", " ").strip()
     term_env = _detect_terminal_env()
     system = platform.system()
 
-    # PR #94 review MED-1/2/3 fold: sentinel is written ONLY in paths that
-    # actually terminate OLD Claude + spawn NEW Claude (tmux, screen, plain
-    # terminal post-SIGTERM via _spawn_reload_watcher). SSH paths + PID-reuse
-    # early returns do NOT write the sentinel, eliminating the 120s
-    # suppression-window UX bug surfaced by reviewer-e2e-pr94 review.
-
     if term_env == "ssh":
-        print(f"  SSH session — skipping terminate+resume. Resume manually: {resume_cmd}")
-        return
+        resume_flag = f"--resume {session_id}" if session_id else "--resume"
+        original_flags = _detect_claude_flags(claude_pid)
+        if original_flags:
+            resume_flag = f"{original_flags} {resume_flag}"
+        print(f"  SSH session — skipping terminate. Resume manually: claude {resume_flag}")
+        return "SKIPPED_SSH"
 
-    # Anti-resurrection entry gate. The reload watcher resumes UNCONDITIONALLY
-    # once claude_pid dies (`while kill -0 …; do sleep; done; <resume_cmd>`), so
-    # entering here with an already-dead Claude — e.g. the user exited during
-    # the prune window — would reopen a session the user closed. The per-block
-    # checks below only guard each SIGTERM/SIGKILL, NOT the watcher spawn, so
-    # this gate is load-bearing. It returns before any sentinel write too,
-    # consistent with "sentinel only on paths that actually terminate+resume."
-    #
-    # Liveness FIRST, and mtime-IMMUNE: guard_prune_cycle's own save_messages
-    # refreshes the JSONL mtime moments before this call, so _is_claude_process's
-    # mtime fallback can misreport a dead Claude as alive. os.kill is not fooled.
+    # Anti-resurrection entry gate (same 3-check sequence as _terminate_and_resume).
     if not _pid_is_alive(claude_pid):
-        print(f"  PID {claude_pid} is gone — skipping terminate+resume (no resurrection).")
-        return
-    # Start-time identity gate: if the PID was recycled to a different process
-    # after Claude died, the start_time recorded at startup will differ. This
-    # closes the residual resurrection vector left by the mtime fallback even
-    # after Junaid's mtime-immune liveness gate (06f91c3) — a recycled PID IS
-    # alive but is NOT the same Claude. Fails-OPEN when psutil is absent.
+        print(f"  PID {claude_pid} is gone — nothing to terminate (ALREADY_GONE).")
+        return "ALREADY_GONE"
     if not _pid_identity_match(claude_pid, session_id):
-        print(f"  PID {claude_pid} start-time mismatch — PID was recycled, skipping terminate+resume.")
-        return
-    # Identity (anti-PID-reuse): is this still actually Claude, not a recycled
-    # PID? Per-block checks re-verify before each kill; this is the fail-fast.
+        print(f"  PID {claude_pid} start-time mismatch — PID was recycled (ALREADY_GONE).")
+        return "ALREADY_GONE"
     if not _is_claude_process(claude_pid, session_path=session_path):
-        print(f"  PID {claude_pid} is no longer a Claude process — skipping terminate+resume.")
-        return
+        print(f"  PID {claude_pid} is no longer a Claude process (ALREADY_GONE).")
+        return "ALREADY_GONE"
+
+    # R-2: capture flags NOW, before the kill. _detect_claude_flags(claude_pid)
+    # returns "" once the process is dead. Store on the module-level cache so
+    # _resume_claude can retrieve them without re-querying a dead PID.
+    _original_flags_cache[claude_pid] = _detect_claude_flags(claude_pid)
 
     if term_env == "tmux":
-        # tmux: graceful /exit via send-keys, then resume in same pane.
-        # Verify PID identity before sending keyboard events (PID reuse guard).
         if not _is_claude_process(claude_pid, session_path=session_path):
-            print(f"  WARNING: PID {claude_pid} is no longer a Claude process — skipping tmux terminate+resume.")
-            return
-        # PID check passed — we ARE going to terminate + auto-resume. Write the
-        # sentinel BEFORE send-keys so the resumed Claude's SessionStart hook
-        # sees it and skips the daemon spawn during the resume window.
-        if session_id:
-            try:
-                write_reload_sentinel(session_id, claude_pid)
-            except OSError:
-                pass  # best-effort; stale-GC clears any leaked sentinel
+            print(f"  WARNING: PID {claude_pid} no longer Claude — skipping tmux terminate.")
+            return "ALREADY_GONE"
         pane = os.environ.get("TMUX_PANE", "")
-        target = f"-t {pane}" if pane else ""
-        print(f"  tmux detected — sending /exit and auto-resuming in same pane...")
-
-        # Send /exit to Claude
+        print(f"  tmux detected — sending /exit...")
         subprocess.run(
             ["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
             capture_output=True, timeout=5,
         )
-
-        # Wait for Claude to exit
-        if not _wait_for_exit(claude_pid, timeout=10.0):
+        exited = _wait_for_exit(claude_pid, timeout=10.0)
+        if not exited:
             if _is_claude_process(claude_pid, session_path=session_path):
-                os.kill(claude_pid, signal.SIGTERM)
-            _wait_for_exit(claude_pid, timeout=5.0)
-
-        time.sleep(1)
-
-        # Resume in same pane
-        subprocess.run(
-            ["tmux", "send-keys", *(["-t", pane] if pane else []),
-             f"cd {shell_quote(project_dir)} && {resume_cmd}", "Enter"],
-            capture_output=True, timeout=5,
-        )
-        # tmux resume is synchronous (send-keys returns after command starts).
-        # Unlink the sentinel here so the resumed Claude's SessionStart hook
-        # can spawn its own guard without suppression.
-        if session_id:
-            try:
-                unlink_reload_sentinel(session_id)
-            except OSError:
-                pass
-        return
+                try:
+                    os.kill(claude_pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            exited = _wait_for_exit(claude_pid, timeout=5.0)
+        if not exited:
+            print(f"  PID {claude_pid} still alive after /exit + SIGTERM — FAILED_TO_DIE.")
+            return "FAILED_TO_DIE"
+        return "TERMINATED"
 
     if term_env == "screen":
-        # GNU screen: similar to tmux. Verify PID identity before sending keyboard events.
         if not _is_claude_process(claude_pid, session_path=session_path):
-            print(f"  WARNING: PID {claude_pid} is no longer a Claude process — skipping screen terminate+resume.")
-            return
-        # PID check passed — write the sentinel before send-keys (see tmux block).
-        if session_id:
-            try:
-                write_reload_sentinel(session_id, claude_pid)
-            except OSError:
-                pass
+            print(f"  WARNING: PID {claude_pid} no longer Claude — skipping screen terminate.")
+            return "ALREADY_GONE"
         screen_session = os.environ.get("STY", "")
-        print(f"  screen detected — sending /exit and auto-resuming...")
-
+        print(f"  screen detected — sending /exit...")
         subprocess.run(
             ["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
             capture_output=True, timeout=5,
         )
-
-        if not _wait_for_exit(claude_pid, timeout=10.0):
+        exited = _wait_for_exit(claude_pid, timeout=10.0)
+        if not exited:
             if _is_claude_process(claude_pid, session_path=session_path):
-                os.kill(claude_pid, signal.SIGTERM)
-            _wait_for_exit(claude_pid, timeout=5.0)
+                try:
+                    os.kill(claude_pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            exited = _wait_for_exit(claude_pid, timeout=5.0)
+        if not exited:
+            print(f"  PID {claude_pid} still alive after /exit + SIGTERM — FAILED_TO_DIE.")
+            return "FAILED_TO_DIE"
+        return "TERMINATED"
 
-        time.sleep(1)
-
-        subprocess.run(
-            ["screen", "-S", screen_session, "-X", "stuff",
-             f"cd {shell_quote(project_dir)} && {resume_cmd}\n"],
-            capture_output=True, timeout=5,
-        )
-        # screen resume is synchronous. Unlink sentinel so the resumed Claude's
-        # SessionStart hook can spawn its guard.
-        if session_id:
-            try:
-                unlink_reload_sentinel(session_id)
-            except OSError:
-                pass
-        return
-
-    # Plain terminal — SIGTERM + spawn resume watcher
+    # Plain terminal (or Windows)
     try:
         if system == "Windows":
             if _is_claude_process(claude_pid, session_path=session_path):
@@ -1508,7 +1530,8 @@ def _terminate_and_resume(
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
-    if not _wait_for_exit(claude_pid, timeout=5.0):
+    exited = _wait_for_exit(claude_pid, timeout=5.0)
+    if not exited:
         try:
             if system == "Windows":
                 if _is_claude_process(claude_pid, session_path=session_path):
@@ -1519,21 +1542,159 @@ def _terminate_and_resume(
                     os.kill(claude_pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        exited = _wait_for_exit(claude_pid, timeout=5.0)
 
-    # Plain-terminal path: write sentinel here, JUST BEFORE the watcher Popen.
-    # SSH and PID-reuse-fail blocks above return without reaching this point,
-    # so they leave no sentinel. The watcher script will unlink the sentinel
-    # after osascript fires (NEW Claude SessionStart can spawn freely).
+    if not exited:
+        print(f"  PID {claude_pid} still alive after SIGTERM+SIGKILL — FAILED_TO_DIE.")
+        return "FAILED_TO_DIE"
+    return "TERMINATED"
+
+
+# R-2: per-PID cache for flags captured inside _terminate_claude before kill.
+# Keys are integer PIDs; values are the flags string (may be ""). The cache is
+# process-local and short-lived — used only during the terminate+resume pipeline.
+_original_flags_cache: dict[int, str] = {}
+
+
+def _resume_claude(
+    claude_pid: int,
+    project_dir: str,
+    session_id: str | None = None,
+    term_env: str | None = None,
+    original_flags: str | None = None,
+) -> None:
+    """Resume Claude after _terminate_claude confirmed termination.
+
+    Writes the reload sentinel FIRST (before any send-keys / watcher spawn)
+    so the resumed Claude's SessionStart hook sees it and skips daemon spawn
+    during the resume window. Mirrors the existing sentinel-before-send-keys
+    invariant in _terminate_and_resume (R-3 in PLAN.md §6).
+
+    original_flags: flags captured in _terminate_claude before the kill (R-2).
+    If not provided, falls back to the _original_flags_cache keyed on claude_pid.
+    If still not found, calls _detect_claude_flags(claude_pid) — may return ""
+    for a dead PID, but that's safe (resume proceeds with no extra flags).
+
+    Does NOT kill. The caller is responsible for calling _terminate_claude first.
+    """
+    if term_env is None:
+        term_env = _detect_terminal_env()
+    system = platform.system()
+
+    # R-2: retrieve pre-kill flags. Priority: explicit arg > cache > re-detect.
+    if original_flags is None:
+        original_flags = _original_flags_cache.pop(claude_pid, None)
+    if original_flags is None:
+        original_flags = _detect_claude_flags(claude_pid)
+
+    resume_flag = f"--resume {session_id}" if session_id else "--resume"
+    resume_cmd = f"claude {original_flags} {resume_flag}".replace("  ", " ").strip()
+
+    if term_env == "ssh":
+        print(f"  SSH session — cannot auto-resume. Resume manually: {resume_cmd}")
+        return
+
+    if term_env == "tmux":
+        # Write sentinel BEFORE send-keys (R-3).
+        if session_id:
+            try:
+                write_reload_sentinel(session_id, claude_pid)
+            except OSError:
+                pass
+        pane = os.environ.get("TMUX_PANE", "")
+        time.sleep(1)
+        print(f"  Resuming in same tmux pane...")
+        subprocess.run(
+            ["tmux", "send-keys", *(["-t", pane] if pane else []),
+             f"cd {shell_quote(project_dir)} && {resume_cmd}", "Enter"],
+            capture_output=True, timeout=5,
+        )
+        if session_id:
+            try:
+                unlink_reload_sentinel(session_id)
+            except OSError:
+                pass
+        return
+
+    if term_env == "screen":
+        if session_id:
+            try:
+                write_reload_sentinel(session_id, claude_pid)
+            except OSError:
+                pass
+        screen_session = os.environ.get("STY", "")
+        time.sleep(1)
+        print(f"  Resuming in same screen window...")
+        subprocess.run(
+            ["screen", "-S", screen_session, "-X", "stuff",
+             f"cd {shell_quote(project_dir)} && {resume_cmd}\n"],
+            capture_output=True, timeout=5,
+        )
+        if session_id:
+            try:
+                unlink_reload_sentinel(session_id)
+            except OSError:
+                pass
+        return
+
+    # Plain terminal — write sentinel then spawn watcher.
+    # R-3: sentinel BEFORE watcher so new Claude's SessionStart sees it.
     if session_id:
         try:
             write_reload_sentinel(session_id, claude_pid)
         except OSError:
-            pass  # best-effort; stale-GC clears any leaked sentinel
+            pass
 
-    _spawn_reload_watcher(claude_pid, project_dir, session_id=session_id)
+    if system in ("Darwin", "Linux", "Windows"):
+        _spawn_reload_watcher(claude_pid, project_dir, session_id=session_id,
+                              original_flags=original_flags)
+    else:
+        print(f"  WARNING: Auto-resume not supported on {system}.")
+        if session_id:
+            try:
+                unlink_reload_sentinel(session_id)
+            except OSError:
+                pass
 
 
-def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | None = None):
+def _terminate_and_resume(
+    claude_pid: int,
+    project_dir: str,
+    session_id: str | None = None,
+    session_path: Path | None = None,
+    **_ignored_kwargs: object,
+) -> None:
+    """Preserved composition wrapper for external callers and tests.
+
+    PR #102 P1: this function is now a thin wrapper around the split pair
+    _terminate_claude + _resume_claude. Existing callers (cmd_reload, tests)
+    and the guard_prune_cycle non-reload path are unchanged.
+
+    ``**_ignored_kwargs`` is accepted for forward-compatibility: test harnesses
+    and future callers may pass rx_name/config/auto_reload without causing a
+    TypeError (blueprint § NEW-1 test compat).
+
+    Behaviour:
+      TERMINATED  → _resume_claude (normal reload path)
+      ALREADY_GONE → no resume (anti-resurrection)
+      SKIPPED_SSH  → already printed manual instructions in _terminate_claude
+      FAILED_TO_DIE → no resume (process didn't die; caller guards separately)
+    """
+    status = _terminate_claude(
+        claude_pid,
+        session_path=session_path,
+        session_id=session_id,
+    )
+    if status == "TERMINATED":
+        _resume_claude(claude_pid, project_dir, session_id=session_id)
+
+
+def _spawn_reload_watcher(
+    claude_pid: int,
+    project_dir: str,
+    session_id: str | None = None,
+    original_flags: str | None = None,
+):
     """Spawn a detached watcher that resumes Claude after exit.
 
     Extended (Phase B):
@@ -1542,9 +1703,15 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     - Polls for the new Claude process for RELOAD_WATCHER_POLL_TIMEOUT_SECONDS
       (GAP-B); writes a structured status file to /tmp/cozempic_reload_<sid12>.status
       on timeout, which the next SessionStart hook surfaces to the operator.
+
+    R-2 (PR #102): `original_flags` must be captured BEFORE the kill. If not
+    supplied (e.g., called directly), falls back to _detect_claude_flags(claude_pid)
+    which may return "" for a dead PID — safe but lossy.
     """
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
-    original_flags = _detect_claude_flags(claude_pid)
+    # R-2: prefer pre-kill flags if provided; fall back to live detection.
+    if original_flags is None:
+        original_flags = _detect_claude_flags(claude_pid)
     if original_flags:
         resume_flag = f"{original_flags} {resume_flag}"
 
