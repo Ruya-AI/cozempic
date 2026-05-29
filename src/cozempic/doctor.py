@@ -139,16 +139,21 @@ def check_oversized_sessions() -> CheckResult:
             message=f"No oversized sessions found ({len(sessions)} sessions checked)",
         )
 
+    sorted_large = sorted(large, key=lambda s: s["size"], reverse=True)
     sizes = ", ".join(
         f"{s['session_id'][:8]}…({s['size'] / 1024 / 1024:.0f}MB)"
-        for s in sorted(large, key=lambda s: s["size"], reverse=True)[:5]
+        for s in sorted_large[:5]
+    )
+    cmds = "\n".join(
+        f"  cozempic treat {s['session_id'][:8]} -rx aggressive --execute"
+        for s in sorted_large
     )
 
     return CheckResult(
         name="oversized-sessions",
         status="issue",
         message=f"{len(large)} session(s) over 50MB: {sizes}. These will likely hang on resume.",
-        fix_description="Run: cozempic treat <session> -rx aggressive --execute",
+        fix_description=f"Treat each oversized session:\n{cmds}",
     )
 
 

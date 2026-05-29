@@ -15,6 +15,7 @@ from cozempic.doctor import (
     check_corrupted_tool_use,
     check_hooks_trust_flag,
     check_orphaned_tool_results,
+    check_oversized_sessions,
     check_stale_tmp_artifacts,
     check_zombie_teams,
     fix_claude_json_corruption,
@@ -476,6 +477,53 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         msg2 = fix_stale_tmp_artifacts()
         self.assertIn("0", msg1)
         self.assertIn("0", msg2)
+
+
+class TestOversizedSessions(unittest.TestCase):
+
+    def _make_session(self, session_id: str, size_mb: int) -> dict:
+        return {"session_id": session_id, "path": f"/tmp/fake/{session_id}.jsonl", "size": size_mb * 1024 * 1024}
+
+    def test_no_large_sessions_ok(self):
+        sessions = [self._make_session("aabbccdd1122", 10)]
+        with patch("cozempic.doctor.find_sessions", return_value=sessions):
+            result = check_oversized_sessions()
+        self.assertEqual(result.status, "ok")
+        self.assertIsNone(result.fix_description)
+
+    def test_fix_description_contains_real_session_ids(self):
+        sessions = [
+            self._make_session("aabbccdd1122eeff", 80),
+            self._make_session("11223344aabbccdd", 60),
+        ]
+        with patch("cozempic.doctor.find_sessions", return_value=sessions):
+            result = check_oversized_sessions()
+        self.assertEqual(result.status, "issue")
+        self.assertIn("cozempic treat aabbccdd", result.fix_description)
+        self.assertIn("cozempic treat 11223344", result.fix_description)
+        self.assertNotIn("<session>", result.fix_description)
+
+    def test_fix_description_one_line_per_session(self):
+        sessions = [
+            self._make_session("aaaa1111bbbb2222", 100),
+            self._make_session("cccc3333dddd4444", 75),
+            self._make_session("eeee5555ffff6666", 55),
+        ]
+        with patch("cozempic.doctor.find_sessions", return_value=sessions):
+            result = check_oversized_sessions()
+        lines = [l for l in result.fix_description.splitlines() if "cozempic treat" in l]
+        self.assertEqual(len(lines), 3)
+
+    def test_fix_description_sorted_largest_first(self):
+        sessions = [
+            self._make_session("small11122233344", 55),
+            self._make_session("large99988877766", 200),
+        ]
+        with patch("cozempic.doctor.find_sessions", return_value=sessions):
+            result = check_oversized_sessions()
+        idx_large = result.fix_description.index("large999")
+        idx_small = result.fix_description.index("small111")
+        self.assertLess(idx_large, idx_small)
 
 
 if __name__ == "__main__":

@@ -2733,3 +2733,111 @@ class TestPolishV2_IsSystemNoiseSlashPrefixedTag(unittest.TestCase):
             _is_system_noise("/Users/alice/foo.py needs a fix"),
             "/Users/... file path wrongly flagged — A12 regression",
         )
+
+
+# ---------------------------------------------------------------------------
+# TestDebugFlagTokens — F11: COZEMPIC_DEBUG must accept 1/true/yes/on
+# ---------------------------------------------------------------------------
+
+import importlib
+import io as _io
+import contextlib as _contextlib
+import cozempic.digest as _digest_module
+
+
+class TestDebugFlagTokens(unittest.TestCase):
+    """F11: COZEMPIC_DEBUG must activate debug output for tokens
+    1/true/yes/on (case-insensitive), and suppress for 0/false/no/off.
+
+    Strategy A: monkeypatch `_DEBUG = False` to reset module-level cache,
+    then set COZEMPIC_DEBUG env var and call `_debug()`.  The in-body
+    re-read in `_debug()` must use `parse_env_bool` — accepting the full
+    token set.
+
+    Strategy C (one test): reload digest module to verify that the
+    import-time assignment also picks up `true`/`yes`/`on`.
+    """
+
+    def setUp(self):
+        """Ensure each test starts with a clean slate:
+        - module-level _DEBUG forced to False (so tests don't inherit a True
+          state left by the Strategy C reload test or a prior test run)
+        - COZEMPIC_DEBUG removed from env (so a shell-inherited value
+          doesn't poison tests that expect env to be absent)
+        """
+        _digest_module._DEBUG = False
+        os.environ.pop("COZEMPIC_DEBUG", None)
+
+    def tearDown(self):
+        """Restore module state after each test (mirrors setUp for symmetry)."""
+        _digest_module._DEBUG = False
+        os.environ.pop("COZEMPIC_DEBUG", None)
+
+    def _capture_debug(self, env_val: str | None) -> str:
+        """Call `_debug()` with `_DEBUG=False` (monkeypatched) and the
+        given env var, return captured stderr."""
+        env = {} if env_val is None else {"COZEMPIC_DEBUG": env_val}
+        buf = _io.StringIO()
+        with patch("cozempic.digest._DEBUG", False):
+            with patch.dict(os.environ, env, clear=False):
+                if env_val is None:
+                    os.environ.pop("COZEMPIC_DEBUG", None)
+                with _contextlib.redirect_stderr(buf):
+                    _digest_module._debug("test-message")
+        return buf.getvalue()
+
+    def test_debug_off_by_default(self):
+        """No env var → no output."""
+        output = self._capture_debug(None)
+        self.assertEqual(output, "")
+
+    def test_debug_on_with_1(self):
+        """COZEMPIC_DEBUG=1 → debug output present."""
+        output = self._capture_debug("1")
+        self.assertIn("test-message", output)
+
+    def test_debug_on_with_true(self):
+        """COZEMPIC_DEBUG=true → debug output present (F11 core fix)."""
+        output = self._capture_debug("true")
+        self.assertIn("test-message", output)
+
+    def test_debug_on_with_yes(self):
+        """COZEMPIC_DEBUG=yes → debug output present."""
+        output = self._capture_debug("yes")
+        self.assertIn("test-message", output)
+
+    def test_debug_on_with_on(self):
+        """COZEMPIC_DEBUG=on → debug output present."""
+        output = self._capture_debug("on")
+        self.assertIn("test-message", output)
+
+    def test_debug_on_case_insensitive(self):
+        """COZEMPIC_DEBUG=TRUE → debug output present (case-insensitive)."""
+        output = self._capture_debug("TRUE")
+        self.assertIn("test-message", output)
+
+    def test_debug_off_with_0(self):
+        """COZEMPIC_DEBUG=0 → no output (explicit falsy token)."""
+        output = self._capture_debug("0")
+        self.assertEqual(output, "")
+
+    def test_debug_off_with_false(self):
+        """COZEMPIC_DEBUG=false → no output (explicit falsy token)."""
+        output = self._capture_debug("false")
+        self.assertEqual(output, "")
+
+    def test_import_time_true_token_activates_DEBUG(self):
+        """Strategy C: reload the module with COZEMPIC_DEBUG=true → _DEBUG must
+        be True.  Catches a regression if someone reverts line 46 to == "1"."""
+        with patch.dict(os.environ, {"COZEMPIC_DEBUG": "true"}, clear=False):
+            reloaded = importlib.reload(_digest_module)
+        try:
+            self.assertTrue(
+                reloaded._DEBUG,
+                "_DEBUG must be True after reload with COZEMPIC_DEBUG=true",
+            )
+        finally:
+            # Restore the module to its normal state (no COZEMPIC_DEBUG).
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("COZEMPIC_DEBUG", None)
+                importlib.reload(_digest_module)

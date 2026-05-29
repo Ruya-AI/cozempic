@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from pathlib import Path
 
-from .helpers import get_content_blocks, get_msg_type, text_of
+from .helpers import atomic_write_text, get_content_blocks, get_msg_type, text_of
 from .types import Message
 
 # Common words that don't make good theme labels
@@ -43,12 +42,20 @@ def _extract_text(msg: dict) -> str:
 
 def _clean_user_text(text: str) -> str:
     """Remove system tags, command noise, and whitespace from user text."""
+    # Strip NAMED system/command tags on the FULL text first so that an injection
+    # tag whose close-tag lies past the cap below is still removed (N-1).
+    # These regexes are anchored on literal tag names → linear on realistic input.
+    # LOW residual: a pathological <named-tag>×N flood would be O(n²) here too,
+    # but that is a perf-only concern (not an injection vector) and absurd in practice.
     text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL)
     text = re.sub(r"<local-command-caveat>.*?</local-command-caveat>", "", text, flags=re.DOTALL)
     text = re.sub(r"<command-name>.*?</command-name>", "", text, flags=re.DOTALL)
     text = re.sub(r"<command-message>.*?</command-message>", "", text, flags=re.DOTALL)
     text = re.sub(r"<command-args>.*?</command-args>", "", text, flags=re.DOTALL)
     text = re.sub(r"<local-command-stdout>.*?</local-command-stdout>", "", text, flags=re.DOTALL)
+    # Cap before the GENERIC tag regexes (the true O(n²) ones). Recap displays
+    # ~72-char snippets so the cap loses no displayed info.
+    text = text[:8000]
     text = re.sub(r"<[^>]+>.*?</[^>]+>", "", text, flags=re.DOTALL)
     text = re.sub(r"<[^>]+/?>", "", text)
     text = re.sub(r"SessionStart:.*", "", text)
@@ -65,9 +72,11 @@ def _clean_user_text(text: str) -> str:
 
 def _truncate(text: str, max_len: int = 70) -> str:
     """Truncate text to max_len, adding ellipsis if needed."""
-    if len(text) > max_len:
-        return text[: max_len - 3] + "..."
-    return text
+    if len(text) <= max_len:
+        return text
+    if max_len < 3:
+        return text[:max(max_len, 0)]
+    return text[: max_len - 3] + "..."
 
 
 def _extract_themes(topics: list[str], max_themes: int = 5) -> list[tuple[str, int]]:
@@ -81,7 +90,7 @@ def _extract_themes(topics: list[str], max_themes: int = 5) -> list[tuple[str, i
     word_to_topics: dict[str, set[int]] = {}
 
     for i, topic in enumerate(topics):
-        words = set(re.findall(r"[a-z][a-z_-]+", topic.lower()))
+        words = {w.rstrip("_-") for w in re.findall(r"[a-z][a-z_-]+", topic.lower())}
         words -= _STOP_WORDS
         words = {w for w in words if len(w) > 2}
         for word in words:
@@ -109,8 +118,12 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
 
     Shows: exchange count, theme clusters, recent topics, and where things left off.
     Target: ~12-16 lines.
+
+    max_turns: how many most-recent user turns to consider for topic analysis
+    (default 40). Older turns beyond max_turns are excluded from topics and
+    theme extraction, but the exchange count still reflects the full session.
     """
-    user_turns: list[str] = []
+    all_user_turns: list[str] = []
     last_assistant: str = ""
 
     for _, msg, _ in messages:
@@ -120,16 +133,30 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
             text = _extract_text(msg)
             text = _clean_user_text(text)
             if text and len(text) >= 3:
-                user_turns.append(text)
+                all_user_turns.append(text)
 
         elif msg_type == "assistant":
             text = _extract_text(msg)
-            text = re.sub(r"\s+", " ", text).strip()
+            text = _clean_user_text(text)
+            # Only update last_assistant when text is meaningful after cleaning;
+            # all-tag turns (tool noise) clean to "" and are intentionally skipped,
+            # so last_assistant naturally holds the prior meaningful turn.
             if text and len(text) >= 3:
                 last_assistant = text
 
-    if not user_turns:
+    if not all_user_turns:
         return ""
+
+    total_exchanges = len(all_user_turns)
+
+    # Limit topic analysis to the most-recent max_turns user turns.
+    # Guard max_turns > 0: list[-0:] == list[0:] (full list), so zero must
+    # be treated as "show nothing" rather than "show everything".
+    user_turns = (
+        all_user_turns[-max_turns:]
+        if max_turns > 0 and len(all_user_turns) > max_turns
+        else (all_user_turns if max_turns > 0 else [])
+    )
 
     # Deduplicate: keep unique user requests (by first 40 chars)
     seen: set[str] = set()
@@ -144,7 +171,7 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
     lines = [
         "",
         "  PREVIOUSLY ON THIS SESSION",
-        f"  {len(user_turns)} exchanges | {len(unique_topics)} topics",
+        f"  {total_exchanges} exchanges | {len(unique_topics)} topics",
         "",
     ]
 
@@ -183,5 +210,5 @@ def generate_recap(messages: list[Message], max_turns: int = 40) -> str:
 def save_recap(messages: list[Message], dest: Path, max_turns: int = 40) -> Path:
     """Generate and save recap to a file. Returns the path."""
     recap = generate_recap(messages, max_turns)
-    dest.write_text(recap, encoding="utf-8")
+    atomic_write_text(dest, recap)
     return dest

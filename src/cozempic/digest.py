@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from ._validation import parse_env_bool
 from .helpers import get_content_blocks, get_msg_type, text_of
 from .types import Message
 
@@ -43,11 +44,12 @@ DECAY_DAYS = 30  # Universal decay period (MemoryArena 2602.16313)
 # AFTER import (programmatic or shell-inherited mid-run) takes effect.
 # Runs inside hooks (PreCompact, Stop) where unconditional stderr would leak
 # to users — hence env-gated.
-_DEBUG = os.environ.get("COZEMPIC_DEBUG") == "1"
+# Accepts: 1/true/yes/on (case-insensitive). Default off.
+_DEBUG = parse_env_bool("COZEMPIC_DEBUG", default=False)
 
 
 def _debug(msg: str) -> None:
-    if _DEBUG or os.environ.get("COZEMPIC_DEBUG") == "1":
+    if _DEBUG or parse_env_bool("COZEMPIC_DEBUG", default=False, warn=False):
         print(f"[cozempic.digest] {msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------

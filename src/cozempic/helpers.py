@@ -78,7 +78,16 @@ class _HostFileLock:
             self._fh = open(self._lock_path, "a")
             if os.name == "nt":
                 import msvcrt
-                # Lock first byte; blocking
+                # Windows — msvcrt.locking locks bytes from the CURRENT file
+                # position. "a" (append) mode leaves the pointer at EOF:
+                # byte 0 on a fresh empty lock file, but >0 if a stale
+                # non-empty lock file was left from a prior crashed run.
+                # __exit__ already rewinds to byte 0 before LK_UNLCK
+                # (helpers.py:105), so without this matching seek(0) before
+                # LK_LOCK the two operations would target different byte
+                # ranges and silently fail to serialize. Mirrors the
+                # _SettingsLock fix in init.py (PR #96).
+                self._fh.seek(0)
                 msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
             else:
                 import fcntl

@@ -506,6 +506,10 @@ def start_guard(
     # Resolve Claude before daemonization or other reparenting can obscure it.
     if claude_pid is None:
         claude_pid = find_claude_pid()
+    # Record PID + start_time NOW — earliest point where both claude_pid and
+    # session_id are known and Claude's identity is confirmed by find_claude_pid.
+    if claude_pid and session_id:
+        _record_claude_identity(session_id, claude_pid)
     claude_alive = True
 
     prune_count = 0
@@ -546,12 +550,16 @@ def start_guard(
                     # PID reuse (daemon started hours ago; original Claude exited and
                     # kernel recycled its PID to an unrelated process).
                     try:
-                        if not _is_claude_process(claude_pid, session_path=session_path):
+                        if not _pid_identity_match(claude_pid, session_id) \
+                                or not _is_claude_process(claude_pid, session_path=session_path):
                             claude_alive = False
                     except ProcessLookupError:
                         claude_alive = False
                 if not claude_alive:
                     print(f"  [{_now()}] Claude process exited (PID {claude_pid}). Final checkpoint...")
+                    # Clear start-time record: this session's Claude is gone.
+                    if session_id:
+                        _CLAUDE_IDENTITY.pop(session_id, None)
                     # Option (b) defense-in-depth: unlink pidfile IMMEDIATELY so a
                     # concurrent SessionStart for the new Claude doesn't see a stale
                     # transient-daemon slot. The finally-block call is a no-op after
@@ -1385,6 +1393,14 @@ def _terminate_and_resume(
     # mtime fallback can misreport a dead Claude as alive. os.kill is not fooled.
     if not _pid_is_alive(claude_pid):
         print(f"  PID {claude_pid} is gone — skipping terminate+resume (no resurrection).")
+        return
+    # Start-time identity gate: if the PID was recycled to a different process
+    # after Claude died, the start_time recorded at startup will differ. This
+    # closes the residual resurrection vector left by the mtime fallback even
+    # after Junaid's mtime-immune liveness gate (06f91c3) — a recycled PID IS
+    # alive but is NOT the same Claude. Fails-OPEN when psutil is absent.
+    if not _pid_identity_match(claude_pid, session_id):
+        print(f"  PID {claude_pid} start-time mismatch — PID was recycled, skipping terminate+resume.")
         return
     # Identity (anti-PID-reuse): is this still actually Claude, not a recycled
     # PID? Per-block checks re-verify before each kill; this is the fail-fast.
@@ -2262,6 +2278,129 @@ def _is_cozempic_guard_process(pid: int) -> bool:
 
 
 _MTIME_LIVENESS_WINDOW_SEC = 60
+
+# ── PID start-time identity store (anti-recycling gate) ─────────────────────
+# Keyed by session_id → (expected_pid, expected_start_time_float).
+# Populated once at start_guard startup after Claude PID is confirmed.
+# Cleared when Claude exits (watchdog break path).
+# In-memory is sufficient: the recycled-PID race occurs within one daemon
+# lifecycle. Daemon restart → fresh find_claude_pid() → fresh recording.
+_CLAUDE_IDENTITY: dict[str, tuple[int, float]] = {}
+
+
+def _get_pid_start_time_linux(pid: int) -> float | None:
+    """Linux: read start_time from /proc/<pid>/stat + /proc/stat btime. No subprocess."""
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+        # comm field may contain spaces and ')'; rfind(")") finds end of comm safely.
+        # After "pid (comm) ", fields are 0-indexed: index 19 = starttime (field 22).
+        # Guard malformed /proc (fuse / WSL1 / BSD emulation); kernel /proc always
+        # has parens but the slice would silently misalign on no-parens input.
+        close_paren = stat_text.rfind(")")
+        if close_paren < 0:
+            return None
+        after_comm = stat_text[close_paren + 2:]
+        starttime_ticks = int(after_comm.split()[19])
+        btime_line = next(
+            line for line in Path("/proc/stat").read_text().splitlines()
+            if line.startswith("btime ")
+        )
+        btime = int(btime_line.split()[1])
+        return float(btime + starttime_ticks / os.sysconf("SC_CLK_TCK"))
+    except Exception:
+        return None
+
+
+def _get_pid_start_time_macos(pid: int) -> float | None:
+    """macOS: parse ps -o lstart= output. 1-second resolution; LC_ALL=C for locale safety."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=2.0, check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        # Normalize whitespace: single-digit days produce double-space ("May  1").
+        normalized = re.sub(r"\s+", " ", result.stdout.strip()).strip()
+        return float(time.mktime(time.strptime(normalized, "%a %b %d %H:%M:%S %Y")))
+    except Exception:
+        return None
+
+
+def _get_pid_start_time_psutil(pid: int) -> float | None:
+    """psutil fallback: microsecond precision; lazy-import (no required dep)."""
+    try:
+        import psutil
+        return psutil.Process(pid).create_time()
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _get_pid_start_time(pid: int) -> float | None:
+    """Return process creation time in seconds since epoch, or None.
+
+    Platform-ordered chain (zero required deps):
+      Linux  → /proc/<pid>/stat  (10ms resolution, no subprocess)
+      macOS  → ps -p <pid> -o lstart=  (1s resolution, subprocess)
+      psutil → lazy-import fallback    (microsecond precision, all platforms)
+
+    Falls through to psutil if the platform-native backend fails (e.g.,
+    restricted /proc on containerised Linux, ps absent, permission error).
+    Returns None only when all backends fail → _pid_identity_match fails-OPEN.
+    """
+    _sys = platform.system()
+    if _sys == "Linux":
+        result = _get_pid_start_time_linux(pid)
+        if result is not None:
+            return result
+    elif _sys == "Darwin":
+        result = _get_pid_start_time_macos(pid)
+        if result is not None:
+            return result
+    return _get_pid_start_time_psutil(pid)
+
+
+def _record_claude_identity(session_id: str, pid: int) -> None:
+    """Record (pid, start_time) for the anti-recycling gate. Call once at startup.
+
+    Validates pid is actually Claude (argv check) before recording — defense
+    in depth in case a future caller bypasses find_claude_pid's identity gate.
+    """
+    if not _is_claude_process(pid):
+        return
+    start_time = _get_pid_start_time(pid)
+    if start_time is not None and session_id:
+        _CLAUDE_IDENTITY[session_id] = (pid, start_time)
+
+
+def _pid_identity_match(pid: int, session_id: str | None) -> bool:
+    """True if pid matches the recorded identity (same PID + same start_time).
+
+    Returns True conservatively when:
+    - session_id is None (no session context — backward compat)
+    - no identity has been recorded for this session_id (daemon restarted)
+    - all start-time backends fail (can't get start_time — degrade gracefully)
+
+    Fail-OPEN rationale: in all these cases we fall through to the existing
+    _pid_is_alive + _is_claude_process layers. No regression vs v1.8.16.
+    """
+    if not session_id:
+        return True
+    identity = _CLAUDE_IDENTITY.get(session_id)
+    if identity is None:
+        return True
+    recorded_pid, recorded_start_time = identity
+    if pid != recorded_pid:
+        return False
+    current_start_time = _get_pid_start_time(pid)
+    if current_start_time is None:
+        return True  # all backends failed — degrade gracefully (fail-OPEN)
+    # 0.1s tolerance absorbs float-precision noise across psutil's kernel-clock
+    # conversion; real PID-recycle gaps are seconds-to-hours, never sub-second.
+    return abs(current_start_time - recorded_start_time) < 0.1
 
 
 def _pid_is_alive(pid: int) -> bool:

@@ -934,7 +934,9 @@ def cmd_doctor(args):
         print(f"    {icon} {r.name:<25} [{r.status.upper()}]")
         print(f"      {r.message}")
         if r.fix_description and r.status not in ("ok", "fixed"):
-            print(f"      Fix: {r.fix_description}")
+            fix_prefix = "      Fix: "
+            fix_text = r.fix_description.replace("\n", f"\n{' ' * len(fix_prefix)}")
+            print(f"{fix_prefix}{fix_text}")
         print()
 
         if r.status == "issue":
@@ -1164,17 +1166,35 @@ def cmd_formulary(args):
 
 
 def _digest_session(args):
-    """Resolve session path and ID from args."""
-    from .session import find_current_session
+    """Resolve session path and ID from args.
+
+    Resolution strategy:
+      - absent / "current"  → cwd-based auto-detect via find_current_session(cwd);
+                              exits 1 with a stderr message if none found.
+      - explicit UUID / UUID prefix / file path → resolve_session(session_arg);
+                              session_id recovered from resolved path stem.
+
+    Returns (path, session_id, cwd).
+    """
+    from .session import find_current_session, resolve_session
     cwd = getattr(args, "cwd", None) or os.getcwd()
-    session_path = getattr(args, "session", None)
-    if not session_path:
+    session_arg = getattr(args, "session", None)
+    if not session_arg or session_arg == "current":
+        # Both absent and explicit "current" use cwd-based auto-detection,
+        # consistent with how the rest of cli.py resolves the current session.
+        # Routing "current" through resolve_session() would use process-detection
+        # (find_current_session(strict=False)) which is a different strategy.
         sess = find_current_session(cwd)
         if not sess:
-            print("No active session found.")
+            # Changed to stderr: consistent with resolve_session error output
+            # and all other error paths in cli.py.
+            print("No active session found.", file=sys.stderr)
             sys.exit(1)
         return sess["path"], sess.get("session_id", ""), cwd
-    return session_path, "", cwd
+    # resolve_session handles: explicit path, UUID, UUID prefix
+    resolved = resolve_session(session_arg)
+    session_id = resolved.stem  # filename stem IS the session UUID
+    return resolved, session_id, cwd
 
 
 def cmd_digest(args):
@@ -1237,7 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.8.16")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.8.17")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
@@ -1356,7 +1376,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_digest.add_argument("digest_action", nargs="?", default="show",
                           choices=["show", "update", "clear", "flush", "recover", "inject"],
                           help="Action: show (default), update, clear, flush, recover, inject")
-    p_digest.add_argument("--session", help="Session ID or path")
+    p_digest.add_argument("--session", help=session_help)
     p_digest.add_argument("--cwd", help="Working directory (default: current)")
 
     return parser

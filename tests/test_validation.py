@@ -180,5 +180,141 @@ class TestBackwardsCompatReExport(unittest.TestCase):
         self.assertIs(reexported, ConfigError)
 
 
+class TestParseEnvBool(unittest.TestCase):
+    """Env var helper for boolean flags.
+
+    Truthy tokens:  1 / true / yes / on  (case-insensitive, whitespace stripped)
+    Falsy tokens:   0 / false / no / off (case-insensitive, whitespace stripped)
+    Absent / empty: return default silently.
+    Unrecognized:   warn to stderr, return default.
+    """
+
+    _VAR = "TEST_ENV_BOOL"
+
+    def setUp(self):
+        # Import here so the test fails with ImportError (not AttributeError)
+        # until the helper is implemented — correct RED failure mode.
+        from cozempic._validation import parse_env_bool
+        self.parse_env_bool = parse_env_bool
+
+    def _call(self, raw=None, default=False, warn=True):
+        env = {self._VAR: raw} if raw is not None else {}
+        with patch.dict(os.environ, env, clear=False):
+            if raw is None:
+                os.environ.pop(self._VAR, None)
+            return self.parse_env_bool(self._VAR, default=default, warn=warn)
+
+    # ── absent / empty ──────────────────────────────────────────────────────
+
+    def test_absent_returns_default_false(self):
+        self.assertFalse(self._call())
+
+    def test_empty_returns_default_false(self):
+        self.assertFalse(self._call(raw=""))
+
+    def test_absent_with_default_true(self):
+        self.assertTrue(self._call(default=True))
+
+    # ── truthy tokens ────────────────────────────────────────────────────────
+
+    def test_true_token_1(self):
+        self.assertTrue(self._call(raw="1"))
+
+    def test_true_token_true(self):
+        self.assertTrue(self._call(raw="true"))
+
+    def test_true_token_True_mixed_case(self):
+        self.assertTrue(self._call(raw="True"))
+
+    def test_true_token_yes(self):
+        self.assertTrue(self._call(raw="yes"))
+
+    def test_true_token_YES_uppercase(self):
+        self.assertTrue(self._call(raw="YES"))
+
+    def test_true_token_on(self):
+        self.assertTrue(self._call(raw="on"))
+
+    # ── falsy tokens ─────────────────────────────────────────────────────────
+
+    def test_false_token_0(self):
+        self.assertFalse(self._call(raw="0"))
+
+    def test_false_token_false(self):
+        self.assertFalse(self._call(raw="false"))
+
+    def test_false_token_no(self):
+        self.assertFalse(self._call(raw="no"))
+
+    def test_false_token_off(self):
+        self.assertFalse(self._call(raw="off"))
+
+    # ── unrecognized: warn + return default ──────────────────────────────────
+
+    def test_unrecognized_warns_and_returns_default(self):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = self._call(raw="foo")
+        self.assertFalse(result)
+        self.assertGreater(len(buf.getvalue()), 0, "expected a warning on stderr")
+
+    def test_unrecognized_includes_var_name_in_warning(self):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._call(raw="maybe")
+        self.assertIn(self._VAR, buf.getvalue())
+
+    # ── whitespace stripping ─────────────────────────────────────────────────
+
+    def test_whitespace_stripped(self):
+        """Leading/trailing whitespace must be stripped before token lookup."""
+        self.assertTrue(self._call(raw="  true  "))
+
+    def test_whitespace_stripped_numeric(self):
+        """Whitespace around a numeric truthy token must also be stripped."""
+        self.assertTrue(self._call(raw="  1  "))
+
+    def test_whitespace_stripped_uppercase_on(self):
+        """Whitespace + uppercase truthy token 'ON' → True (strip + lower)."""
+        self.assertTrue(self._call(raw="  ON  "))
+
+    # ── warn=False suppresses stderr on unrecognized ─────────────────────────
+
+    def test_warn_false_suppresses_warning(self):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = self._call(raw="garbage", warn=False)
+        self.assertFalse(result)
+        self.assertEqual(buf.getvalue(), "", "expected NO warning when warn=False")
+
+    def test_warn_false_recognized_token_still_works(self):
+        """warn=False must not suppress recognized-token parsing."""
+        self.assertTrue(self._call(raw="yes", warn=False))
+
+    # ── whitespace-only input ────────────────────────────────────────────────
+
+    def test_whitespace_only_returns_default_silently(self):
+        """COZEMPIC_DEBUG='   ' must return default WITHOUT a warning.
+
+        The bug: raw == "" guard fires BEFORE strip(), so '   ' slips
+        through as non-empty → normalized="" → not in token sets → spurious
+        warning on stderr. Fix: check raw.strip() == "" instead of raw == "".
+        """
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = self._call(raw="   ")
+        self.assertFalse(result, "whitespace-only must return default (False)")
+        self.assertEqual(buf.getvalue(), "",
+                         "whitespace-only must produce NO warning on stderr")
+
+
 if __name__ == "__main__":
     unittest.main()
