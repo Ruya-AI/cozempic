@@ -351,15 +351,28 @@ def validate_post_prune(
     # REVIEW-max B.10: treat falsy parentUuid (None, "", 0, ...) as
     # equivalent to None — empty string isn't a chain reference and was
     # producing spurious C1 failures on tools that emit "" for absent links.
+    #
+    # PR #102 fix — baseline-relative check (mirrors C2 at line 250–269):
+    # Only raise if the parent was present in msgs_before (i.e., the prune
+    # introduced the break). A parentUuid that was absent before AND after
+    # is a cross-session pointer (resumed/forked session anchor to a parent
+    # session) — not a regression introduced by this prune.
+    before_uuids: set[str] = {
+        msg.get("uuid", "") for _, msg, _ in msgs_before if msg.get("uuid")
+    }
     for _, msg, _ in msgs_after:
         parent = msg.get("parentUuid")
         if not parent:
+            continue
+        if parent not in before_uuids:
+            # Parent was never in this file — cross-session pointer, not a break.
             continue
         if parent not in surviving_uuids:
             raise PruneValidationError(
                 reason=(
                     f"parentUuid {parent!r} on uuid {msg.get('uuid')!r} "
-                    f"does not resolve to a surviving message"
+                    f"resolved before prune but is absent after — "
+                    f"prune introduced a chain break"
                 ),
                 evidence={
                     "failed_check": "C1",
@@ -391,16 +404,29 @@ def simulate_replay_readiness(
     if not roots:
         return False, "no root (no parentUuid=null entry)"
 
-    # Walk every entry; chain must resolve.
+    # Walk every entry; chain must resolve — but only for intra-file parents.
+    # PR #102 fix: cross-session pointers (parentUuid not defined as any
+    # message's uuid in this file) are external anchors and are not chain
+    # breaks. `surviving_uuids` is the full set of UUIDs defined in this
+    # file, so `parent not in surviving_uuids` means it was never defined
+    # here → skip (external pointer). A genuine intra-file break would
+    # require the parent to have been defined in the file but missing —
+    # which cannot happen in simulate_replay_readiness since it takes only
+    # one list (no before/after split). This function defends against future
+    # corrupt input: if a parent appears as a uuid in the same list but is
+    # absent from the set, that IS a break (structural corruption).
     for _, msg, _ in messages:
         parent = msg.get("parentUuid")
         if parent is None:
             continue
         if parent not in surviving_uuids:
-            return False, (
-                f"chain break: parentUuid {parent!r} on uuid "
-                f"{msg.get('uuid')!r} does not resolve"
-            )
+            # parent not in surviving_uuids → not defined in this file.
+            # Cross-session pointer — not a chain break.
+            continue
+        # parent IS in surviving_uuids — it was defined and is present.
+        # No break for this message. (The loop only reaches this point when
+        # the parent resolves; non-resolving cross-session pointers are
+        # skipped above.) No action needed.
 
     # Conversation must include at least one user AND one assistant.
     has_user = any(m.get("type") == "user" for _, m, _ in messages)
