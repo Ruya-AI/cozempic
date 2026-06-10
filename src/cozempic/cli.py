@@ -15,18 +15,35 @@ from .diagnosis import diagnose_session
 from .doctor import run_doctor
 from .executor import execute_actions, run_prescription
 from .guard import checkpoint_team, start_guard, start_guard_daemon
-from .helpers import is_ssh_session, shell_quote
+from .helpers import (
+    is_ssh_session,
+    shell_quote,
+    tag_pattern_matches,
+    compile_protect_patterns,
+)
 from .init import run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .safety import PruneValidationError
-from .session import _PruneLock, PruneConflictError, PruneLockError, find_claude_pid, find_current_session, find_sessions, get_session_cwd, load_messages, project_slug_to_path, resolve_session, save_messages, snapshot_session
+from .session import (
+    _PruneLock,
+    PruneConflictError,
+    PruneLockError,
+    find_claude_pid,
+    find_current_session,
+    find_sessions,
+    get_session_cwd,
+    load_messages,
+    project_slug_to_path,
+    resolve_session,
+    save_messages,
+    snapshot_session,
+)
 from .tokens import estimate_session_tokens, quick_token_estimate, calibrate_ratio
 from .types import PrescriptionResult, StrategyResult
 
 # Ensure all strategies are registered
 import cozempic.strategies  # noqa: F401
-
 
 # ─── argparse type= validators ────────────────────────────────────────────
 # Kept inline (not a separate module) because they're tiny and argparse-specific.
@@ -45,7 +62,9 @@ def _positive_int(val: str) -> int:
         raise argparse.ArgumentTypeError(f"{val!r} is not a valid integer")
     if n <= 0:
         raise argparse.ArgumentTypeError(f"must be positive, got {n}")
-    if n > 10**12:  # reject an absurd value (e.g. 10**400) that overflows downstream math
+    if (
+        n > 10**12
+    ):  # reject an absurd value (e.g. 10**400) that overflows downstream math
         raise argparse.ArgumentTypeError(f"is unreasonably large, got {n}")
     return n
 
@@ -63,6 +82,7 @@ def _positive_float(val: str) -> float:
         raise argparse.ArgumentTypeError(f"must be positive, got {f}")
     return f
 
+
 # Fix Windows stdout/stderr encoding for Unicode characters (box-drawing, emoji)
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -70,6 +90,7 @@ if sys.platform == "win32":
 
 
 # ─── Formatting ───────────────────────────────────────────────────────────────
+
 
 def fmt_bytes(b: int) -> str:
     if b < 1024:
@@ -111,7 +132,11 @@ def print_diagnosis(diag: dict, path: Path):
     if te:
         confidence = f", {te.confidence}" if te.method == "heuristic" else ""
         model_str = f"  Model:   {te.model}" if te.model else ""
-        window_str = f"{fmt_tokens(te.context_window)}" if te.context_window != 200_000 else "200K"
+        window_str = (
+            f"{fmt_tokens(te.context_window)}"
+            if te.context_window != 200_000
+            else "200K"
+        )
         print(f"  Tokens:  {fmt_tokens(te.total)} ({te.method}{confidence})")
         print(f"  Context: {fmt_context_bar(te.context_pct)} of {window_str}")
         if model_str:
@@ -122,20 +147,32 @@ def print_diagnosis(diag: dict, path: Path):
     print(f"    Progress ticks:     {diag['progress_count']:>6}")
     print(f"    File history snaps: {diag['file_history_count']:>6}")
     print(f"    System reminders:   {diag['reminder_count']:>6}")
-    print(f"    Thinking content:   {fmt_bytes(diag['thinking_bytes']):>10} ({fmt_pct(diag['thinking_bytes'], total)})")
-    print(f"    Signatures:         {fmt_bytes(diag['signature_bytes']):>10} ({fmt_pct(diag['signature_bytes'], total)})")
-    print(f"    Tool results:       {fmt_bytes(diag['tool_result_bytes']):>10} ({fmt_pct(diag['tool_result_bytes'], total)})")
+    print(
+        f"    Thinking content:   {fmt_bytes(diag['thinking_bytes']):>10} ({fmt_pct(diag['thinking_bytes'], total)})"
+    )
+    print(
+        f"    Signatures:         {fmt_bytes(diag['signature_bytes']):>10} ({fmt_pct(diag['signature_bytes'], total)})"
+    )
+    print(
+        f"    Tool results:       {fmt_bytes(diag['tool_result_bytes']):>10} ({fmt_pct(diag['tool_result_bytes'], total)})"
+    )
 
     cache = diag.get("cache_stats")
     if cache:
-        print(f"    Cache hit rate:     {cache['cache_hit_rate']:>5}%  ({cache['cache_read_tokens']:,} read / {cache['cache_total_tokens']:,} total)")
+        print(
+            f"    Cache hit rate:     {cache['cache_hit_rate']:>5}%  ({cache['cache_read_tokens']:,} read / {cache['cache_total_tokens']:,} total)"
+        )
     print()
 
     print("  Message Type Breakdown:")
-    sorted_types = sorted(diag["type_stats"].items(), key=lambda x: x[1]["bytes"], reverse=True)
+    sorted_types = sorted(
+        diag["type_stats"].items(), key=lambda x: x[1]["bytes"], reverse=True
+    )
     for mtype, stats in sorted_types:
         pct = fmt_pct(stats["bytes"], total)
-        print(f"    {mtype:<28} {stats['count']:>5} msgs  {fmt_bytes(stats['bytes']):>10}  ({pct})")
+        print(
+            f"    {mtype:<28} {stats['count']:>5} msgs  {fmt_bytes(stats['bytes']):>10}  ({pct})"
+        )
     print()
 
     print("  Top 10 Largest Messages:")
@@ -146,7 +183,9 @@ def print_diagnosis(diag: dict, path: Path):
 
 def print_strategy_result(sr: StrategyResult, total_bytes: int):
     """Print a single strategy result — only called for strategies that did something."""
-    saved = sum(a.original_bytes - a.pruned_bytes for a in sr.actions) if sr.actions else 0
+    saved = (
+        sum(a.original_bytes - a.pruned_bytes for a in sr.actions) if sr.actions else 0
+    )
     affected = sr.messages_removed + sr.messages_replaced
     print(f"    {sr.strategy_name:<28} {fmt_bytes(saved):>8}  {affected:>4} msgs")
 
@@ -159,14 +198,21 @@ def print_prescription_result(pr: PrescriptionResult):
     if pr.original_tokens is not None and pr.final_tokens is not None:
         tok_saved = pr.original_tokens - pr.final_tokens
         from .tokens import DEFAULT_CONTEXT_WINDOW
+
         context_window = pr.context_window or DEFAULT_CONTEXT_WINDOW
         after_pct = round(pr.final_tokens / context_window * 100, 1)
         window_str = fmt_tokens(context_window)
-        print(f"  Before   {fmt_tokens(pr.original_tokens):>8} tokens  {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages")
-        print(f"  After    {fmt_tokens(pr.final_tokens):>8} tokens  {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages")
+        print(
+            f"  Before   {fmt_tokens(pr.original_tokens):>8} tokens  {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages"
+        )
+        print(
+            f"  After    {fmt_tokens(pr.final_tokens):>8} tokens  {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages"
+        )
         if tok_saved >= 0 and pr.original_tokens > 0:
             tok_pct = f"{tok_saved / pr.original_tokens * 100:.1f}%"
-            print(f"  Saved    {fmt_tokens(tok_saved):>8} tokens ({tok_pct})  {fmt_bytes(saved)} freed")
+            print(
+                f"  Saved    {fmt_tokens(tok_saved):>8} tokens ({tok_pct})  {fmt_bytes(saved)} freed"
+            )
         else:
             # Tokens appear to have GROWN despite a byte reduction. This is not a
             # real increase: metadata-strip removes the `usage` frames the exact
@@ -176,24 +222,35 @@ def print_prescription_result(pr: PrescriptionResult):
             # savings and flag the token delta as unavailable rather than print a
             # nonsensical negative/over-100% value.
             byte_pct = fmt_pct(saved, pr.original_total_bytes)
-            print(f"  Saved    {fmt_bytes(saved):>8} ({byte_pct})  — exact token delta n/a (usage metadata pruned; count re-anchored)")
+            print(
+                f"  Saved    {fmt_bytes(saved):>8} ({byte_pct})  — exact token delta n/a (usage metadata pruned; count re-anchored)"
+            )
         print(f"  Context  {fmt_context_bar(after_pct)} of {window_str}")
     else:
         byte_pct = fmt_pct(saved, pr.original_total_bytes)
-        print(f"  Before   {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages")
-        print(f"  After    {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages")
+        print(
+            f"  Before   {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages"
+        )
+        print(
+            f"  After    {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages"
+        )
         print(f"  Saved    {fmt_bytes(saved):>8} ({byte_pct})")
 
     # Only show strategies that actually did something
     active = [sr for sr in pr.strategy_results if sr.actions]
     if active:
         print(f"\n  What changed:")
-        for sr in sorted(active, key=lambda s: sum(a.original_bytes - a.pruned_bytes for a in s.actions), reverse=True):
+        for sr in sorted(
+            active,
+            key=lambda s: sum(a.original_bytes - a.pruned_bytes for a in s.actions),
+            reverse=True,
+        ):
             print_strategy_result(sr, pr.original_total_bytes)
     print()
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
+
 
 def cmd_list(args):
     sessions = find_sessions(args.project)
@@ -201,7 +258,9 @@ def cmd_list(args):
         print("No sessions found.")
         return
 
-    print(f"\n  {'Session ID':<40} {'Size':>10} {'Tokens':>8} {'Messages':>8} {'Modified':<20} Project")
+    print(
+        f"\n  {'Session ID':<40} {'Size':>10} {'Tokens':>8} {'Messages':>8} {'Modified':<20} Project"
+    )
     print(f"  {'─' * 40} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 20} {'─' * 30}")
 
     for sess in sorted(sessions, key=lambda s: s["size"], reverse=True):
@@ -227,7 +286,10 @@ def cmd_current(args):
     sess = find_current_session(cwd, match_text=match_text)
     if not sess:
         print("Could not detect current session.", file=sys.stderr)
-        print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
+        print(
+            "Make sure you're running from a directory with a Claude Code project.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"\n  Current Session:")
@@ -235,6 +297,7 @@ def cmd_current(args):
     print(f"    Size:    {fmt_bytes(sess['size'])} ({sess['lines']} messages)")
 
     from .tokens import detect_context_window, detect_model
+
     messages_for_model = load_messages(sess["path"])
     context_window = detect_context_window(messages_for_model)
     model = detect_model(messages_for_model)
@@ -262,8 +325,9 @@ def cmd_current(args):
         _floor_cfg = load_config().floor
         for rx_name, strategy_names in PRESCRIPTIONS.items():
             try:
-                new_msgs, _ = run_prescription(messages, strategy_names, {},
-                                               floor_config=_floor_cfg)
+                new_msgs, _ = run_prescription(
+                    messages, strategy_names, {}, floor_config=_floor_cfg
+                )
             except PruneValidationError as ve:
                 # Dry-run estimation: a structural validation failure means the
                 # session is already malformed or the strategy would make it
@@ -289,8 +353,9 @@ def cmd_diagnose(args):
     _floor_cfg = load_config().floor
     for rx_name, strategy_names in PRESCRIPTIONS.items():
         try:
-            new_msgs, _ = run_prescription(messages, strategy_names, {},
-                                           floor_config=_floor_cfg)
+            new_msgs, _ = run_prescription(
+                messages, strategy_names, {}, floor_config=_floor_cfg
+            )
         except PruneValidationError as ve:
             # Dry-run estimation: report structural failure instead of crashing.
             check = ve.evidence.get("failed_check", "?")
@@ -304,7 +369,11 @@ def cmd_diagnose(args):
 
 
 def cmd_treat(args):
-    path = resolve_session(args.session, getattr(args, "project", None), strict=getattr(args, "execute", False))
+    path = resolve_session(
+        args.session,
+        getattr(args, "project", None),
+        strict=getattr(args, "execute", False),
+    )
     # Take snapshot BEFORE load so append-conflict detection in save_messages
     # can correctly identify if Claude wrote new lines mid-prune. Only needed
     # for execute path but cheap to compute always.
@@ -313,13 +382,28 @@ def cmd_treat(args):
     rx_name = args.rx or "standard"
 
     if rx_name not in PRESCRIPTIONS:
-        print(f"Error: Unknown prescription '{rx_name}'. Options: {', '.join(PRESCRIPTIONS)}", file=sys.stderr)
+        print(
+            f"Error: Unknown prescription '{rx_name}'. Options: {', '.join(PRESCRIPTIONS)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     strategy_names = PRESCRIPTIONS[rx_name]
     config = {}
     if args.thinking_mode:
         config["thinking_mode"] = args.thinking_mode
+
+    # --protect-pattern: compile and tag matching messages before pruning
+    protect_patterns = None
+    if getattr(args, "protect_pattern", None):
+        try:
+            protect_patterns = compile_protect_patterns(args.protect_pattern)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        tagged = tag_pattern_matches(messages, protect_patterns)
+        if tagged:
+            print(f"  Pattern-protected {tagged} message(s).")
 
     original_bytes = sum(b for _, _, b in messages)
     original_count = len(messages)
@@ -329,7 +413,9 @@ def cmd_treat(args):
     pre_ratio = calibrate_ratio(messages)
 
     try:
-        new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+        new_messages, strategy_results = run_prescription(
+            messages, strategy_names, config
+        )
     except PruneValidationError as ve:
         check = ve.evidence.get("failed_check", "?")
         print(
@@ -341,6 +427,11 @@ def cmd_treat(args):
             file=sys.stderr,
         )
         sys.exit(5)
+
+    # Strip pattern-protect tags from surviving messages (same pattern as team-protect)
+    if protect_patterns:
+        for _, msg_dict, _ in new_messages:
+            msg_dict.pop("__cozempic_pattern_protected__", None)
 
     final_bytes = sum(b for _, _, b in new_messages)
     final_count = len(new_messages)
@@ -366,11 +457,14 @@ def cmd_treat(args):
     print_prescription_result(pr)
 
     if pre_te.method == "exact" and post_te.method == "heuristic":
-        print("  Note: exact usage data was stripped — post-treatment token count is estimated.")
+        print(
+            "  Note: exact usage data was stripped — post-treatment token count is estimated."
+        )
 
     if args.execute:
         # Check for active background tasks before writing
         from .helpers import find_active_background_tasks
+
         active_tasks = find_active_background_tasks(messages)
         if active_tasks:
             print(f"  WARNING: {len(active_tasks)} background task(s) in progress:")
@@ -382,19 +476,29 @@ def cmd_treat(args):
             except EOFError:
                 answer = "n"
             if answer.lower() != "y":
-                print("  Aborted — wait for tasks to complete or pass --force to override.")
+                print(
+                    "  Aborted — wait for tasks to complete or pass --force to override."
+                )
                 return
 
         # Acquire per-session prune lock + pass snapshot for append-conflict detection.
         # Prevents corruption when the guard daemon is mid-prune on the same session.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages, create_backup=True, snapshot=snapshot
+                )
         except PruneLockError:
-            print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
+            print(
+                "  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.",
+                file=sys.stderr,
+            )
             sys.exit(2)
         except PruneConflictError as exc:
-            print(f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}", file=sys.stderr)
+            print(
+                f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}",
+                file=sys.stderr,
+            )
             sys.exit(3)
         print(f"  Applied to {path}")
         if backup:
@@ -404,9 +508,13 @@ def cmd_treat(args):
         # Track and display lifetime savings
         if pr.original_tokens and pr.final_tokens:
             from .helpers import record_savings, get_savings_line, get_msg_type
-            turn_count = sum(1 for _, m, _ in messages
-                           if get_msg_type(m) == "user"
-                           and isinstance(m.get("message", {}).get("content", ""), str))
+
+            turn_count = sum(
+                1
+                for _, m, _ in messages
+                if get_msg_type(m) == "user"
+                and isinstance(m.get("message", {}).get("content", ""), str)
+            )
             record_savings(
                 pr.original_tokens - pr.final_tokens,
                 total_tokens=pr.original_tokens,
@@ -418,15 +526,22 @@ def cmd_treat(args):
     else:
         # Show active tasks in dry run too
         from .helpers import find_active_background_tasks
+
         active_tasks = find_active_background_tasks(messages)
         if active_tasks:
-            print(f"  NOTE: {len(active_tasks)} background task(s) active — executing would interrupt them.")
+            print(
+                f"  NOTE: {len(active_tasks)} background task(s) active — executing would interrupt them."
+            )
         print("  Dry run — pass --execute to apply.")
     print()
 
 
 def cmd_strategy(args):
-    path = resolve_session(args.session, getattr(args, "project", None), strict=getattr(args, "execute", False))
+    path = resolve_session(
+        args.session,
+        getattr(args, "project", None),
+        strict=getattr(args, "execute", False),
+    )
     # Take snapshot before load for append-conflict detection on execute path
     snapshot = snapshot_session(path) if getattr(args, "execute", False) else None
     messages = load_messages(path)
@@ -446,13 +561,17 @@ def cmd_strategy(args):
     saved = sum(a.original_bytes - a.pruned_bytes for a in sr.actions)
     print(f"\n  Strategy: {sr.strategy_name}")
     print(f"  Savings: {fmt_bytes(saved)} ({fmt_pct(saved, original_bytes)})")
-    print(f"  Actions: {len(sr.actions)} ({sr.messages_removed} removed, {sr.messages_replaced} modified)")
+    print(
+        f"  Actions: {len(sr.actions)} ({sr.messages_removed} removed, {sr.messages_replaced} modified)"
+    )
     print(f"  Summary: {sr.summary}")
     print()
 
     if args.verbose:
         for a in sr.actions[:20]:
-            print(f"    Line {a.line_index:<6} {a.action:<8} {fmt_bytes(a.original_bytes):>10} -> {fmt_bytes(a.pruned_bytes):>10}  {a.reason}")
+            print(
+                f"    Line {a.line_index:<6} {a.action:<8} {fmt_bytes(a.original_bytes):>10} -> {fmt_bytes(a.pruned_bytes):>10}  {a.reason}"
+            )
         if len(sr.actions) > 20:
             print(f"    ... and {len(sr.actions) - 20} more actions")
         print()
@@ -463,12 +582,20 @@ def cmd_strategy(args):
         # detection. Same protection as cmd_treat.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages, create_backup=True, snapshot=snapshot
+                )
         except PruneLockError:
-            print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
+            print(
+                "  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.",
+                file=sys.stderr,
+            )
             sys.exit(2)
         except PruneConflictError as exc:
-            print(f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}", file=sys.stderr)
+            print(
+                f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}",
+                file=sys.stderr,
+            )
             sys.exit(3)
         final_bytes = sum(b for _, _, b in new_messages)
         print(f"  Applied. Final size: {fmt_bytes(final_bytes)}")
@@ -489,7 +616,10 @@ def cmd_reload(args):
     both try to `claude --resume` the same session → session conflict.
     """
     from .reload_lock import (
-        _ReloadLock, ReloadLockHeld, INIT_CLI_RELOAD, acquire_with_wait,
+        _ReloadLock,
+        ReloadLockHeld,
+        INIT_CLI_RELOAD,
+        acquire_with_wait,
     )
 
     cwd = args.cwd or os.getcwd()
@@ -507,8 +637,14 @@ def cmd_reload(args):
         sess = find_current_session(cwd, strict=True)
     if not sess:
         print("Could not detect current session.", file=sys.stderr)
-        print("Cannot determine session unambiguously — pass one explicitly:", file=sys.stderr)
-        print("  cozempic reload --session <uuid-or-path> -rx <prescription>", file=sys.stderr)
+        print(
+            "Cannot determine session unambiguously — pass one explicitly:",
+            file=sys.stderr,
+        )
+        print(
+            "  cozempic reload --session <uuid-or-path> -rx <prescription>",
+            file=sys.stderr,
+        )
         print("Use 'cozempic list' to find the session ID.", file=sys.stderr)
         sys.exit(1)
 
@@ -517,6 +653,7 @@ def cmd_reload(args):
     # the next arm starts fresh (1.8.22 E; previously clear_armed was never wired).
     try:
         from .guard import clear_armed
+
         clear_armed(sess["session_id"], sess.get("path"))
     except Exception:
         pass
@@ -531,7 +668,9 @@ def cmd_reload(args):
     try:
         if _wait_sec is not None:
             _reload_lock = acquire_with_wait(
-                sess["session_id"], INIT_CLI_RELOAD, wait_seconds=float(_wait_sec),
+                sess["session_id"],
+                INIT_CLI_RELOAD,
+                wait_seconds=float(_wait_sec),
             )
         else:
             _reload_lock = _ReloadLock(sess["session_id"], initiator=INIT_CLI_RELOAD)
@@ -543,6 +682,7 @@ def cmd_reload(args):
             # file to remove. Generic glob hints could wipe unrelated
             # session locks; specificity protects other in-flight sessions.
             from .reload_lock import _lock_path_for, WEDGE_TTL_SECONDS
+
             lock_path = _lock_path_for(sess["session_id"])
             print(
                 f"  The holding process appears wedged (>{WEDGE_TTL_SECONDS}s with no progress).",
@@ -608,7 +748,10 @@ def cmd_reload(args):
 
         rx_name = args.rx or "standard"
         if rx_name not in PRESCRIPTIONS:
-            print(f"Error: Unknown prescription '{rx_name}'. Options: {', '.join(PRESCRIPTIONS)}", file=sys.stderr)
+            print(
+                f"Error: Unknown prescription '{rx_name}'. Options: {', '.join(PRESCRIPTIONS)}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         # Step 1: Apply treatment
@@ -622,6 +765,18 @@ def cmd_reload(args):
         if args.thinking_mode:
             config["thinking_mode"] = args.thinking_mode
 
+        # --protect-pattern: compile and tag matching messages before pruning
+        protect_patterns = None
+        if getattr(args, "protect_pattern", None):
+            try:
+                protect_patterns = compile_protect_patterns(args.protect_pattern)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            tagged = tag_pattern_matches(messages, protect_patterns)
+            if tagged:
+                print(f"  Pattern-protected {tagged} message(s).")
+
         original_bytes = sum(b for _, _, b in messages)
         original_count = len(messages)
 
@@ -630,7 +785,9 @@ def cmd_reload(args):
         pre_ratio = calibrate_ratio(messages)
 
         try:
-            new_messages, strategy_results = run_prescription(messages, strategy_names, config)
+            new_messages, strategy_results = run_prescription(
+                messages, strategy_names, config
+            )
         except PruneValidationError as ve:
             check = ve.evidence.get("failed_check", "?")
             print(
@@ -642,6 +799,11 @@ def cmd_reload(args):
                 file=sys.stderr,
             )
             sys.exit(5)
+
+        # Strip pattern-protect tags from surviving messages
+        if protect_patterns:
+            for _, msg_dict, _ in new_messages:
+                msg_dict.pop("__cozempic_pattern_protected__", None)
 
         final_bytes = sum(b for _, _, b in new_messages)
         final_count = len(new_messages)
@@ -670,12 +832,20 @@ def cmd_reload(args):
         # cmd_reload raced guard_prune_cycle's auto-fire at the 55% threshold.
         try:
             with _PruneLock(path):
-                backup = save_messages(path, new_messages, create_backup=True, snapshot=snapshot)
+                backup = save_messages(
+                    path, new_messages, create_backup=True, snapshot=snapshot
+                )
         except PruneLockError:
-            print("  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.", file=sys.stderr)
+            print(
+                "  Aborted: another prune cycle (guard daemon) is active. Try again in a few seconds.",
+                file=sys.stderr,
+            )
             sys.exit(2)
         except PruneConflictError as exc:
-            print(f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}", file=sys.stderr)
+            print(
+                f"  Aborted: session changed mid-prune (Claude wrote new lines). {exc}",
+                file=sys.stderr,
+            )
             sys.exit(3)
         print(f"  Applied to {path}")
         if backup:
@@ -685,9 +855,13 @@ def cmd_reload(args):
         # Track lifetime savings
         if pre_te.total and post_te.total:
             from .helpers import record_savings, get_savings_line, get_msg_type
-            turn_count = sum(1 for _, m, _ in messages
-                           if get_msg_type(m) == "user"
-                           and isinstance(m.get("message", {}).get("content", ""), str))
+
+            turn_count = sum(
+                1
+                for _, m, _ in messages
+                if get_msg_type(m) == "user"
+                and isinstance(m.get("message", {}).get("content", ""), str)
+            )
             record_savings(
                 pre_te.total - post_te.total,
                 total_tokens=pre_te.total,
@@ -700,7 +874,10 @@ def cmd_reload(args):
 
         # Step 2: Generate recap from the pruned messages
         import tempfile
-        recap_path = Path(tempfile.gettempdir()) / f"cozempic_recap_{sess['session_id'][:8]}.txt"
+
+        recap_path = (
+            Path(tempfile.gettempdir()) / f"cozempic_recap_{sess['session_id'][:8]}.txt"
+        )
         save_recap(new_messages, recap_path)
         print(f"  Recap saved to {recap_path}")
 
@@ -712,23 +889,40 @@ def cmd_reload(args):
             print("  Restart Claude manually with: claude --resume")
             return
 
-        _spawn_watcher(claude_pid, cwd, recap_path=recap_path, session_id=sess["session_id"])
+        _spawn_watcher(
+            claude_pid, cwd, recap_path=recap_path, session_id=sess["session_id"]
+        )
 
         # Auto-send /exit via the best available method
         from .guard import _detect_terminal_env
+
         term_env = _detect_terminal_env()
 
         if term_env == "tmux":
             pane = os.environ.get("TMUX_PANE", "")
             import subprocess as sp
-            sp.run(["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
-                   capture_output=True, timeout=5)
+
+            sp.run(
+                [
+                    "tmux",
+                    "send-keys",
+                    *(["-t", pane] if pane else []),
+                    "/exit",
+                    "Enter",
+                ],
+                capture_output=True,
+                timeout=5,
+            )
             print(f"  Resuming with optimized context...")
         elif term_env == "screen":
             screen_session = os.environ.get("STY", "")
             import subprocess as sp
-            sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
-                   capture_output=True, timeout=5)
+
+            sp.run(
+                ["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
+                capture_output=True,
+                timeout=5,
+            )
             print(f"  Resuming with optimized context...")
         else:
             print(f"  Type /exit to resume with optimized context.")
@@ -740,9 +934,15 @@ def cmd_reload(args):
             pass
 
 
-def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = None, session_id: str | None = None):
+def _spawn_watcher(
+    claude_pid: int,
+    project_dir: str,
+    recap_path: Path | None = None,
+    session_id: str | None = None,
+):
     """Spawn a detached background process that waits for Claude to exit, then resumes."""
     from .guard import _detect_claude_flags
+
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
     original_flags = _detect_claude_flags(claude_pid)
     if original_flags:
@@ -765,8 +965,8 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
     if system == "Darwin":
         inner_cmd = f"cd {shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}"
         resume_cmd = (
-            f"osascript -e 'tell application \"Terminal\" to do script "
-            f"\"{inner_cmd}\"'"
+            f'osascript -e \'tell application "Terminal" to do script '
+            f'"{inner_cmd}"\''
         )
     elif system == "Linux":
         inner_cmd = f"cd {shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}; exec bash"
@@ -786,7 +986,7 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
         f"while kill -0 {claude_pid} 2>/dev/null; do sleep 1; done; "
         f"sleep 1; "
         f"{resume_cmd}; "
-        f"echo \"$(date): Cozempic resumed Claude in {project_dir}\" >> /tmp/cozempic_reload.log"
+        f'echo "$(date): Cozempic resumed Claude in {project_dir}" >> /tmp/cozempic_reload.log'
     )
 
     subprocess.Popen(
@@ -842,8 +1042,18 @@ def cmd_guard(args):
     if getattr(args, "system_overhead_tokens", None):
         os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
 
+    # --protect-pattern: compile early, fail loud on invalid regex
+    protect_patterns = None
+    if getattr(args, "protect_pattern", None):
+        try:
+            protect_patterns = compile_protect_patterns(args.protect_pattern)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     if getattr(args, "reload_self", False):
         from .guard import reload_self_daemon
+
         result = reload_self_daemon(
             cwd=args.cwd or os.getcwd(),
             session_id=session_id,
@@ -855,9 +1065,12 @@ def cmd_guard(args):
             reactive=not args.no_reactive,
             threshold_tokens=args.threshold_tokens,
             soft_threshold_tokens=args.soft_threshold_tokens,
+            protect_patterns=protect_patterns,
         )
         if result.get("reloaded"):
-            print(f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})")
+            print(
+                f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})"
+            )
         else:
             print(f"  Guard reload skipped: {result.get('reason')}")
         return
@@ -875,6 +1088,7 @@ def cmd_guard(args):
             soft_threshold_tokens=args.soft_threshold_tokens,
             session_id=session_id,
             claude_pid=claude_pid,
+            protect_patterns=protect_patterns,
         )
         # Defensive .get() so a future regression that drops a key from
         # start_guard_daemon's return dict surfaces as a readable message
@@ -885,7 +1099,10 @@ def cmd_guard(args):
             print(f"  Guard daemon started (PID {result.get('pid')})")
             print(f"  Log: {result.get('log_file')}")
         else:
-            reason = result.get("reason") or "unknown (no started/already_running/reason set)"
+            reason = (
+                result.get("reason")
+                or "unknown (no started/already_running/reason set)"
+            )
             print(f"  Guard daemon failed to start: {reason}")
         return
 
@@ -901,6 +1118,7 @@ def cmd_guard(args):
         soft_threshold_tokens=args.soft_threshold_tokens,
         session_id=session_id,
         claude_pid=claude_pid,
+        protect_patterns=protect_patterns,
     )
 
 
@@ -962,17 +1180,22 @@ def cmd_init(args):
     """Wire cozempic hooks and slash command into the current project (or globally)."""
     if getattr(args, "uninstall_global", False):
         from .init import uninstall_hooks
+
         result = uninstall_hooks(str(Path.home()))
         print("\n  COZEMPIC INIT — UNINSTALL GLOBAL")
         print("  ═══════════════════════════════════════════════════════════════════")
         if result.get("removed"):
-            print(f"  Removed {len(result['removed'])} hook(s) from {result['settings_path']}")
+            print(
+                f"  Removed {len(result['removed'])} hook(s) from {result['settings_path']}"
+            )
             for h in result["removed"]:
                 print(f"    - {h}")
             if result.get("backup_path"):
                 print(f"  Backup: {result['backup_path']}")
         else:
-            print("  No cozempic hooks found in ~/.claude/settings.json — nothing to remove.")
+            print(
+                "  No cozempic hooks found in ~/.claude/settings.json — nothing to remove."
+            )
         # Mark as opted-out so global auto-init doesn't re-fire
         try:
             _GLOBAL_INIT_MARKER.touch()
@@ -1078,33 +1301,51 @@ _NUDGE_DEFAULT_TIERS = (0.25, 0.55, 0.80)
 _NUDGE_REARM_HYSTERESIS = 0.07
 
 
-def _build_nudge_message(tier_key: int, pct: float, proj: float | None,
-                         inflight: bool = False) -> str:
+def _build_nudge_message(
+    tier_key: int, pct: float, proj: float | None, inflight: bool = False
+) -> str:
     """Locked nudge copy. `proj` = projected reduction % from the daemon's armed
     sentinel (omitted if 0/unavailable). `inflight` = harness work (agents/tools)
     is running, so the guard reloads once it finishes — don't promise an idle
     reload then."""
     pct_disp = int(round(pct * 100))
     if tier_key <= 25:
-        return (f"✦ Cozempic: context {pct_disp}%. Optional — `/cozempic reload` does a "
-                f"lossless prune+resume at any breakpoint (higher fidelity than autocompact).")
-    reclaim = f"reclaims ~{int(round(proj))}% by pruning bloat" if proj else "prunes bloat"
+        return (
+            f"✦ Cozempic: context {pct_disp}%. Optional — `/cozempic reload` does a "
+            f"lossless prune+resume at any breakpoint (higher fidelity than autocompact)."
+        )
+    reclaim = (
+        f"reclaims ~{int(round(proj))}% by pruning bloat" if proj else "prunes bloat"
+    )
     # When agents/tools are in flight, the safe-point gate holds the reload until
     # they finish, so don't tell the user it happens the moment they pause.
-    when = ("the guard auto-reloads once your current agents/tools finish"
-            if inflight else "the guard auto-reloads once you pause between turns")
+    when = (
+        "the guard auto-reloads once your current agents/tools finish"
+        if inflight
+        else "the guard auto-reloads once you pause between turns"
+    )
     if tier_key <= 55:
-        return (f"✦ Cozempic: you're at {pct_disp}% context. A safe reload {reclaim} and "
-                f"resumes automatically (conversation preserved). Your call:\n"
-                f"    • run `/cozempic reload` now to control the timing, or\n"
-                f"    • do nothing — {when}.")
-    reclaim80 = (f"reclaims ~{int(round(proj))}% without loss" if proj
-                 else "prunes bloat without losing your conversation")
-    tail = ("Run `/cozempic reload` now to pick the moment, or it reloads once your "
-            "agents/tools finish." if inflight else
-            "Run `/cozempic reload` now to pick the moment or wait for the autoreload to kick in.")
-    return (f"✦ Cozempic: context {pct_disp}% — approaching the autocompact wall. A reload "
-            f"{reclaim80}. {tail}")
+        return (
+            f"✦ Cozempic: you're at {pct_disp}% context. A safe reload {reclaim} and "
+            f"resumes automatically (conversation preserved). Your call:\n"
+            f"    • run `/cozempic reload` now to control the timing, or\n"
+            f"    • do nothing — {when}."
+        )
+    reclaim80 = (
+        f"reclaims ~{int(round(proj))}% without loss"
+        if proj
+        else "prunes bloat without losing your conversation"
+    )
+    tail = (
+        "Run `/cozempic reload` now to pick the moment, or it reloads once your "
+        "agents/tools finish."
+        if inflight
+        else "Run `/cozempic reload` now to pick the moment or wait for the autoreload to kick in."
+    )
+    return (
+        f"✦ Cozempic: context {pct_disp}% — approaching the autocompact wall. A reload "
+        f"{reclaim80}. {tail}"
+    )
 
 
 def cmd_nudge(args):
@@ -1113,6 +1354,7 @@ def cmd_nudge(args):
     prune, no reload, never blocks the stop, never fed to the model. Always exit 0.
     """
     import json as _json
+
     if os.environ.get("COZEMPIC_NUDGE_OFF"):
         return
     try:
@@ -1128,6 +1370,7 @@ def cmd_nudge(args):
     try:
         from .session import load_messages
         from .tokens import detect_context_window, extract_usage_tokens
+
         messages = load_messages(Path(transcript))
         usage = extract_usage_tokens(messages)
         window = detect_context_window(messages)
@@ -1146,6 +1389,7 @@ def cmd_nudge(args):
     tiers = _NUDGE_DEFAULT_TIERS
     try:
         from .session import get_session_nudge_tiers
+
         _gt = get_session_nudge_tiers(payload.get("session_id") or "")
         if _gt:
             tiers = tuple(_gt)
@@ -1156,8 +1400,13 @@ def cmd_nudge(args):
         try:
             # Keep only finite fractions in (0, 1]; a NaN/inf tier silently disables
             # the nudge (pct >= nan/inf is always False → it never fires).
-            _t = tuple(sorted(v for x in raw.split(",") if x.strip()
-                              and math.isfinite(v := float(x)) and 0 < v <= 1))
+            _t = tuple(
+                sorted(
+                    v
+                    for x in raw.split(",")
+                    if x.strip() and math.isfinite(v := float(x)) and 0 < v <= 1
+                )
+            )
             tiers = _t or tiers
         except Exception:
             pass
@@ -1177,8 +1426,11 @@ def cmd_nudge(args):
     if not isinstance(sess_state, dict):
         sess_state = {}
     try:
-        prev_fired = {int(t) for t in sess_state.get("tiers_fired", [])
-                      if str(t).lstrip("-").isdigit()}
+        prev_fired = {
+            int(t)
+            for t in sess_state.get("tiers_fired", [])
+            if str(t).lstrip("-").isdigit()
+        }
     except Exception:
         prev_fired = set()
     # Re-arm with HYSTERESIS: keep a tier latched until context drops a clear band
@@ -1209,6 +1461,7 @@ def cmd_nudge(args):
     proj = None
     try:
         from .guard import read_armed, mark_armed_warned
+
         armed = read_armed(session, Path(transcript))
         if armed and isinstance(armed.get("projected_pct"), (int, float)):
             proj = float(armed["projected_pct"])
@@ -1220,9 +1473,14 @@ def cmd_nudge(args):
     inflight = False
     try:
         from .guard import detect_in_flight
+
         d = detect_in_flight(messages)
-        inflight = bool(d.get("workflow") or d.get("background")
-                        or d.get("agent") or d.get("open_call"))
+        inflight = bool(
+            d.get("workflow")
+            or d.get("background")
+            or d.get("agent")
+            or d.get("open_call")
+        )
     except Exception:
         pass
     msg = _build_nudge_message(tier_key, pct, proj, inflight=inflight)
@@ -1273,6 +1531,7 @@ def cmd_remind(args):
 
     # 1. Active digest rules
     from .digest import load_digest_store
+
     store = load_digest_store()
     active = store.active_rules()
     if active:
@@ -1286,9 +1545,19 @@ def cmd_remind(args):
             try:
                 for line in p.read_text(encoding="utf-8").splitlines():
                     line_stripped = line.strip()
-                    if any(kw in line_stripped.upper() for kw in
-                           ["MUST NEVER", "NEVER ", "MUST ALWAYS", "CRITICAL:", "IMPORTANT:"]):
-                        if len(line_stripped) > 10 and not line_stripped.startswith("#"):
+                    if any(
+                        kw in line_stripped.upper()
+                        for kw in [
+                            "MUST NEVER",
+                            "NEVER ",
+                            "MUST ALWAYS",
+                            "CRITICAL:",
+                            "IMPORTANT:",
+                        ]
+                    ):
+                        if len(line_stripped) > 10 and not line_stripped.startswith(
+                            "#"
+                        ):
                             lines.append(f"  {line_stripped[:120]}")
                             if len(lines) >= 8:
                                 break
@@ -1297,7 +1566,10 @@ def cmd_remind(args):
             break
 
     if lines:
-        print(f"Cozempic behavioral rules (reminder #{count // interval}):", file=sys.stderr)
+        print(
+            f"Cozempic behavioral rules (reminder #{count // interval}):",
+            file=sys.stderr,
+        )
         for line in lines[:8]:
             print(line, file=sys.stderr)
 
@@ -1305,6 +1577,7 @@ def cmd_remind(args):
 def cmd_completions(args):
     """Generate shell completion scripts."""
     from .completion import bash_completion, zsh_completion
+
     if args.shell == "bash":
         print(bash_completion())
     elif args.shell == "zsh":
@@ -1319,7 +1592,9 @@ def cmd_formulary(args):
     print(f"  {'#':<4} {'Name':<30} {'Tier':<12} {'Expected':>10}  Description")
     print(f"  {'─' * 4} {'─' * 30} {'─' * 12} {'─' * 10}  {'─' * 40}")
     for i, (name, info) in enumerate(STRATEGIES.items(), 1):
-        print(f"  {i:<4} {name:<30} {info.tier:<12} {info.expected_savings:>10}  {info.description}")
+        print(
+            f"  {i:<4} {name:<30} {info.tier:<12} {info.expected_savings:>10}  {info.description}"
+        )
     print()
 
     print("  Prescriptions:")
@@ -1348,6 +1623,7 @@ def _digest_session(args):
     Returns (path, session_id, cwd).
     """
     from .session import find_current_session, resolve_session
+
     cwd = getattr(args, "cwd", None) or os.getcwd()
     session_arg = getattr(args, "session", None)
     if not session_arg or session_arg == "current":
@@ -1372,9 +1648,13 @@ def _digest_session(args):
 
 def cmd_digest(args):
     from .digest import (
-        clear_digest_store, flush_digest,
-        load_digest_store, recover_digest,
-        save_digest_store, show_digest, update_digest,
+        clear_digest_store,
+        flush_digest,
+        load_digest_store,
+        recover_digest,
+        save_digest_store,
+        show_digest,
+        update_digest,
     )
     from .session import load_messages, save_messages
 
@@ -1387,9 +1667,13 @@ def cmd_digest(args):
         session_path, session_id, cwd = _digest_session(args)
         messages = load_messages(session_path)
         added, upvoted, rejected = update_digest(
-            messages, project_dir=cwd, session_id=session_id,
+            messages,
+            project_dir=cwd,
+            session_id=session_id,
         )
-        print(f"Digest updated: {added} new, {upvoted} reinforced, {rejected} rejected.")
+        print(
+            f"Digest updated: {added} new, {upvoted} reinforced, {rejected} rejected."
+        )
 
     elif action == "clear":
         clear_digest_store()
@@ -1399,9 +1683,13 @@ def cmd_digest(args):
         session_path, session_id, cwd = _digest_session(args)
         messages = load_messages(session_path)
         added, upvoted, rejected = flush_digest(
-            messages, project_dir=cwd, session_id=session_id,
+            messages,
+            project_dir=cwd,
+            session_id=session_id,
         )
-        print(f"Digest flushed: {added} new, {upvoted} reinforced, {rejected} rejected.")
+        print(
+            f"Digest flushed: {added} new, {upvoted} reinforced, {rejected} rejected."
+        )
 
     elif action == "recover":
         cwd = getattr(args, "cwd", None) or os.getcwd()
@@ -1415,6 +1703,7 @@ def cmd_digest(args):
             print("No rules to inject.")
             return
         from .digest import sync_to_memdir, _get_memdir
+
         synced = sync_to_memdir(store, cwd=cwd)
         if synced > 0:
             save_digest_store(store)
@@ -1427,12 +1716,15 @@ def cmd_digest(args):
         elif _get_memdir(cwd) is None:
             # We DO have active rules, but Claude Code hasn't created the memory dir
             # for this project yet — it syncs automatically once the dir exists.
-            print("Memory directory not created by Claude Code yet — will sync once it exists.")
+            print(
+                "Memory directory not created by Claude Code yet — will sync once it exists."
+            )
         else:
             print("Nothing to sync.")
 
 
 # ─── Parser ───────────────────────────────────────────────────────────────────
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -1440,8 +1732,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
     parser.add_argument("--version", action="version", version="%(prog)s 1.8.27")
-    parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
-    parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help="Override context window size in tokens (e.g. 1000000 for 1M beta)",
+    )
+    parser.add_argument(
+        "--system-overhead-tokens",
+        type=int,
+        default=None,
+        help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.",
+    )
     sub = parser.add_subparsers(dest="command")
 
     session_help = "Session ID, UUID prefix, path, or 'current' for auto-detect"
@@ -1453,8 +1755,13 @@ def build_parser() -> argparse.ArgumentParser:
     # current
     p_current = sub.add_parser("current", help="Show current session for this project")
     p_current.add_argument("--cwd", help="Working directory (default: current)")
-    p_current.add_argument("--match", help="Text snippet to match against session content (for multi-session disambiguation)")
-    p_current.add_argument("--diagnose", "-d", action="store_true", help="Also run diagnosis")
+    p_current.add_argument(
+        "--match",
+        help="Text snippet to match against session content (for multi-session disambiguation)",
+    )
+    p_current.add_argument(
+        "--diagnose", "-d", action="store_true", help="Also run diagnosis"
+    )
 
     # diagnose
     p_diag = sub.add_parser("diagnose", help="Analyze bloat sources (read-only)")
@@ -1465,69 +1772,189 @@ def build_parser() -> argparse.ArgumentParser:
     p_treat = sub.add_parser("treat", help="Run prescription (dry-run by default)")
     p_treat.add_argument("session", help=session_help)
     p_treat.add_argument("-rx", help="Prescription: gentle, standard, aggressive")
-    p_treat.add_argument("--execute", action="store_true", help="Apply changes (default is dry-run)")
+    p_treat.add_argument(
+        "--execute", action="store_true", help="Apply changes (default is dry-run)"
+    )
     p_treat.add_argument("--project", help="Filter by project name")
-    p_treat.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"], help="Thinking block mode")
+    p_treat.add_argument(
+        "--thinking-mode",
+        choices=["remove", "truncate", "signature-only"],
+        help="Thinking block mode",
+    )
+    p_treat.add_argument(
+        "--protect-pattern",
+        action="append",
+        default=None,
+        metavar="REGEX",
+        help="Protect messages matching this regex from pruning (repeatable)",
+    )
 
     # strategy
     p_strat = sub.add_parser("strategy", help="Run single strategy")
     p_strat.add_argument("name", help="Strategy name")
     p_strat.add_argument("session", help=session_help)
     p_strat.add_argument("--execute", action="store_true", help="Apply changes")
-    p_strat.add_argument("--verbose", "-v", action="store_true", help="Show action details")
+    p_strat.add_argument(
+        "--verbose", "-v", action="store_true", help="Show action details"
+    )
     p_strat.add_argument("--project", help="Filter by project name")
-    p_strat.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"])
+    p_strat.add_argument(
+        "--thinking-mode", choices=["remove", "truncate", "signature-only"]
+    )
 
     # reload
-    p_reload = sub.add_parser("reload", help="Treat current session and auto-resume after exit")
+    p_reload = sub.add_parser(
+        "reload", help="Treat current session and auto-resume after exit"
+    )
     p_reload.add_argument("--cwd", help="Working directory (default: current)")
-    p_reload.add_argument("-rx", help="Prescription: gentle, standard, aggressive (default: standard)")
-    p_reload.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"])
-    p_reload.add_argument("--session", help="Explicit session ID, UUID prefix, or .jsonl path (bypasses auto-detection)")
     p_reload.add_argument(
-        "--wait", nargs="?", const=30, type=int, default=None,
+        "-rx", help="Prescription: gentle, standard, aggressive (default: standard)"
+    )
+    p_reload.add_argument(
+        "--thinking-mode", choices=["remove", "truncate", "signature-only"]
+    )
+    p_reload.add_argument(
+        "--protect-pattern",
+        action="append",
+        default=None,
+        metavar="REGEX",
+        help="Protect messages matching this regex from pruning (repeatable)",
+    )
+    p_reload.add_argument(
+        "--session",
+        help="Explicit session ID, UUID prefix, or .jsonl path (bypasses auto-detection)",
+    )
+    p_reload.add_argument(
+        "--wait",
+        nargs="?",
+        const=30,
+        type=int,
+        default=None,
         metavar="SECS",
         help="If another reload is in flight, wait up to SECS for it to finish "
-             "(default: 30 if --wait passed with no value). Without --wait, "
-             "we fail fast with exit code 2.",
+        "(default: 30 if --wait passed with no value). Without --wait, "
+        "we fail fast with exit code 2.",
     )
 
     # checkpoint
-    p_cp = sub.add_parser("checkpoint", help="Save team/agent state from the current session (no pruning)")
+    p_cp = sub.add_parser(
+        "checkpoint", help="Save team/agent state from the current session (no pruning)"
+    )
     p_cp.add_argument("--cwd", help="Working directory (default: current)")
-    p_cp.add_argument("--show", action="store_true", help="Print the team state after saving")
+    p_cp.add_argument(
+        "--show", action="store_true", help="Print the team state after saving"
+    )
 
     # post-compact
-    p_post_compact = sub.add_parser("post-compact", help="Output team state after compaction (for PostCompact hook)")
+    p_post_compact = sub.add_parser(
+        "post-compact", help="Output team state after compaction (for PostCompact hook)"
+    )
     p_post_compact.add_argument("--cwd", help="Working directory (default: current)")
 
     # guard
-    p_guard = sub.add_parser("guard", help="Background sentinel — auto-prune before compaction triggers")
+    p_guard = sub.add_parser(
+        "guard", help="Background sentinel — auto-prune before compaction triggers"
+    )
     p_guard.add_argument("--cwd", help="Working directory (default: current)")
     p_guard.add_argument("-rx", help="Prescription to apply (default: standard)")
-    p_guard.add_argument("--threshold", type=_positive_float, default=50.0, help="Hard threshold in MB — full prune + reload (default: 50)")
-    p_guard.add_argument("--soft-threshold", type=_positive_float, default=None, help="Soft threshold in MB — gentle prune, no reload (default: 60%% of --threshold)")
-    p_guard.add_argument("--interval", type=_positive_int, default=30, help="Check interval in seconds (default: 30)")
-    p_guard.add_argument("--threshold-tokens", type=_positive_int, default=None, help="Hard threshold in tokens (default: 75%% of context window)")
-    p_guard.add_argument("--soft-threshold-tokens", type=_positive_int, default=None, help="Soft threshold in tokens (default: 45%% of context window)")
-    p_guard.add_argument("--no-reload", action="store_true", help="Prune without auto-reload at hard threshold")
-    p_guard.add_argument("--no-reactive", action="store_true", help="Disable reactive overflow recovery (kqueue/polling watcher)")
-    p_guard.add_argument("--daemon", action="store_true", help="Run in background (PID file prevents double-starts)")
-    p_guard.add_argument("--reload-self", action="store_true", help="Gracefully restart the running daemon for this session (used after upgrading cozempic in place)")
-    p_guard.add_argument("--session", help="Explicit session ID or path (bypasses auto-detection)")
+    p_guard.add_argument(
+        "--threshold",
+        type=_positive_float,
+        default=50.0,
+        help="Hard threshold in MB — full prune + reload (default: 50)",
+    )
+    p_guard.add_argument(
+        "--soft-threshold",
+        type=_positive_float,
+        default=None,
+        help="Soft threshold in MB — gentle prune, no reload (default: 60%% of --threshold)",
+    )
+    p_guard.add_argument(
+        "--interval",
+        type=_positive_int,
+        default=30,
+        help="Check interval in seconds (default: 30)",
+    )
+    p_guard.add_argument(
+        "--threshold-tokens",
+        type=_positive_int,
+        default=None,
+        help="Hard threshold in tokens (default: 75%% of context window)",
+    )
+    p_guard.add_argument(
+        "--soft-threshold-tokens",
+        type=_positive_int,
+        default=None,
+        help="Soft threshold in tokens (default: 45%% of context window)",
+    )
+    p_guard.add_argument(
+        "--no-reload",
+        action="store_true",
+        help="Prune without auto-reload at hard threshold",
+    )
+    p_guard.add_argument(
+        "--no-reactive",
+        action="store_true",
+        help="Disable reactive overflow recovery (kqueue/polling watcher)",
+    )
+    p_guard.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run in background (PID file prevents double-starts)",
+    )
+    p_guard.add_argument(
+        "--reload-self",
+        action="store_true",
+        help="Gracefully restart the running daemon for this session (used after upgrading cozempic in place)",
+    )
+    p_guard.add_argument(
+        "--session", help="Explicit session ID or path (bypasses auto-detection)"
+    )
     p_guard.add_argument("--claude-pid", type=int, default=None, help=argparse.SUPPRESS)
-    p_guard.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md")
+    p_guard.add_argument(
+        "--system-overhead-tokens",
+        type=int,
+        default=None,
+        help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md",
+    )
+    p_guard.add_argument(
+        "--protect-pattern",
+        action="append",
+        default=None,
+        metavar="REGEX",
+        help="Protect messages matching this regex from pruning (repeatable)",
+    )
 
     # init
-    p_init = sub.add_parser("init", help="Auto-wire hooks and slash command into this project (or globally with --global)")
+    p_init = sub.add_parser(
+        "init",
+        help="Auto-wire hooks and slash command into this project (or globally with --global)",
+    )
     p_init.add_argument("--cwd", help="Project directory (default: current)")
-    p_init.add_argument("--no-slash-command", action="store_true", help="Skip installing /cozempic slash command")
-    p_init.add_argument("--global", dest="global_install", action="store_true", help="Wire hooks into ~/.claude/settings.json so every Claude Code session in every project is protected")
-    p_init.add_argument("--uninstall-global", action="store_true", help="Remove cozempic hooks from ~/.claude/settings.json")
+    p_init.add_argument(
+        "--no-slash-command",
+        action="store_true",
+        help="Skip installing /cozempic slash command",
+    )
+    p_init.add_argument(
+        "--global",
+        dest="global_install",
+        action="store_true",
+        help="Wire hooks into ~/.claude/settings.json so every Claude Code session in every project is protected",
+    )
+    p_init.add_argument(
+        "--uninstall-global",
+        action="store_true",
+        help="Remove cozempic hooks from ~/.claude/settings.json",
+    )
 
     # doctor
-    p_doctor = sub.add_parser("doctor", help="Check for known Claude Code issues and fix them")
-    p_doctor.add_argument("--fix", action="store_true", help="Auto-fix issues where possible")
+    p_doctor = sub.add_parser(
+        "doctor", help="Check for known Claude Code issues and fix them"
+    )
+    p_doctor.add_argument(
+        "--fix", action="store_true", help="Auto-fix issues where possible"
+    )
 
     # formulary
     sub.add_parser("formulary", help="Show all strategies & prescriptions")
@@ -1537,20 +1964,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp.add_argument("shell", choices=["bash", "zsh"], help="Shell type")
 
     # self-update
-    sub.add_parser("self-update", help="Upgrade cozempic to the latest version from PyPI")
+    sub.add_parser(
+        "self-update", help="Upgrade cozempic to the latest version from PyPI"
+    )
 
     # remind
-    p_remind = sub.add_parser("remind", help="Output active behavioral rules (for PostToolUse hook)")
-    p_remind.add_argument("--interval", type=_positive_int, default=25, help="Output every N tool calls (default: 25)")
+    p_remind = sub.add_parser(
+        "remind", help="Output active behavioral rules (for PostToolUse hook)"
+    )
+    p_remind.add_argument(
+        "--interval",
+        type=_positive_int,
+        default=25,
+        help="Output every N tool calls (default: 25)",
+    )
 
     # nudge (Stop hook — non-blocking context nudge, no action)
-    sub.add_parser("nudge", help="Stop-hook: non-blocking 'prune now?' nudge at 25/55/80%% (no action)")
+    sub.add_parser(
+        "nudge",
+        help="Stop-hook: non-blocking 'prune now?' nudge at 25/55/80%% (no action)",
+    )
 
     # digest
     p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
-    p_digest.add_argument("digest_action", nargs="?", default="show",
-                          choices=["show", "update", "clear", "flush", "recover", "inject"],
-                          help="Action: show (default), update, clear, flush, recover, inject")
+    p_digest.add_argument(
+        "digest_action",
+        nargs="?",
+        default="show",
+        choices=["show", "update", "clear", "flush", "recover", "inject"],
+        help="Action: show (default), update, clear, flush, recover, inject",
+    )
     p_digest.add_argument("--session", help=session_help)
     p_digest.add_argument("--cwd", help="Working directory (default: current)")
 
@@ -1558,9 +2001,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _SUBCOMMANDS = {
-    "list", "current", "diagnose", "treat", "strategy", "reload",
-    "checkpoint", "post-compact", "guard", "init", "doctor", "formulary", "completions",
-    "digest", "self-update", "remind",
+    "list",
+    "current",
+    "diagnose",
+    "treat",
+    "strategy",
+    "reload",
+    "checkpoint",
+    "post-compact",
+    "guard",
+    "init",
+    "doctor",
+    "formulary",
+    "completions",
+    "digest",
+    "self-update",
+    "remind",
 }
 
 
@@ -1600,7 +2056,10 @@ def _prescan_argv(argv: list[str]) -> list[str]:
                         raise ValueError
                     os.environ["COZEMPIC_CONTEXT_WINDOW"] = val
                 except ValueError:
-                    print(f"Warning: ignoring invalid --context-window '{val}'", file=sys.stderr)
+                    print(
+                        f"Warning: ignoring invalid --context-window '{val}'",
+                        file=sys.stderr,
+                    )
                 i += 2
                 continue
             if tok.startswith("--context-window="):
@@ -1610,7 +2069,10 @@ def _prescan_argv(argv: list[str]) -> list[str]:
                         raise ValueError
                     os.environ["COZEMPIC_CONTEXT_WINDOW"] = val
                 except ValueError:
-                    print(f"Warning: ignoring invalid --context-window '{val}'", file=sys.stderr)
+                    print(
+                        f"Warning: ignoring invalid --context-window '{val}'",
+                        file=sys.stderr,
+                    )
                 i += 1
                 continue
             if tok == "--system-overhead-tokens" and i + 1 < len(argv):
@@ -1620,7 +2082,10 @@ def _prescan_argv(argv: list[str]) -> list[str]:
                         raise ValueError
                     os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = val
                 except ValueError:
-                    print(f"Warning: ignoring invalid --system-overhead-tokens '{val}'", file=sys.stderr)
+                    print(
+                        f"Warning: ignoring invalid --system-overhead-tokens '{val}'",
+                        file=sys.stderr,
+                    )
                 i += 2
                 continue
             if tok.startswith("--system-overhead-tokens="):
@@ -1630,7 +2095,10 @@ def _prescan_argv(argv: list[str]) -> list[str]:
                         raise ValueError
                     os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = val
                 except ValueError:
-                    print(f"Warning: ignoring invalid --system-overhead-tokens '{val}'", file=sys.stderr)
+                    print(
+                        f"Warning: ignoring invalid --system-overhead-tokens '{val}'",
+                        file=sys.stderr,
+                    )
                 i += 1
                 continue
         cleaned.append(tok)
@@ -1642,13 +2110,15 @@ def _prescan_argv(argv: list[str]) -> list[str]:
 # auto-updater and auto-init must stay silent / off so nothing prepends to it.
 _STDOUT_PROTOCOL_CMDS = frozenset({"nudge"})
 
-_AUTO_INIT_SKIP_CMDS = frozenset({
-    "init",          # would loop / shadow user intent
-    "completions",   # generates shell completion, no project state needed
-    "self-update",   # internal upgrade
-    "doctor",        # diagnostic-only; doctor surfaces missing init via its own check
-    "nudge",         # Stop-hook protocol command; never mutate state as a side effect
-})
+_AUTO_INIT_SKIP_CMDS = frozenset(
+    {
+        "init",  # would loop / shadow user intent
+        "completions",  # generates shell completion, no project state needed
+        "self-update",  # internal upgrade
+        "doctor",  # diagnostic-only; doctor surfaces missing init via its own check
+        "nudge",  # Stop-hook protocol command; never mutate state as a side effect
+    }
+)
 
 _GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
 

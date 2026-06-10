@@ -20,6 +20,7 @@ _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
 # are durable before the rename, so power-loss or OOM-kill leaves the target
 # either fully-old or fully-new — never zeroed.
 
+
 def atomic_write_text(target: _Path, data: str, encoding: str = "utf-8") -> None:
     """Atomic, collision-safe text write.
 
@@ -68,6 +69,7 @@ class _HostFileLock:
     Windows: msvcrt.locking — same semantics on a per-byte basis.
     Unknown platform: degrades to no-op (best-effort, no crash).
     """
+
     def __init__(self, target: _Path):
         self._lock_path = target.parent / f"{target.name}.lock"
         self._fh = None
@@ -78,6 +80,7 @@ class _HostFileLock:
             self._fh = open(self._lock_path, "a")
             if os.name == "nt":
                 import msvcrt
+
                 # Windows — msvcrt.locking locks bytes from the CURRENT file
                 # position. "a" (append) mode leaves the pointer at EOF:
                 # byte 0 on a fresh empty lock file, but >0 if a stale
@@ -91,6 +94,7 @@ class _HostFileLock:
                 msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
             else:
                 import fcntl
+
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
         except (ImportError, OSError):
             # Lock unavailable — degrade to no-op. Race window remains
@@ -109,6 +113,7 @@ class _HostFileLock:
         try:
             if os.name == "nt":
                 import msvcrt
+
                 # Rewind to byte 0 to unlock the same byte we locked
                 try:
                     self._fh.seek(0)
@@ -117,6 +122,7 @@ class _HostFileLock:
                     pass
             else:
                 import fcntl
+
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
         except (ImportError, OSError):
             pass
@@ -126,7 +132,9 @@ class _HostFileLock:
             pass
 
 
-def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0) -> None:
+def record_savings(
+    tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
+) -> None:
     """Add tokens saved to the lifetime tracker. Called after successful prune+reload.
 
     If total_tokens and turn_count are provided, estimates extra turns gained
@@ -142,7 +150,11 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
     try:
         with _HostFileLock(_SAVINGS_FILE):
             try:
-                data = _json.loads(_SAVINGS_FILE.read_text()) if _SAVINGS_FILE.exists() else {}
+                data = (
+                    _json.loads(_SAVINGS_FILE.read_text())
+                    if _SAVINGS_FILE.exists()
+                    else {}
+                )
             except Exception:
                 data = {}
             data["tokens_saved"] = data.get("tokens_saved", 0) + tokens_saved
@@ -150,6 +162,7 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
             data["prune_count"] = data.get("prune_count", 0) + 1
             if "since" not in data:
                 from datetime import date
+
                 data["since"] = date.today().isoformat()
 
             # Estimate extra turns gained from freed headroom
@@ -172,17 +185,32 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
         return
     try:
         from urllib.request import Request, urlopen
-        urlopen(Request("https://cozempic-counters.counterapi-ruya.workers.dev/counter/prunes/up",
-                       headers={"User-Agent": "cozempic"}), timeout=2)
+
+        urlopen(
+            Request(
+                "https://cozempic-counters.counterapi-ruya.workers.dev/counter/prunes/up",
+                headers={"User-Agent": "cozempic"},
+            ),
+            timeout=2,
+        )
         # Version-tagged prune counter: lets us attribute prunes to a release so a
         # future prune-rate spike can be pinned to a specific version (the plain
         # `prunes` counter is version-blind — its UA is just "cozempic"). Cardinality
         # grows ~1 per release; version is already public, no install-id, no PII.
         try:
             from . import __version__ as _cz_ver
-            _vtag = "".join(c if (c.isalnum() or c == "_") else "_" for c in _cz_ver.replace(".", "_"))
-            urlopen(Request(f"https://cozempic-counters.counterapi-ruya.workers.dev/counter/prunes_v{_vtag}/up",
-                           headers={"User-Agent": f"cozempic/{_cz_ver}"}), timeout=2)
+
+            _vtag = "".join(
+                c if (c.isalnum() or c == "_") else "_"
+                for c in _cz_ver.replace(".", "_")
+            )
+            urlopen(
+                Request(
+                    f"https://cozempic-counters.counterapi-ruya.workers.dev/counter/prunes_v{_vtag}/up",
+                    headers={"User-Agent": f"cozempic/{_cz_ver}"},
+                ),
+                timeout=2,
+            )
         except Exception:
             pass
         if tokens_saved < 100_000:
@@ -193,8 +221,13 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
             bucket = "saved_500k_1m"
         else:
             bucket = "saved_over_1m"
-        urlopen(Request(f"https://cozempic-counters.counterapi-ruya.workers.dev/counter/{bucket}/up",
-                       headers={"User-Agent": "cozempic"}), timeout=2)
+        urlopen(
+            Request(
+                f"https://cozempic-counters.counterapi-ruya.workers.dev/counter/{bucket}/up",
+                headers={"User-Agent": "cozempic"},
+            ),
+            timeout=2,
+        )
     except Exception:
         pass
 
@@ -231,6 +264,8 @@ def get_savings_line() -> str | None:
         return " | ".join(parts)
     except Exception:
         return None
+
+
 import json
 
 
@@ -276,6 +311,7 @@ def shell_quote(s: str) -> str:
 def is_ssh_session() -> bool:
     """Detect if we're running inside an SSH session."""
     import os
+
     return bool(
         os.environ.get("SSH_TTY")
         or os.environ.get("SSH_CONNECTION")
@@ -283,13 +319,15 @@ def is_ssh_session() -> bool:
     )
 
 
-_PROTECTED_TYPES = frozenset({
-    "content-replacement",
-    "marble-origami-commit",
-    "marble-origami-snapshot",
-    "worktree-state",
-    "task-summary",
-})
+_PROTECTED_TYPES = frozenset(
+    {
+        "content-replacement",
+        "marble-origami-commit",
+        "marble-origami-snapshot",
+        "worktree-state",
+        "task-summary",
+    }
+)
 
 # P0-D — last-of-type metadata singleton tag.
 # Defined here (not in executor) so is_protected() can check it without
@@ -306,7 +344,10 @@ def is_protected(msg: dict) -> bool:
         return True
     if t == "user" and msg.get("isCompactSummary"):
         return True
-    if t == "system" and msg.get("subtype") in ("compact_boundary", "microcompact_boundary"):
+    if t == "system" and msg.get("subtype") in (
+        "compact_boundary",
+        "microcompact_boundary",
+    ):
         return True
     if msg.get("isVisibleInTranscriptOnly"):
         return True
@@ -318,7 +359,59 @@ def is_protected(msg: dict) -> bool:
     # of each protected type before strategies run; strip happens after.
     if msg.get(_METADATA_SINGLETON_KEY):
         return True
+    # --protect-pattern: user-defined regex protection
+    if msg.get("__cozempic_pattern_protected__"):
+        return True
     return False
+
+
+def tag_pattern_matches(messages: list, patterns: list) -> int:
+    """Tag messages whose text content matches any compiled regex pattern.
+
+    Returns count of newly tagged messages.
+    """
+    if not patterns:
+        return 0
+    count = 0
+    for _, msg_dict, _ in messages:
+        if msg_dict.get("__cozempic_pattern_protected__"):
+            continue
+        if _msg_text_matches_any(msg_dict, patterns):
+            msg_dict["__cozempic_pattern_protected__"] = True
+            count += 1
+    return count
+
+
+def _msg_text_matches_any(msg: dict, patterns: list) -> bool:
+    """Return True if any text block in the message matches any pattern."""
+    import re
+
+    inner = msg.get("message", {})
+    for block in (
+        inner.get("content", []) if isinstance(inner.get("content"), list) else []
+    ):
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text", "")
+            for p in patterns:
+                if p.search(text):
+                    return True
+    return False
+
+
+def compile_protect_patterns(raw_patterns: list[str]) -> list:
+    """Compile a list of regex strings, returning compiled patterns.
+
+    Raises ValueError with context on invalid patterns.
+    """
+    import re
+
+    compiled = []
+    for pat in raw_patterns:
+        try:
+            compiled.append(re.compile(pat))
+        except re.error as e:
+            raise ValueError(f"Invalid protect-pattern regex {pat!r}: {e}") from e
+    return compiled
 
 
 def find_active_background_tasks(messages: list) -> list[dict]:
@@ -327,6 +420,7 @@ def find_active_background_tasks(messages: list) -> list[dict]:
     Returns list of {tool_use_id, description} for each active task.
     """
     import re
+
     spawns: dict[str, str] = {}  # tool_use_id -> description
     completions: set[str] = set()
 
@@ -346,7 +440,10 @@ def find_active_background_tasks(messages: list) -> list[dict]:
         # Check queue-operation for completed tasks
         if msg.get("type") == "queue-operation":
             body = str(msg.get("content", "") or msg.get("body", ""))
-            if "<status>completed</status>" in body or "<status>failed</status>" in body:
+            if (
+                "<status>completed</status>" in body
+                or "<status>failed</status>" in body
+            ):
                 m = re.search(r"<tool-use-id>(.*?)</tool-use-id>", body)
                 if m:
                     completions.add(m.group(1))
@@ -360,11 +457,11 @@ def find_active_background_tasks(messages: list) -> list[dict]:
 
 def text_of(block: dict) -> str:
     """Get the text content of a content block, handling all block types."""
-    result = block.get("text", "") or block.get("thinking", "") or block.get("content", "")
+    result = (
+        block.get("text", "") or block.get("thinking", "") or block.get("content", "")
+    )
     if isinstance(result, list):
-        return " ".join(
-            sub.get("text", "") for sub in result if isinstance(sub, dict)
-        )
+        return " ".join(sub.get("text", "") for sub in result if isinstance(sub, dict))
     if not isinstance(result, str):
         return ""
     return result
