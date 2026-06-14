@@ -92,10 +92,15 @@ class TestActiveTranscriptFix(_Base):
     def test_two_terminals_two_pids_resolve_independently(self):
         a = _write_session(self.projects / "-Users-ruya", "aaaaaaaa")
         b = _write_session(self.projects / "-Users-ruya-Documents-Advisor-Cozempic", "bbbbbbbb")
-        S.record_active_transcript(str(a), claude_pid=111)
-        S.record_active_transcript(str(b), claude_pid=222)
+        # `_pid_alive` must be patched around the record calls too — not only the
+        # lookups below. `record_active_transcript` prunes dead pids on write, so
+        # with the real `os.kill` the first entry (pid 111) is dropped during the
+        # second record on any host where 111 isn't a live process, leaving the
+        # lookup to return None (host-dependent flake). Patch it for the whole body.
         with mock.patch.object(S, "_session_id_from_process", lambda: None), \
              mock.patch.object(S, "_pid_alive", lambda pid: True):
+            S.record_active_transcript(str(a), claude_pid=111)
+            S.record_active_transcript(str(b), claude_pid=222)
             with mock.patch.object(S, "find_claude_pid", lambda: 111):
                 self.assertEqual(S.find_current_session("/tmp", strict=True)["session_id"], "aaaaaaaa")
             with mock.patch.object(S, "find_claude_pid", lambda: 222):

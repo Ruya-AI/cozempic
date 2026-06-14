@@ -12,6 +12,7 @@ from a strategy's removal actions.
 import io
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 from cozempic.helpers import (
     compile_protect_patterns, tag_pattern_matches, strip_pattern_tags, is_protected,
@@ -115,8 +116,10 @@ class TestHardening1828(unittest.TestCase):
         # A catastrophic-backtracking pattern must NOT hang the prune/daemon — it
         # times out and fails open (no protection this cycle), not seconds/minutes.
         import os, time
-        os.environ["COZEMPIC_PROTECT_MATCH_SECONDS"] = "1.0"
-        try:
+        # patch.dict save/restores any pre-existing value instead of unconditionally
+        # popping it on teardown (which would clobber a real, externally-set
+        # COZEMPIC_PROTECT_MATCH_SECONDS the developer had in their environment).
+        with mock.patch.dict(os.environ, {"COZEMPIC_PROTECT_MATCH_SECONDS": "1.0"}):
             evil = compile_protect_patterns([r"(a+)+$"])
             msgs = [(0, _txt("a" * 40 + "!"), 50)]
             t0 = time.perf_counter()
@@ -128,8 +131,6 @@ class TestHardening1828(unittest.TestCase):
             self.assertEqual(n, 0, "must fail open (skip protection) on timeout")
             self.assertNotIn(_PATTERN_PROTECTED_KEY, msgs[0][1], "no half-protection left behind")
             self.assertIn("exceeded its time budget", buf.getvalue())
-        finally:
-            os.environ.pop("COZEMPIC_PROTECT_MATCH_SECONDS", None)
 
     def test_thinking_block_is_scanned(self):
         think = {"type": "assistant", "message": {"role": "assistant", "content": [
