@@ -44,15 +44,19 @@ from cozempic._validation import (
 STR_CORPUS = ["nan", "NaN", "inf", "+inf", "-inf", "infinity", "1e999", "-1e999",
               "-0", "", "   ", "0", "-1", "-0.5", "abc", "١٢٣",
               "1" + "0" * 400, "1.5", "50"]
+# Shared huge-int sentinel — used in both the native corpus and the P-A upper-bound tests.
+# A single definition avoids the 10**400 expression being evaluated twice at module load.
+_HUGE_INT = 10 ** 400
+
 # native-typed corpus for the config-DICT helpers (built in-process, not from a string)
-NATIVE_CORPUS = [float("nan"), float("inf"), float("-inf"), -0.0, 10 ** 400,
+NATIVE_CORPUS = [float("nan"), float("inf"), float("-inf"), -0.0, _HUGE_INT,
                  -1, 0, True, False, None, "x", [], {}]
 
 _UPPER = 10 ** 12  # any CLI/env validator output must be well under this
 
-# --- Huge-int boundary used by P-A tests ---
-_HUGE_INT = 10 ** 400
-_MAX_CONTEXT_WINDOW = 4_000_000   # matches tokens.MAX_CONTEXT_WINDOW (after P-A lands)
+# P-A test boundaries — reference production constants so a change to tokens.py
+# is automatically reflected here without a separate test-file update.
+_MAX_CONTEXT_WINDOW = t.MAX_CONTEXT_WINDOW        # 4_000_000
 _DEFAULT_CONTEXT_WINDOW = t.DEFAULT_CONTEXT_WINDOW  # 1_000_000
 _SYSTEM_OVERHEAD_DEFAULT = t.SYSTEM_OVERHEAD_TOKENS  # 21_000
 
