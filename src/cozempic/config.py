@@ -81,7 +81,14 @@ def _clamp_float(value: Any, lo: float, hi: float, default: float) -> float:
     REVIEW-max B.2: explicitly reject NaN and infinities BEFORE the range
     check — NaN compares False to every threshold so a naive ``v < lo or
     v > hi`` lets it through and downstream arithmetic silently propagates.
+
+    PR-2 P-B: reject bool before float() coercion — bool is a subclass of int,
+    so float(True)==1.0 and float(False)==0.0 both pass the range check for
+    [0.0, 1.0], silently coercing a JSON `true` into 1.0 and disabling the
+    max-drop-pct floor. Match the _is_strict_number guard from _validation.py.
     """
+    if isinstance(value, bool):
+        return default
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -101,6 +108,10 @@ def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     var would crash the daemon at config-load time. NaN / inf string tokens
     short-circuit before conversion so the fall-back path is uniform with
     ``_clamp_float``.
+
+    PR-2 P-B: class-of-bug fold from _clamp_float — bool is a subclass of int,
+    so int(True)==1 and int(False)==0 pass the range check. Reject before
+    conversion, consistent with _clamp_float and _is_strict_number.
     """
     # Short-circuit on string tokens that float() accepts but produce
     # non-finite values (inf, -inf, nan in any case).
@@ -109,6 +120,8 @@ def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
         if tok in ("inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
                    "nan", "+nan", "-nan"):
             return default
+    if isinstance(value, bool):
+        return default
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return default
