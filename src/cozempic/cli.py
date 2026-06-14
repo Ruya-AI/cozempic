@@ -66,6 +66,29 @@ def _positive_float(val: str) -> float:
         raise argparse.ArgumentTypeError(f"must be positive, got {f}")
     return f
 
+
+def _apply_token_env_overrides(args) -> None:
+    """Mirror --context-window / --system-overhead-tokens CLI flags into the env
+    vars the token layer reads.
+
+    Uses `is not None` rather than truthiness so an explicit
+    --system-overhead-tokens 0 (a legitimate "no overhead" value) is honored
+    rather than silently dropped to the 21_000 default. Zero is falsy in Python
+    but it is a valid override — e.g. a session with no CLAUDE.md, no MCP
+    servers, and no rules files really does have zero system overhead.
+
+    Replaces the duplicate truthiness-gated blocks that existed in both
+    cmd_guard() and main(), eliminating the DRY violation and the 0-drop bug
+    in a single fix.
+    """
+    cw = getattr(args, "context_window", None)
+    if cw is not None:
+        os.environ["COZEMPIC_CONTEXT_WINDOW"] = str(cw)
+    soh = getattr(args, "system_overhead_tokens", None)
+    if soh is not None:
+        os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(soh)
+
+
 # Fix Windows stdout/stderr encoding for Unicode characters (box-drawing, emoji)
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -878,8 +901,7 @@ def cmd_guard(args):
     claude_pid = args.claude_pid or find_claude_pid()
     protect_patterns = _compile_protect_patterns_or_exit(args)  # #122
 
-    if getattr(args, "system_overhead_tokens", None):
-        os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
+    _apply_token_env_overrides(args)
 
     if getattr(args, "reload_self", False):
         from .guard import reload_self_daemon
@@ -2109,11 +2131,9 @@ def main():
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Also handle --context-window when placed before the subcommand (root parser)
-    if getattr(args, "context_window", None):
-        os.environ["COZEMPIC_CONTEXT_WINDOW"] = str(args.context_window)
-    if args.system_overhead_tokens:
-        os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
+    # Mirror --context-window / --system-overhead-tokens into env vars using
+    # `is not None` (not truthiness) so --system-overhead-tokens 0 is honored.
+    _apply_token_env_overrides(args)
 
     if not args.command:
         parser.print_help()
