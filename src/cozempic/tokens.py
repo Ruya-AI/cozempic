@@ -19,6 +19,16 @@ from .types import Message
 DEFAULT_CONTEXT_WINDOW = 1_000_000  # All current Claude models are 1M. Pro plan users can override with COZEMPIC_CONTEXT_WINDOW=200000.
 SYSTEM_OVERHEAD_TOKENS = 21_000
 
+# Upper bounds for env-var overrides.
+# A context-window override above MAX_CONTEXT_WINDOW can't reflect a real model
+# and would silently disable the guard (every pct = total/window rounds toward 0).
+# 4M = 4x the current 1M max — generous headroom — above which we reject and
+# fall back to model-detected window so the guard keeps firing.
+MAX_CONTEXT_WINDOW = 4_000_000
+# A system-overhead override at or above a full default context window is
+# nonsensical (it would zero out usable context). Cap at the default window.
+MAX_SYSTEM_OVERHEAD_TOKENS = DEFAULT_CONTEXT_WINDOW
+
 # 4-tier pruning thresholds as fractions of context window
 DEFAULT_SOFT_TOKEN_PCT = 0.25   # 25% — gentle file maintenance, no reload
 DEFAULT_HARD1_TOKEN_PCT = 0.55  # 55% — standard prune + reload
@@ -35,7 +45,9 @@ def get_system_overhead_tokens() -> int:
     COZEMPIC_SYSTEM_OVERHEAD_TOKENS env var or --system-overhead-tokens flag.
     """
     from ._validation import parse_env_non_negative_int
-    override = parse_env_non_negative_int("COZEMPIC_SYSTEM_OVERHEAD_TOKENS")
+    override = parse_env_non_negative_int(
+        "COZEMPIC_SYSTEM_OVERHEAD_TOKENS", maximum=MAX_SYSTEM_OVERHEAD_TOKENS
+    )
     if override is not None:
         return override
     return SYSTEM_OVERHEAD_TOKENS
@@ -98,7 +110,7 @@ def get_context_window_override() -> int | None:
     (triggering model-based detection at detect_context_window).
     """
     from ._validation import parse_env_positive_int
-    return parse_env_positive_int("COZEMPIC_CONTEXT_WINDOW")
+    return parse_env_positive_int("COZEMPIC_CONTEXT_WINDOW", maximum=MAX_CONTEXT_WINDOW)
 
 # Chars-per-token defaults, calibrated against live Claude Code JSONL.
 # Measured 3.08–3.27 chars/token on real sessions: JSON keys, UUIDs, tool

@@ -174,13 +174,18 @@ def _env_warn(name: str, value: str, reason: str) -> None:
     )
 
 
-def parse_env_positive_int(name: str) -> int | None:
+def parse_env_positive_int(name: str, *, maximum: int | None = None) -> int | None:
     """Read env var `name`, parse as strictly-positive int, return None if
     absent or invalid (after emitting a warning on stderr).
 
     Used by `tokens.get_context_window_override` — a context window of 0 or
     negative is nonsensical and would propagate into `pct = total / cw`
     producing negative or divide-by-zero errors deep in diagnostics output.
+
+    `maximum`: if given, values above this bound are also rejected with a
+    warning and None is returned. A context-window value above e.g. 4_000_000
+    cannot reflect a real model and would silently disable the guard (every
+    ``pct = total / window`` rounds toward 0 when window is huge).
     """
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -193,16 +198,23 @@ def parse_env_positive_int(name: str) -> int | None:
     if value <= 0:
         _env_warn(name, raw, "must be a positive integer")
         return None
+    if maximum is not None and value > maximum:
+        _env_warn(name, raw, f"must be <= {maximum}")
+        return None
     return value
 
 
-def parse_env_non_negative_int(name: str) -> int | None:
+def parse_env_non_negative_int(name: str, *, maximum: int | None = None) -> int | None:
     """Read env var, parse as non-negative int (0 OK), warn-and-fallback on
     failure.
 
     Used by `tokens.get_system_overhead_tokens` — `0` is a legitimate value
     meaning "no system overhead in this session" (e.g. a user with no CLAUDE.md
     and no MCP servers). Negatives and non-numerics are still rejected.
+
+    `maximum`: if given, values above this bound are also rejected with a
+    warning and None is returned. A system-overhead value at or above a full
+    context window would zero out usable context — cap at the default window.
     """
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -214,6 +226,9 @@ def parse_env_non_negative_int(name: str) -> int | None:
         return None
     if value < 0:
         _env_warn(name, raw, "must be non-negative")
+        return None
+    if maximum is not None and value > maximum:
+        _env_warn(name, raw, f"must be <= {maximum}")
         return None
     return value
 
