@@ -95,7 +95,7 @@ def _harness_idle_notif(teammate_id: str, team_name: str = "myteam") -> dict:
         "teamName": team_name,
         "message": {"role": "user", "content":
             f'<teammate-message teammate_id="{teammate_id}">'
-            '{"type":"idle_notification","from":"' + teammate_id + '"}'
+            f'{{"type":"idle_notification","from":"{teammate_id}"}}'
             '</teammate-message>'},
     }
 
