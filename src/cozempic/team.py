@@ -360,6 +360,13 @@ _TEAM_EXTRACT_TOOL_NAMES = TEAM_TOOL_NAMES | {"Agent"}
 # a strict task-id→status regex misses → a COMPLETED background-Agent teammate is left
 # "running" forever → safe_to_reload wedges the guard inert. Mirrors detect_in_flight's
 # lenient _TN_*_RE so the two parsers agree on the same bytes.
+# Maximum bytes of content fed into the DOTALL lazy-star block-regex scanner in
+# extract_team_state's second pass.  Without a cap, many unmatched openers trigger
+# O(openers × len) catastrophic backtracking — same class as recap.py's DoS guard.
+# 64KB is ~64× a real notification; a missed notification → over-defers reload
+# (recoverable, not under-blocks / SIGKILL).  Mirrors guard._RELOAD_GATE_SCAN_CAP.
+_RELOAD_GATE_SCAN_CAP = 65536
+
 _TASK_NOTIF_BLOCK_RE = re.compile(
     r"<task-notification(?:\s[^>]*)?>(.*?)</task-notification>", re.DOTALL | re.IGNORECASE)
 _TASK_NOTIF_ID_RE = re.compile(r"<task-id(?:\s[^>]*)?>([^<]+)</task-id>", re.IGNORECASE)
@@ -859,7 +866,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # Parse each notification block, then its fields INDEPENDENTLY (order- and
         # extra-tag tolerant) so the REAL format (<tool-use-id>/<output-file> between
         # <task-id> and <status>) still clears a completed teammate/subagent.
-        for _blk in _TASK_NOTIF_BLOCK_RE.finditer(content):
+        for _blk in _TASK_NOTIF_BLOCK_RE.finditer(content[:_RELOAD_GATE_SCAN_CAP]):
             _body = _blk.group(1)
             _id_m = _TASK_NOTIF_ID_RE.search(_body)
             _st_m = _TASK_NOTIF_STATUS_RE.search(_body)
