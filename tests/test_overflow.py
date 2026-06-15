@@ -150,6 +150,24 @@ class TestOverflowDetection(unittest.TestCase):
         finally:
             breaker.reset()
 
+    def test_detects_widened_markers(self):
+        """Beyond 'Conversation too long', the widened marker set must catch the
+        API-style prompt-too-long forms (the single hardcoded string may be
+        TUI-only and never persisted — Batch-3 widen)."""
+        from cozempic.overflow import OVERFLOW_MARKERS
+        for marker in ("Prompt is too long", "context_length_exceeded", "maximum context length"):
+            self.assertIn(marker, OVERFLOW_MARKERS)
+            lines = [json.dumps({"type": "user", "message": "x"})] * 5
+            lines.append(json.dumps({"type": "assistant", "message": f"API error: {marker}"}))
+            self._write_lines(lines)
+            breaker = CircuitBreaker(session_id="t-mark", max_recoveries=3)
+            breaker.reset()
+            try:
+                rec = OverflowRecovery(self.session_path, "t-mark", self.tmpdir, breaker)
+                self.assertTrue(rec.detect_overflow(), f"must detect marker: {marker}")
+            finally:
+                breaker.reset()
+
     def test_no_overflow_in_normal_session(self):
         """Normal session content doesn't trigger detection."""
         lines = [

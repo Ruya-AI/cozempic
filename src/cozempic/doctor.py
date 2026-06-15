@@ -1380,6 +1380,20 @@ def run_doctor(fix: bool = False) -> list[CheckResult]:
         results.append(result)
         if fix and result.status in ("issue", "warning") and result.fix_description and fix_fn:
             fix_msg = fix_fn()
-            result.message += f"\n      Fixed: {fix_msg}"
-            result.status = "fixed"
+            # Only claim "fixed" if the issue is actually gone — re-run the check
+            # and verify. A no-op fix ("nothing found", "skipped N sessions") or a
+            # partial/failed fix previously reported false success (audit P1).
+            try:
+                recheck = check_fn()
+            except Exception:
+                recheck = None
+            if recheck is not None and recheck.status == "ok":
+                result.status = "fixed"
+                result.message += f"\n      Fixed: {fix_msg}"
+            else:
+                # Still not clean — surface the real post-fix state, don't lie.
+                if recheck is not None:
+                    result.status = recheck.status
+                    result.message = recheck.message
+                result.message += f"\n      Fix attempted (not fully resolved): {fix_msg}"
     return results

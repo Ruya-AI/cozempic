@@ -96,7 +96,25 @@ class CircuitBreaker:
 
 # ─── Overflow Recovery ────────────────────────────────────────────────────────
 
-OVERFLOW_PATTERN = "Conversation too long"
+# Substrings that signal Claude Code hit a context-overflow / prompt-too-long
+# error in the transcript tail. Kept as a LIST (was a single hardcoded
+# "Conversation too long") because that exact string may be TUI-only and not the
+# form persisted to the JSONL — if so, single-string detection left the reactive
+# overflow path silently INERT. Widening is strictly broader (more markers caught,
+# never fewer), so it cannot regress. ⚠ ARTIFACT-BLOCKED for full confidence: we
+# still lack a captured REAL overflowed-CC JSONL tail to pin the exact persisted
+# field/text — capture one and tighten/confirm against it (the recurring "capture
+# the real artifact before trusting the detector" lesson).
+OVERFLOW_MARKERS = (
+    "Conversation too long",
+    "Prompt is too long",
+    "prompt is too long",
+    "exceed the context",            # "...exceeds/exceed the context window/limit"
+    "context_length_exceeded",       # API error code form
+    "maximum context length",
+)
+# Back-compat alias (older imports / tests referenced the singular constant).
+OVERFLOW_PATTERN = OVERFLOW_MARKERS[0]
 
 
 class OverflowRecovery:
@@ -138,10 +156,10 @@ class OverflowRecovery:
         except OSError:
             return False
 
-        # Check last 20 lines
+        # Check last 20 lines against any known overflow marker.
         lines = tail.strip().split("\n")
         for line in lines[-20:]:
-            if OVERFLOW_PATTERN in line:
+            if any(marker in line for marker in OVERFLOW_MARKERS):
                 return True
         return False
 
@@ -232,8 +250,20 @@ class OverflowRecovery:
             # Futile / no-change prune (nothing to write) — file is unchanged.
             after_mb = self.session_path.stat().st_size / 1024 / 1024
 
-        # 4. Pre-flight: if still dangerously large, don't resume
-        if after_mb * 1024 * 1024 > self.danger_threshold_bytes * 0.95:
+        # 4. Pre-flight: if still dangerously large, don't resume.
+        # Byte axis:
+        still_dangerous = after_mb * 1024 * 1024 > self.danger_threshold_bytes * 0.95
+        # Token axis (symmetry fix): a TOKEN-triggered overflow must also re-check
+        # tokens post-prune — the byte-only preflight left the "don't resume if
+        # still dangerous" guard INERT for the token path (audit P1). Use the
+        # projected post-prune token count when present.
+        if not still_dangerous and self.danger_threshold_tokens is not None:
+            _proj = result.get("projected_final_tokens")
+            if _proj is None:
+                _proj = result.get("final_tokens")
+            if isinstance(_proj, (int, float)) and _proj > self.danger_threshold_tokens * 0.95:
+                still_dangerous = True
+        if still_dangerous:
             print(
                 f"  [{now}] Post-prune size {after_mb:.1f}MB still too large. "
                 f"Skipping resume.",

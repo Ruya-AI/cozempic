@@ -134,3 +134,48 @@ class TestRunDoctorFixFalse(unittest.TestCase):
             ALL_CHECKS.extend(original)
 
         assert called, "fix_fn was NOT called despite fix=True"
+
+
+class TestRunDoctorHonestFixedStatus(unittest.TestCase):
+    """run_doctor must only report 'fixed' when the issue is actually gone
+    (re-run the check), not unconditionally after calling fix_fn (audit P1)."""
+
+    def _run_with(self, check_fn, fix_fn):
+        from cozempic.doctor import ALL_CHECKS
+        original = list(ALL_CHECKS)
+        ALL_CHECKS.clear()
+        ALL_CHECKS.append(("fake", check_fn, fix_fn))
+        try:
+            return run_doctor(fix=True)
+        finally:
+            ALL_CHECKS.clear()
+            ALL_CHECKS.extend(original)
+
+    def test_noop_fix_does_not_report_fixed(self):
+        from cozempic.doctor import CheckResult
+        # Check ALWAYS returns "issue" (the fix was a no-op / couldn't resolve it).
+        def check():
+            return CheckResult(name="fake", status="issue", message="still broken",
+                               fix_description="try fix")
+        def fix():
+            return "Skipped 2 sessions (nothing changed)"
+        results = self._run_with(check, fix)
+        self.assertNotEqual(results[0].status, "fixed",
+                            "a no-op/failed fix must NOT report 'fixed'")
+        self.assertIn("not fully resolved", results[0].message)
+
+    def test_real_fix_reports_fixed(self):
+        from cozempic.doctor import CheckResult
+        state = {"broken": True}
+        def check():
+            return CheckResult(name="fake",
+                               status="issue" if state["broken"] else "ok",
+                               message="broken" if state["broken"] else "clean",
+                               fix_description="do fix")
+        def fix():
+            state["broken"] = False  # actually resolves the issue
+            return "repaired 3 blocks"
+        results = self._run_with(check, fix)
+        self.assertEqual(results[0].status, "fixed",
+                         "a fix that resolves the issue must report 'fixed'")
+        self.assertIn("repaired 3 blocks", results[0].message)
