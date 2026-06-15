@@ -144,12 +144,14 @@ class TestHardening1828(unittest.TestCase):
 
     def test_redos_shape_detector(self):
         from cozempic.helpers import _pattern_is_redos_risky as risky
-        self.assertTrue(risky(r"(a+)+$"))
-        self.assertTrue(risky(r"(a*)*"))
-        self.assertTrue(risky(r"(ab+c)*"))
-        self.assertFalse(risky(r"GATE CONTRACT R\d+"))
-        self.assertFalse(risky(r"foo|bar|baz"))
-        self.assertFalse(risky(r"R\d{1,5}"))
+        # Aggressive/fail-closed: every catastrophic FORM the narrow detector
+        # missed must now be flagged (mission-critical C8).
+        for p in [r"(a+)+$", r"(a*)*", r"(ab+c)*", r"(a|a)+", r"(x+){10}",
+                  r"(x+){2,}", r"(a?)+", r"((a)|(a))+", r"(\S+\s+){5,}", r"(.*X){8}"]:
+            self.assertTrue(risky(p), f"catastrophic form not flagged: {p}")
+        # Non-group patterns stay usable (no false-positive freeze).
+        for p in [r"GATE CONTRACT R\d+", r"foo|bar|baz", r"R\d{1,5}", r"\bword\b", r"[A-Za-z0-9_]+"]:
+            self.assertFalse(risky(p), f"safe pattern wrongly flagged: {p}")
 
     def test_redos_pattern_fails_open_within_budget(self):
         # A catastrophic-backtracking pattern must NOT hang the prune/daemon — it

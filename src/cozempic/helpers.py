@@ -440,17 +440,28 @@ def _have_sigalrm() -> bool:
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
 import re as _re_redos
+# A regex heuristic can NEVER be complete for ReDoS, and on the no-budget path a
+# missed catastrophic pattern freezes the daemon. So be AGGRESSIVE / fail-closed:
+# treat ANY quantified group as risky — a `)` (optionally followed by `?`/`+`/`*`)
+# that is then quantified by `+`, `*`, or a `{` brace. The necessary condition for
+# catastrophic backtracking is a quantified group, so this catches every form the
+# narrow detector missed — (a|a)+, (x+){n}, (a?)+, ((a)|(a))+, (x+)?+ — at the cost
+# of also refusing benign group-repetition like (abc)+ on Windows. Over-refusal is
+# the SAFE direction: it only means "skip --protect-pattern this cycle + warn"
+# (the documented fail-open outcome), never a frozen daemon.
 _REDOS_SHAPE = _re_redos.compile(
-    r"\([^)]*[+*][^)]*\)\s*[+*]"      # (…+…)+ / (…*…)* / (…+…)*
-    r"|[+*]\s*\)[?]?\s*[+*]",         # +)+  *)*  +)?* …
+    r"\)[?+*]?\s*[+*]"      # a group close, opt quantifier, then + or * : (..)+ (..)* (..)?+ (..)*+
+    r"|\)[?+*]?\s*\{",      # a group close then a brace quantifier : (..){n}  (..){n,}
 )
 
 
 def _pattern_is_redos_risky(pattern: str) -> bool:
-    """Heuristic: True if PATTERN has a nested/adjacent unbounded quantifier that
-    can backtrack catastrophically. Used to fail closed on platforms without a
-    real match-time budget (a pure-Python thread cannot interrupt a CPU-bound
-    `re` match, so a thread-watchdog is not a real safeguard)."""
+    """Heuristic: True if PATTERN contains a quantified group (the necessary
+    condition for catastrophic backtracking). Deliberately aggressive — used ONLY
+    to fail CLOSED where no wall-clock budget exists (Windows / non-main thread),
+    where a pure-Python thread cannot interrupt a CPU-bound `re` match. A
+    false-positive just skips pattern protection for that cycle (+ a warning),
+    which is strictly safer than a frozen guard."""
     return bool(_REDOS_SHAPE.search(pattern))
 
 
