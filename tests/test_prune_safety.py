@@ -647,6 +647,224 @@ class TestTagLeakInvariant:
             assert "__cozempic_metadata_singleton__" not in msg
 
 
+# ── Class 10: enforce_floor 2-root DAG fork on compacted sessions (L7) ────────
+
+
+def _cs(idx: int, uuid: str, parent: str | None = "UNSET"):
+    """compact_summary user message (isCompactSummary=True)."""
+    d: dict = {"type": "user", "isCompactSummary": True, "uuid": uuid,
+               "message": {"content": "summary", "role": "user"}}
+    if parent != "UNSET":
+        d["parentUuid"] = parent
+    return (idx, d, len(json.dumps(d, separators=(",", ":"))))
+
+
+def _cb_preserved(idx: int, uuid: str, parent: str | None = "UNSET"):
+    """compact_boundary with hasPreservedSegment=True (collapse is a no-op)."""
+    d: dict = {"type": "system", "subtype": "compact_boundary",
+               "uuid": uuid, "hasPreservedSegment": True}
+    if parent != "UNSET":
+        d["parentUuid"] = parent
+    return (idx, d, len(json.dumps(d, separators=(",", ":"))))
+
+
+def _compacted_msgs():
+    """Standard compacted-session layout for TestFloorCompactedSession.
+
+    idx=0  root-0   (user, parentUuid=None)
+    idx=1  pre-1    (user, parentUuid=root-0)
+    idx=2  pre-2    (asst, parentUuid=pre-1)
+    idx=3  cb-1     (compact_boundary, parentUuid=pre-2)
+    idx=4  cs-1     (compact_summary user, isCompactSummary=True, parentUuid=cb-1)
+    idx=5  pt-1     (user, parentUuid=cs-1)
+    idx=6  pt-2     (asst, parentUuid=pt-1)
+    """
+    return [
+        _user(0, "root-0", parent=None),
+        _user(1, "pre-1",  parent="root-0"),
+        _asst(2, "pre-2",  parent="pre-1"),
+        _cb(3,  "cb-1",   parent="pre-2"),
+        _cs(4,  "cs-1",   parent="cb-1"),
+        _user(5, "pt-1",  parent="cs-1"),
+        _asst(6, "pt-2",  parent="pt-1"),
+    ]
+
+
+class TestFloorCompactedSession:
+    """L7 HIGH: enforce_floor must not re-add pre-boundary root on a compacted session.
+
+    Bug: compact-summary-collapse removes idx=0..2 and _relink_parent_chain re-roots
+    compact_boundary (cb-1) to parentUuid=None. Then enforce_floor(preserve_first_message=True)
+    re-adds the original root (root-0, parentUuid=None) creating TWO DAG roots:
+    root-0 and cb-1. The validate_post_prune C9 check (P0-B) catches this; the
+    enforce_floor fix (P0-A) prevents it from happening.
+
+    RED-at-base: tests 1, 2, and 6 fail before P0-A/P0-B because the bug is live.
+    Tests 3 and 4 are regression guards (GREEN at base and after fix).
+    Test 5 verifies the hasPreservedSegment edge case (GREEN at base too — edge case
+    does not exercise the buggy path since collapse is a no-op there).
+    """
+
+    def test_floor_does_not_re_add_pre_boundary_root_on_compacted_session(self):
+        """RED-at-base: floor re-adds root-0 alongside cb-1, creating 2 roots.
+
+        After fix (P0-A): only 1 root in result (cb-1); root-0 NOT re-added.
+        """
+        import cozempic.strategies  # noqa: F401 — registers strategy names
+        from cozempic.executor import execute_actions
+        from cozempic.strategies.gentle import strategy_compact_summary_collapse
+        from cozempic.safety import enforce_floor
+        from cozempic.config import FloorConfig
+
+        msgs_before = _compacted_msgs()
+
+        # Run compact-summary-collapse to get the post-collapse state
+        strategy_result = strategy_compact_summary_collapse(msgs_before, {})
+        msgs_after_collapse = execute_actions(msgs_before, strategy_result.actions)
+
+        # enforce_floor with default config (preserve_first_message=True)
+        cfg = FloorConfig(preserve_first_message=True, preserve_last_k_turns=0,
+                          max_user_assistant_drop_pct=0.0)
+        result = enforce_floor(msgs_before, msgs_after_collapse, cfg=cfg)
+
+        roots = [m for _, m, _ in result if not m.get("parentUuid") and m.get("uuid")]
+        # RED at base: 2 roots (root-0 and cb-1). After fix: 1 root (cb-1).
+        assert len(roots) == 1, (
+            f"floor produced {len(roots)} DAG roots — expected 1. "
+            f"root uuids: {[m.get('uuid') for m in roots]}. "
+            "enforce_floor re-added the pre-boundary root alongside compact_boundary "
+            "(confused-deputy 2-root DAG fork — P0-A guard missing)"
+        )
+
+    def test_c9_detects_two_root_fork_raises(self):
+        """RED-at-base: injecting a second root into msgs_after must raise C9.
+
+        Before P0-B, validate_post_prune does not detect the extra root.
+        After P0-B: raises PruneValidationError with failed_check='C9'.
+        """
+        from cozempic.safety import validate_post_prune, PruneValidationError
+
+        # Single-root before
+        msgs_before = [
+            _user(0, "root-a", parent=None),
+            _asst(1, "asst-1", parent="root-a"),
+            _user(2, "user-1", parent="asst-1"),
+        ]
+        # Two-root after (injected second root)
+        msgs_after = [
+            _user(0, "root-a", parent=None),
+            _user(3, "root-b", parent=None),  # spurious second root
+            _asst(1, "asst-1", parent="root-a"),
+            _user(2, "user-1", parent="asst-1"),
+        ]
+        with pytest.raises(PruneValidationError) as exc_info:
+            validate_post_prune(msgs_before, msgs_after)
+        assert exc_info.value.evidence.get("failed_check") == "C9", (
+            f"expected C9 but got {exc_info.value.evidence.get('failed_check')!r} — "
+            "C9 multi-root check is missing from validate_post_prune (P0-B)"
+        )
+
+    def test_c9_single_root_passes(self):
+        """Regression guard (GREEN at base and after fix): single-root session does not raise."""
+        from cozempic.safety import validate_post_prune
+
+        msgs = [
+            _user(0, "root-a", parent=None),
+            _asst(1, "asst-1", parent="root-a"),
+            _user(2, "user-1", parent="asst-1"),
+        ]
+        # identity prune: same before and after — must not raise
+        validate_post_prune(msgs, msgs)
+
+    def test_c9_multi_root_before_same_count_after_passes(self):
+        """Regression guard: a legitimately two-root session (team/resume) must not raise.
+
+        C9 is BASELINE-RELATIVE: if root count after == root count before, no raise.
+        Only raises if the prune INCREASED the root count.
+        """
+        from cozempic.safety import validate_post_prune
+
+        # Two-root session (team fork — both chains present in the same file)
+        msgs_before = [
+            _user(0, "root-a", parent=None),
+            _asst(1, "asst-a", parent="root-a"),
+            _user(2, "root-b", parent=None),   # second root from team session
+            _asst(3, "asst-b", parent="root-b"),
+        ]
+        # Prune keeps both roots and both assistants, same root count
+        msgs_after = [
+            _user(0, "root-a", parent=None),
+            _asst(1, "asst-a", parent="root-a"),
+            _user(2, "root-b", parent=None),
+            _asst(3, "asst-b", parent="root-b"),
+        ]
+        # Must not raise — root count (2) did not increase
+        validate_post_prune(msgs_before, msgs_after)
+
+    def test_floor_with_has_preserved_segment_still_re_adds(self):
+        """Edge case: compact_boundary(hasPreservedSegment=True) must NOT skip pre-boundary floor.
+
+        When hasPreservedSegment=True, compact-summary-collapse does NOT remove the
+        pre-boundary turns. The floor must still re-add them if needed (the P0-A skip
+        only fires when the boundary is ACTIVE — i.e., hasPreservedSegment=False/absent).
+        """
+        from cozempic.safety import enforce_floor
+        from cozempic.config import FloorConfig
+
+        msgs_before = [
+            _user(0, "root-0", parent=None),
+            _user(1, "pre-1",  parent="root-0"),
+            _asst(2, "pre-2",  parent="pre-1"),
+            _cb_preserved(3, "cb-1", parent="pre-2"),
+            _cs(4, "cs-1", parent="cb-1"),
+            _user(5, "pt-1", parent="cs-1"),
+            _asst(6, "pt-2", parent="pt-1"),
+        ]
+        # Simulate a partial removal that drops root-0 but NOT via a collapse
+        # (hasPreservedSegment=True → collapse did NOT run → root-0 is recoverable)
+        msgs_after = [
+            _user(1, "pre-1",  parent="root-0"),
+            _asst(2, "pre-2",  parent="pre-1"),
+            _cb_preserved(3, "cb-1", parent="pre-2"),
+            _cs(4, "cs-1", parent="cb-1"),
+            _user(5, "pt-1", parent="cs-1"),
+            _asst(6, "pt-2", parent="pt-1"),
+        ]
+        cfg = FloorConfig(preserve_first_message=True, preserve_last_k_turns=0,
+                          max_user_assistant_drop_pct=0.0)
+        result = enforce_floor(msgs_before, msgs_after, cfg=cfg)
+
+        result_uuids = {m.get("uuid") for _, m, _ in result}
+        assert "root-0" in result_uuids, (
+            "floor must re-add pre-boundary root when hasPreservedSegment=True "
+            "(the P0-A skip must NOT fire when the compact_boundary is not active)"
+        )
+
+    def test_run_prescription_compacted_session_single_root(self):
+        """END-TO-END acceptance: run_prescription on a compacted session yields exactly 1 root.
+
+        This is the EXACT acceptance check the lead will reproduce independently.
+        Before fix: result has 2 roots (root-0 and cb-1 both have parentUuid=None).
+        After fix: result has exactly 1 root (cb-1).
+        """
+        import cozempic.strategies  # noqa: F401
+        from cozempic.executor import run_prescription
+        from cozempic.config import FloorConfig
+
+        msgs_before = _compacted_msgs()
+        cfg = FloorConfig(preserve_first_message=True, preserve_last_k_turns=0,
+                          max_user_assistant_drop_pct=0.0)
+        result, _ = run_prescription(
+            msgs_before, ["compact-summary-collapse"], {}, floor_config=cfg
+        )
+
+        roots = [m for _, m, _ in result if not m.get("parentUuid") and m.get("uuid")]
+        assert len(roots) == 1, (
+            f"run_prescription produced {len(roots)} DAG roots — expected 1. "
+            f"root uuids: {[m.get('uuid') for m in roots]}"
+        )
+
+
 # ── Class 9: PruneValidationError in guard_prune_cycle abort path ─────────────
 # Rewritten (H-1): see test_prune_safety_r2.py::TestGuardAbortContractRewritten
 # for the correct abort-contract tests that patch cozempic.guard.prune_with_team_protect
