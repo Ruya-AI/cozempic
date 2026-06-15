@@ -775,7 +775,7 @@ def start_guard(
                             if s.status in ("running", "unknown")
                         )
                         running_teammates = sum(
-                            1 for t in (state.teammates or [])
+                            1 for t in (getattr(state, "teammates", None) or [])
                             if (t.status or "").strip().lower()
                             not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
                         )
@@ -2460,7 +2460,7 @@ def _compute_agents_active(state) -> bool:
         return True
     teammate_active = any(
         (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
-        for t in (state.teammates or [])
+        for t in (getattr(state, "teammates", None) or [])
     )
     return teammate_active
 
