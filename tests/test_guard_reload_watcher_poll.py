@@ -135,7 +135,7 @@ class TestWatcherWritesStatusOnNoNewClaude(unittest.TestCase):
 class TestWatcherLogsSuccessWhenNewClaudeAppears(unittest.TestCase):
     """When a new claude process with the session-id prefix appears within
     RELOAD_WATCHER_POLL_TIMEOUT_SECONDS, the watcher must:
-    - Log a success line to /tmp/cozempic_guard.log mentioning the new PID.
+    - Log a success line to the guard log (under ``_guard_tmp_root()``) mentioning the new PID.
     - NOT write a status file.
     """
 
