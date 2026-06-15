@@ -933,6 +933,16 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # H-1: require top-level teamName to authenticate the carrier.  Genuine
         # harness idle-notification messages always carry teamName; user-typed
         # messages never do.  A missing teamName → skip (over-defer, recoverable).
+        #
+        # H1-B RESIDUAL (DEFERRED): this is a presence-check, not a cryptographic
+        # authenticator.  A user who knows about teamName could craft a message with
+        # any teamName value and bypass this gate (e.g. user types a fake carrier with
+        # teamName="cozempic-pipeline").  Closing H1-B would require a harness-stamped
+        # sender field (like the C-3 residual which needs a structural nested_agent_id
+        # marker) that user-typed text cannot forge.  Until then H-1 raises the bar
+        # from zero knowledge (anyone can trigger it) to harness knowledge (only someone
+        # who knows and sets teamName) — a meaningful improvement in a trusted-user
+        # context.  Track: same follow-up PR as C-3.
         if not msg.get("teamName"):
             continue
         for tm_match in _TEAMMATE_MSG_RE.finditer(_idle_notif_content[:_RELOAD_GATE_SCAN_CAP]):

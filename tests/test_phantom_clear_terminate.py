@@ -32,13 +32,22 @@ Two Sub-PR C bug classes implemented (C-1, C-2); one deferred (C-3); H-1 added:
          user-typed messages never do.  The idle-notif scan now skips any message whose
          top-level dict has no teamName field.
 
+  H1-B — DEFERRED RESIDUAL: the H-1 gate is a presence-check, not a cryptographic
+         authenticator.  A user who knows the teamName convention can forge a carrier
+         with teamName="<any-team>" and bypass the gate.  Closing this requires a
+         harness-stamped sender field that user text cannot replicate — the same
+         structural approach needed for C-3's nested_agent_id gap.
+         Track: same follow-up PR as C-3 (requires a new harness field, not a code-
+         only fix).
+
 Fail-safe direction: OVER-DEFER (missed completion → guard defers longer →
 recoverable), NEVER UNDER-BLOCK (phantom-clear/skip/IDLE → SIGKILL → unrecoverable).
 
 Ground-truth gated: after C-1 + C-2 + H-1, the real fixture tests in
 TestRealHarnessFixtures (test_reload_gate_contract.py) MUST still hold:
-  live_team.jsonl  → safe_to_reload returns False (defer)
+  live_team.jsonl    → safe_to_reload returns False (defer)
   finished_team.jsonl → safe_to_reload returns True (quiescent)
+  idle_team.jsonl    → safe_to_reload returns True (teammate idled via genuine carrier)
 """
 
 import json

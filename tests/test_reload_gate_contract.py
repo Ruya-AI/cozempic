@@ -173,6 +173,39 @@ class TestRealHarnessFixtures(unittest.TestCase):
         safe, _ = safe_to_reload(extract_team_state(msgs), msgs, f)
         self.assertTrue(safe, "real finished team must be allowed to reload")
 
+    def test_idle_team_fixture_reloads(self):
+        """H1-A: genuine harness idle-notification carrier (top-level teamName) must reload.
+
+        Corroborates the 220/220 teamName corpus claim: the fixture is a minimal
+        redacted capture of a real idle-notification carrier from a live session,
+        with harness metadata preserved verbatim (type, teamName, isSidechain) and
+        agent IDs / report body / paths redacted.
+
+        Expected: teammate transitions to 'idle' via the teamName-gated idle-notif
+        scan (H-1 fix) → safe_to_reload returns True.  If this fixture EVER returns
+        False, the H-1 gate is broken — it must pass teamName-bearing carriers through.
+        """
+        f = self.FIX / "idle_team.jsonl"
+        if not f.exists():
+            self.skipTest(
+                "NO real idle-team fixture yet — capture one "
+                "(tests/fixtures/harness/idle_team.jsonl). "
+                "Until then the H-1 teamName carrier gate is UNVERIFIED against "
+                "real harness output."
+            )
+        msgs = load_messages(f)
+        state = extract_team_state(msgs)
+        self.assertFalse(state.is_empty(),
+                         "idle_team fixture must register at least one teammate "
+                         "(verifies TeamCreate was parsed)")
+        safe, reason = safe_to_reload(state, msgs, f)
+        self.assertTrue(
+            safe,
+            "A real idle-notification carrier (top-level teamName) must transition "
+            "the teammate to idle → allow reload. H-1 gate must pass genuine carriers "
+            f"through. Got safe=False reason={reason!r}"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
