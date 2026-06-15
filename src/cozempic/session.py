@@ -118,7 +118,9 @@ def _parse_delta_lines(delta: bytes) -> list[str]:
     if not text.endswith("\n"):
         raise ValueError("delta does not end on newline boundary — Claude may be mid-write")
     lines = []
-    for raw in text.splitlines():
+    # _split_physical_lines (not str.splitlines) so an appended JSONL line carrying
+    # a raw U+2028/U+2029/U+0085 isn't torn into invalid fragments on append-merge.
+    for raw in _split_physical_lines(text):
         raw = raw.strip()
         if not raw:
             continue

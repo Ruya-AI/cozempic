@@ -14,6 +14,7 @@ from cozempic.session import (
     PruneLockError,
     _PruneLock,
     load_messages,
+    load_messages_and_snapshot,
     save_messages,
     snapshot_session,
 )
@@ -160,6 +161,21 @@ class TestSnapshotAndAppend:
             save_messages(jsonl, b, create_backup=False, snapshot=snap)
             reloaded = load_messages(jsonl)
             assert reloaded[0][1]["message"]["content"] == f"a{sep}b", f"{sep!r}: content corrupted on save"
+
+    def test_appended_unicode_separator_line_merges_intact(self, tmp_path):
+        """The append-merge delta path (_parse_delta_lines) must not tear an
+        appended JSONL line containing a raw U+2028/U+2029 into fragments."""
+        jsonl = tmp_path / "d.jsonl"
+        _make_messages(jsonl, n=3)
+        messages, snap = load_messages_and_snapshot(jsonl)
+        appended = {"type": "assistant", "message": {"role": "assistant", "content": "x y"}}
+        with open(jsonl, "a", encoding="utf-8") as f:
+            f.write(json.dumps(appended, ensure_ascii=False) + "\n")
+        assert snap.classify(jsonl) == "appended"
+        save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+        reloaded = load_messages(jsonl)
+        assert not any(m.get("_parse_error") for _, m, _ in reloaded), "appended U+2028 line torn into fragments"
+        assert reloaded[-1][1]["message"]["content"] == "x y", "appended separator line corrupted on merge"
 
     def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):
         """Read-once: a line appended AFTER load_messages_and_snapshot must be
