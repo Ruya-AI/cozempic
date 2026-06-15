@@ -196,10 +196,11 @@ def scan_guard_logs(
         pid_file = log_file.with_suffix(".pid")
         pid = _read_pid(pid_file) if pid_file.exists() else None
         alive = _pid_alive(pid)
-        if alive and pid is not None:
-            # Lazy import to avoid a heavy module-level import of guard.py (large,
-            # side-effecty) and to prevent a circular import (guard imports watchdog
-            # indirectly through its own helpers).
+        if alive:
+            # Lazy import: avoids the heavy module-level guard.py load (large,
+            # side-effecty) and prevents a circular import (guard imports watchdog
+            # indirectly through its own helpers). alive=True implies pid is not
+            # None (since _pid_alive(None) returns False).
             from .guard import _is_cozempic_guard_process
             confirmed = _is_cozempic_guard_process(pid)
         else:
