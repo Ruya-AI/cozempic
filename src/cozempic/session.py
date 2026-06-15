@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from .helpers import _pid_is_alive as _pid_alive
 from .types import Message
 
 
@@ -547,20 +548,6 @@ _ACTIVE_SESSIONS_MAX = 64
 
 def _active_sessions_path() -> Path:
     return get_claude_dir() / _ACTIVE_SESSIONS_FILENAME
-
-
-def _pid_alive(pid: int) -> bool:
-    """True if `pid` is a live process. Signal 0 probes without delivering."""
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (ProcessLookupError, OverflowError, ValueError):
-        return False
-    except PermissionError:
-        # Exists but owned by another user — still alive.
-        return True
-    except OSError:
-        return False
 
 
 def record_active_transcript(transcript_path: str, claude_pid: int | None = None) -> None:

@@ -11,6 +11,37 @@ from pathlib import Path as _Path
 _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
 
 
+# ── Process-liveness probe ──────────────────────────────────────────────────
+
+def _pid_is_alive(pid: int) -> bool:
+    """Bare process-liveness probe via ``os.kill(pid, 0)``.
+
+    Fail-safe direction: on a POSIX-unknown OSError, return True (assume alive)
+    so we never skip a legitimate reload / never prematurely kill a live session.
+    Windows ``os.kill`` raises OSError [WinError 87] for non-existent PIDs —
+    return False there. On POSIX any unexpected OSError is rare; fail-open.
+
+    This is the canonical implementation shared by guard.py, session.py, and
+    watchdog.py (GC-3). The guard.py ``_pid_is_alive`` is an alias; session.py
+    and watchdog.py ``_pid_alive`` now import this.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # process exists, owned by another user
+    except OverflowError:
+        return False  # pid too large — malformed input
+    except OSError:
+        # Windows raises OSError [WinError 87] for a non-existent PID.
+        # On POSIX an unexpected OSError here is rare — fail-open (assume alive).
+        return os.name != "nt"
+
+
 # ── Atomic write primitive ──────────────────────────────────────────────────
 #
 # Used by all single-writer-per-host paths (_save_sidecar, record_savings,

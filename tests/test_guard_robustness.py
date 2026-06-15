@@ -53,8 +53,7 @@ class TestGuardDaemonPidHandoff(unittest.TestCase):
             # via _pid_file_for_session (BUG-G13), matching the read-side
             # contract in _is_guard_running_for_session.
             uuid = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
-            session_log = Path("/tmp") / f"cozempic_guard_{uuid[:12]}.log"
-            session_pid = Path("/tmp") / f"cozempic_guard_{uuid[:12]}.pid"
+            tmp = Path(tmpdir)
             captured = {}
 
             class DummyProc:
@@ -64,7 +63,12 @@ class TestGuardDaemonPidHandoff(unittest.TestCase):
                 captured["cmd_parts"] = cmd_parts
                 return DummyProc()
 
+            # GC-2: patch _guard_tmp_root so log/pid files land in the tmpdir
+            # instead of the real /tmp — avoids real-file leaks on macOS where
+            # _guard_tmp_root() returns /tmp but tempfile.gettempdir() returns
+            # /var/folders/…/T (the two differ, leaving files after teardown).
             with (
+                patch("cozempic.guard._guard_tmp_root", return_value=tmp),
                 patch("cozempic.guard._cleanup_legacy_pid"),
                 patch("cozempic.guard._is_guard_running_for_session", return_value=None),
                 patch("cozempic.guard.find_claude_pid", return_value=9999),
@@ -79,9 +83,6 @@ class TestGuardDaemonPidHandoff(unittest.TestCase):
             self.assertTrue(result["started"])
             self.assertIn("--claude-pid", captured["cmd_parts"])
             self.assertIn("9999", captured["cmd_parts"])
-
-            session_log.unlink(missing_ok=True)
-            session_pid.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

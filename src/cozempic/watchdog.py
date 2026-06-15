@@ -26,6 +26,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .helpers import _pid_is_alive as _pid_alive
+
 # A prune freeing less than this percentage of tokens is "futile" (mirrors the
 # guard's own _MIN_PRUNE_RATIO=0.10 intent; we use 1% as the unambiguous
 # "barely moved" floor so a marginal 2-3% prune isn't counted as a stuck loop).
@@ -150,18 +152,6 @@ def _read_pid(pid_file: Path) -> int | None:
         return int(first.strip())
     except (OSError, ValueError, IndexError):
         return None
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except PermissionError:
-        return True
-    except (ProcessLookupError, OverflowError, ValueError, OSError):
-        return False
 
 
 def scan_guard_logs(

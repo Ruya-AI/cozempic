@@ -156,7 +156,10 @@ class TestWatcherLogsSuccessWhenNewClaudeAppears(unittest.TestCase):
             )
 
         fake_new_pid = 94466
-        guard_log = Path("/tmp/cozempic_guard.log")
+        # GC-2: use _guard_tmp_root() instead of hardcoded /tmp to avoid
+        # real-file leaks on macOS where /tmp != tempfile.gettempdir().
+        from cozempic.guard import _guard_tmp_root
+        guard_log = _guard_tmp_root() / "cozempic_guard.log"
 
         scripts_run = []
         # Save the real Popen BEFORE the patch to avoid mock recursion in _fake_popen

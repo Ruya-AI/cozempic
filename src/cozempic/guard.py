@@ -483,6 +483,33 @@ def _validate_finite_thresholds(
             raise ConfigError(f"{_name} must be a finite number, got {_v!r}")
 
 
+def _make_sigterm_handler(session_id, session_path, overflow_watcher):
+    """Return the SIGTERM handler for a guard daemon instance.
+
+    Extracted so it can be tested independently (GC-1). The handler:
+    1. Writes a final team checkpoint.
+    2. Stops the overflow watcher if one is running.
+    3. Unlinks the session PID file (CAS — only if it holds OUR pid).
+    4. Clears the armed-reload sentinel so a SIGTERM doesn't leave a stale
+       armed file that would cause the next daemon to reload immediately.
+
+    Steps 3+4 were missing before GC-1: a SIGTERM before the try: block at
+    ~896 in start_guard would exit without cleanup, leaving a leaked PID file
+    and a stale armed sentinel → the next daemon spawned by SessionStart would
+    see a false "already running" (from the stale PID file) or an unintended
+    immediate-reload (from the stale armed file).
+    """
+    def _graceful_shutdown(signum, frame):
+        print(f"\n  [{_now()}] Signal {signum} received — final checkpoint...")
+        checkpoint_team(session_path=session_path, quiet=False)
+        if overflow_watcher:
+            overflow_watcher.stop()
+        _safe_unlink_session_pidfile(session_id)
+        clear_armed(session_id, session_path)
+        sys.exit(0)
+    return _graceful_shutdown
+
+
 def start_guard(
     cwd: str | None = None,
     threshold_mb: float = 50.0,
@@ -674,14 +701,10 @@ def start_guard(
         )
         watcher_thread.start()
 
-    # Graceful shutdown on SIGTERM
-    def _graceful_shutdown(signum, frame):
-        print(f"\n  [{_now()}] Signal {signum} received — final checkpoint...")
-        checkpoint_team(session_path=session_path, quiet=False)
-        if overflow_watcher:
-            overflow_watcher.stop()
-        sys.exit(0)
-    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    # Graceful shutdown on SIGTERM (GC-1: extracted + hardened — also cleans PID/armed)
+    signal.signal(signal.SIGTERM, _make_sigterm_handler(
+        session_id=session_id, session_path=session_path, overflow_watcher=overflow_watcher,
+    ))
 
     # Resolve Claude before daemonization or other reparenting can obscure it.
     if claude_pid is None:
@@ -3606,23 +3629,12 @@ def _pid_is_alive(pid: int) -> bool:
     ``_is_claude_process``'s mtime fallback would misread that fresh write as a
     live Claude and let the reload watcher resurrect a session the user closed.
     ``os.kill(pid, 0)`` answers liveness directly and is not fooled by it.
+
+    Canonical implementation lives in helpers._pid_is_alive (GC-3);
+    this is the same function re-exported under the guard-internal name.
     """
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # process exists, owned by another user
-    except OverflowError:
-        return False  # pid too large to be a real process id (malformed --claude-pid)
-    except OSError:
-        # Windows raises OSError [WinError 87] for a non-existent PID; treat any
-        # Windows os.kill failure as "gone". On POSIX an unexpected OSError here
-        # is rare — assume alive so we never skip a legitimate reload.
-        return os.name != "nt"
+    from .helpers import _pid_is_alive as _canonical
+    return _canonical(pid)
 
 
 def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:
