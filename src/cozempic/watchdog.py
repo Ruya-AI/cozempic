@@ -59,9 +59,9 @@ BACKOFF_CAP_S = 300
 # guard._fmt_prune_result emits ("210.0K tokens freed", "1.2M tokens freed") for
 # any prune >= 1000 tokens — WITHOUT this, every productive prune line is
 # unparsed, so the futile-dominance ratio skews to ~1.0 and the watchdog
-# FALSE-FLAGS a healthy daemon as looping (and --fix would SIGTERM it). Only the
-# percent group (group 2) is consumed downstream, so the count suffix only needs
-# to be matched, not numerically parsed.
+# FALSE-FLAGS a healthy daemon as looping (and --fix would SIGTERM it). The count
+# is matched but NOT captured (the percent is the only capture group, group 1, and
+# the only value consumed downstream), so the K/M/comma suffix only needs tolerating.
 _PRUNED_RE = re.compile(
     r"Pruned:\s+[0-9][0-9,]*(?:\.[0-9]+)?[KMG]?\s+tokens freed\s+\(([0-9.]+)%\)",
     re.IGNORECASE,
