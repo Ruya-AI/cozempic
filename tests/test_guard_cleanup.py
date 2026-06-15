@@ -20,7 +20,11 @@ GC-3 — guard.py:_pid_is_alive (canonical), session.py:_pid_alive, and
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import signal
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -205,7 +209,6 @@ class TestPidIsAliveCanonicalBehavior(unittest.TestCase):
         rejects strings before os.kill is reached).
         GREEN after fix: coercion to int → os.kill succeeds → True.
         """
-        import os
         result = _canonical_pid_is_alive(str(os.getpid()))  # type: ignore[arg-type]
         self.assertTrue(result,
                         f"_pid_is_alive('{os.getpid()}') returned False — "
@@ -227,10 +230,6 @@ class TestRecordActiveTranscriptRetainsLivePids(unittest.TestCase):
     """
 
     def setUp(self):
-        import json
-        import os
-        import tempfile
-        from pathlib import Path
         self._tmpdir = tempfile.mkdtemp(prefix="cozempic_rat_")
         self._claude_dir = Path(self._tmpdir) / ".claude"
         self._claude_dir.mkdir()
@@ -259,7 +258,6 @@ class TestRecordActiveTranscriptRetainsLivePids(unittest.TestCase):
         self._new_transcript.write_text('{"type":"user"}\n', encoding="utf-8")
 
     def tearDown(self):
-        import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_live_pid_entries_retained_after_write(self):
@@ -270,18 +268,11 @@ class TestRecordActiveTranscriptRetainsLivePids(unittest.TestCase):
         GREEN after fix: string keys are coerced to int → live probes pass →
         both entries survive.
         """
-        import json
-        import os
         from cozempic.session import record_active_transcript
 
-        # Use a fresh pid that is distinct from the two pre-seeded ones.
-        # We use pid=1 as the "current caller" (well-known alive on Unix).
-        # To avoid messing up the actual sentinel, pass a new fake transcript
-        # and a new caller pid that is alive (os.getpid() but as a different slot).
-        # Actually: pass claude_pid as a third alive pid (just re-use getpid for
-        # the caller; the dict key will be str(getpid()) which is already present
-        # so it gets replaced, that's fine — we care about live_pid2 surviving).
-        new_pid = self._live_pid1  # caller slot — will be overwritten (same pid)
+        # Re-use live_pid1 as the caller slot — it is already in the file so
+        # it gets overwritten (that's fine).  We care that live_pid2 survives.
+        new_pid = self._live_pid1
 
         with (
             patch("cozempic.session.get_claude_dir", return_value=self._claude_dir),
