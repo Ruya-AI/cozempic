@@ -421,6 +421,63 @@ class TestDoctorRespectsPruneLock(unittest.TestCase):
         self.assertIn("Skipped", src,
             "fix_corrupted_tool_use must report skipped sessions")
 
+    def test_fix_corrupted_preserves_concurrent_append_behavioral(self):
+        """BEHAVIORAL (not static): fix_corrupted_tool_use must NOT drop a line
+        Claude appends between our read and our write. Regression for the audit
+        P1 (read_text→atomic_write with no snapshot). We inject the concurrent
+        append exactly between read and classify via a wrapper snapshot."""
+        import json
+        from pathlib import Path
+        from unittest import mock
+        from cozempic import session as S
+        from cozempic import doctor as D
+
+        proj = S.get_projects_dir() / "-proj"
+        proj.mkdir(parents=True, exist_ok=True)
+        sess = proj / "behav1234.jsonl"
+        # A corrupted tool_use block: name > 200 chars in the flattened-XML form.
+        corrupt_name = 'Bash" command="' + ("x" * 250) + '"'
+        line0 = json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}})
+        line1 = json.dumps({"type": "assistant", "message": {"role": "assistant",
+                  "content": [{"type": "tool_use", "id": "t1", "name": corrupt_name, "input": {}}]}})
+        sess.write_text(line0 + "\n" + line1 + "\n", encoding="utf-8")
+
+        # The line Claude "appends" mid-repair — must survive.
+        appended_obj = {"type": "user", "message": {"role": "user", "content": "APPENDED_LIVE_TURN"}}
+        appended_line = json.dumps(appended_obj) + "\n"
+
+        class _InjectingSnapshot:
+            def __init__(self, real, path):
+                self._real, self._path, self._done = real, path, False
+            @property
+            def size(self):
+                return self._real.size
+            def read_delta(self, p):
+                return self._real.read_delta(p)
+            def classify(self, p):
+                if not self._done:  # inject append between the function's read and classify
+                    with open(self._path, "a", encoding="utf-8") as f:
+                        f.write(appended_line)
+                    self._done = True
+                return self._real.classify(p)
+
+        real_factory = S.snapshot_session
+        def injecting_factory(path):
+            return _InjectingSnapshot(real_factory(path), path)
+
+        with mock.patch.object(S, "snapshot_session", injecting_factory):
+            D.fix_corrupted_tool_use()
+
+        final = sess.read_text(encoding="utf-8")
+        # 1) The concurrently-appended live turn survived (no data loss).
+        self.assertIn("APPENDED_LIVE_TURN", final,
+                      "fix_corrupted_tool_use dropped a concurrently-appended line (data loss)")
+        # 2) The corruption was actually repaired (name parsed back to 'Bash').
+        objs = [json.loads(ln) for ln in final.splitlines() if ln.strip()]
+        tu = next(b for o in objs for b in o.get("message", {}).get("content", [])
+                  if isinstance(o.get("message", {}).get("content"), list) and b.get("type") == "tool_use")
+        self.assertEqual(tu["name"], "Bash", "corruption must still be repaired")
+
     def test_fix_orphaned_uses_prune_lock_snapshot_and_reports_skipped(self):
         """fix_orphaned_tool_results was the second unprotected save_messages
         site flagged by the architecture review. Must mirror fix_corrupted's

@@ -523,7 +523,7 @@ def fix_corrupted_tool_use() -> str:
     import re
     import shutil
 
-    from .session import _PruneLock, PruneLockError
+    from .session import _PruneLock, PruneLockError, snapshot_session, _parse_delta_lines
 
     sessions = find_sessions()
     total_fixed = 0
@@ -555,6 +555,12 @@ def fix_corrupted_tool_use() -> str:
         backup = path.with_suffix(f".{ts}.jsonl.bak")
         shutil.copy2(path, backup)
 
+        # Snapshot the file BEFORE reading so that, if Claude appends new lines
+        # while we repair, we can recover them instead of clobbering with our
+        # stale read (mirrors fix_orphaned_tool_results' snapshot→save_messages
+        # path — this function previously read_text→atomic_write with no snapshot,
+        # silently dropping any concurrent append = data loss).
+        snapshot = snapshot_session(path)
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         fixed_in_session = 0
 
@@ -604,13 +610,33 @@ def fix_corrupted_tool_use() -> str:
 
         try:
             if fixed_in_session > 0:
-                # Atomic write via mkstemp — collision-safe if a parallel
-                # writer (shouldn't happen since we hold _PruneLock, but
-                # belt-and-suspenders) targets the same session.
-                from .helpers import atomic_write_text
-                atomic_write_text(path, "".join(lines))
-                total_fixed += fixed_in_session
-                sessions_fixed += 1
+                # Before clobbering, check what happened to the file while we worked.
+                kind = snapshot.classify(path)
+                if kind == "conflict":
+                    # Claude rewrote/truncated the prefix — our repaired buffer is
+                    # stale. Refuse to write (the .bak preserves the pre-fix state);
+                    # the user can re-run doctor once the session is idle.
+                    skipped_sessions.append(sess["session_id"])
+                elif kind == "appended":
+                    # Claude appended new lines after our read — keep them so the
+                    # repair never drops live turns. Validate the delta (raises if
+                    # Claude is mid-write / corrupt → treat as conflict, skip).
+                    try:
+                        delta = [ln + "\n" for ln in _parse_delta_lines(snapshot.read_delta(path))]
+                    except Exception:
+                        # mid-write (no newline boundary) or corrupt delta — don't risk it
+                        skipped_sessions.append(sess["session_id"])
+                        delta = None
+                    if delta is not None:
+                        from .helpers import atomic_write_text
+                        atomic_write_text(path, "".join(lines) + "".join(delta))
+                        total_fixed += fixed_in_session
+                        sessions_fixed += 1
+                else:  # "unchanged" — safe to write our repaired buffer
+                    from .helpers import atomic_write_text
+                    atomic_write_text(path, "".join(lines))
+                    total_fixed += fixed_in_session
+                    sessions_fixed += 1
         finally:
             try:
                 _prune_lock_ctx.__exit__(None, None, None)
