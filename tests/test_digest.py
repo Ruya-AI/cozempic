@@ -70,6 +70,24 @@ def make_assistant(line_idx: int, text: str) -> tuple[int, dict, int]:
     })
 
 
+def make_sidechain_user(line_idx: int, text: str) -> tuple[int, dict, int]:
+    """A user-role turn with isSidechain=True at the top level (sub-agent scaffolding)."""
+    return make_message(line_idx, {
+        "type": "user",
+        "isSidechain": True,
+        "message": {"role": "user", "content": text},
+    })
+
+
+def make_sidechain_assistant(line_idx: int, text: str) -> tuple[int, dict, int]:
+    """An assistant-role turn with isSidechain=True at the top level (sub-agent response)."""
+    return make_message(line_idx, {
+        "type": "assistant",
+        "isSidechain": True,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    })
+
+
 # ---------------------------------------------------------------------------
 # classify_turn
 # ---------------------------------------------------------------------------
@@ -3092,32 +3110,13 @@ class TestSidechainInjectionGuard(unittest.TestCase):
 
     CORRECTION_PHRASE = "don't add Co-Authored-By to commits"
 
-    def _make_sidechain_user(self, line_idx: int, text: str) -> tuple:
-        """A user-role turn with isSidechain=True at the top level."""
-        return make_message(line_idx, {
-            "type": "user",
-            "isSidechain": True,
-            "message": {"role": "user", "content": text},
-        })
-
-    def _make_sidechain_assistant(self, line_idx: int, text: str) -> tuple:
-        """An assistant-role turn with isSidechain=True at the top level."""
-        return make_message(line_idx, {
-            "type": "assistant",
-            "isSidechain": True,
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": text}],
-            },
-        })
-
     def test_sidechain_user_turn_produces_no_rule(self):
         """RED-at-base: a sidechain user-turn carrying an EXPLICIT_CORRECTION phrase
         must yield 0 rules. Without the guard, extract_corrections mines it and yields
         1 rule — the confused-deputy injection.
         """
         messages = [
-            self._make_sidechain_user(0, self.CORRECTION_PHRASE),
+            make_sidechain_user(0, self.CORRECTION_PHRASE),
         ]
         rules = extract_corrections(messages)
         self.assertEqual(
@@ -3141,18 +3140,16 @@ class TestSidechainInjectionGuard(unittest.TestCase):
         )
 
     def test_sidechain_assistant_does_not_pollute_prev_assistant_text(self):
-        """A sidechain assistant-turn in the pre-window must NOT set prev_assistant_text.
+        """A sidechain assistant-turn must NOT set prev_assistant_text.
 
         Without the guard, a sidechain assistant turn sets prev_assistant_text, so the
         next main-session user-turn sees a non-empty prev_assistant_text and may be
         classified differently (e.g. APOLOGY_FOLLOW_UP instead of EXPLICIT_CORRECTION).
-        This is a pollution of context between sidechain and main turns.
         """
-        # Sidechain assistant turn (pre-window), then main user correction.
-        # The sidechain assistant text is irrelevant scaffolding; the main rule
+        # Sidechain assistant turn, then main user correction. The main rule
         # should have an empty `before` field (prev_assistant_text not polluted).
         messages = [
-            self._make_sidechain_assistant(0, "Sub-agent said something here."),
+            make_sidechain_assistant(0, "Sub-agent said something here."),
             make_user(1, self.CORRECTION_PHRASE),
         ]
         rules = extract_corrections(messages)
