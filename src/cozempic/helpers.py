@@ -32,7 +32,8 @@ def _pid_is_alive(pid: int) -> bool:
     if not isinstance(pid, int):
         try:
             pid = int(pid)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
+            # OverflowError: int(float('inf')) raises OverflowError, not ValueError.
             return False
     if pid <= 0:
         return False

@@ -506,13 +506,24 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
         except Exception:
             pass  # best-effort: corrupt TeamState must not block cleanup or clean exit
         finally:
-            # Cleanup runs whether checkpoint succeeded or raised.
-            # A leaked pidfile or armed sentinel causes a false SIGTERM on
-            # the next session or an unwarned reload.
+            # Each cleanup step is wrapped best-effort so a raise in one step
+            # (e.g. a buggy overflow_watcher.stop()) never skips the remaining
+            # steps or prevents sys.exit(0) from firing.  A leaked pidfile or
+            # armed sentinel causes a false SIGTERM on the next session or an
+            # unwarned reload — that is worse than swallowing a cleanup error.
             if overflow_watcher:
-                overflow_watcher.stop()
-            _safe_unlink_session_pidfile(session_id)
-            clear_armed(session_id, session_path)
+                try:
+                    overflow_watcher.stop()
+                except Exception:
+                    pass
+            try:
+                _safe_unlink_session_pidfile(session_id)
+            except Exception:
+                pass
+            try:
+                clear_armed(session_id, session_path)
+            except Exception:
+                pass
         sys.exit(0)
     return _graceful_shutdown
 
