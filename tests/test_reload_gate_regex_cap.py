@@ -78,7 +78,7 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
             elapsed, 2.0,
             f"detect_in_flight took {elapsed:.3f}s on degenerate input — "
             "the _TN_BLOCK_RE scan is not capped at _RELOAD_GATE_SCAN_CAP (64KB). "
-            "Without the cap, 200,000 openers trigger O(openers × len) backtracking."
+            "Without the cap, 10,000 openers trigger O(openers × len) backtracking."
         )
         # The degenerate input has no valid closed blocks — no completions cleared.
         self.assertFalse(
@@ -117,6 +117,17 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
             "task-notification is present within the 64KB cap; "
             f"got result={result}"
         )
+
+
+def _extract_isolated(msgs):
+    """Call extract_team_state with config isolation (no live ~/.claude/teams/).
+
+    Shared by TestExtractTeamStateReDoSCap and TestExtractTeamStateTeammateMsgCap
+    to avoid duplicating the patch context manager in each class.
+    """
+    from cozempic.team import extract_team_state
+    with patch("cozempic.team.load_team_configs", return_value=[]):
+        return extract_team_state(msgs)
 
 
 def _tu(idx: int, id_: str, name: str, inp: dict) -> tuple:
@@ -158,10 +169,7 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
         ]
 
     def _extract(self, msgs):
-        """Call extract_team_state with config isolation (no live ~/.claude/teams/)."""
-        from cozempic.team import extract_team_state
-        with patch("cozempic.team.load_team_configs", return_value=[]):
-            return extract_team_state(msgs)
+        return _extract_isolated(msgs)
 
     def test_extract_team_state_quadratic_input_bounded(self):
         """REGRESSION GUARD — RED at base: uncapped scan on a message with 185KB of
@@ -183,7 +191,7 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
             elapsed, 2.0,
             f"extract_team_state took {elapsed:.3f}s with degenerate input — "
             "the _TASK_NOTIF_BLOCK_RE scan is not capped at _RELOAD_GATE_SCAN_CAP (64KB). "
-            "Without the cap, 200,000 openers trigger O(openers × len) backtracking."
+            "Without the cap, 10,000 openers trigger O(openers × len) backtracking."
         )
 
     def test_extract_team_state_real_notification_still_clears(self):
@@ -253,9 +261,7 @@ class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
     """
 
     def _extract(self, msgs):
-        from cozempic.team import extract_team_state
-        with patch("cozempic.team.load_team_configs", return_value=[]):
-            return extract_team_state(msgs)
+        return _extract_isolated(msgs)
 
     @staticmethod
     def _team_spawn_msgs():
