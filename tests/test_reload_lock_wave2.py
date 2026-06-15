@@ -9,6 +9,7 @@ This is the primary cascade fix from the production incident.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -265,7 +266,6 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         (uppercase kept), while spawn_lock._slug_for produces "abcd1234efgh"
         and guard._reload_armed_path produces "abcd1234efgh" → assertEqual FAILS.
         """
-        import re
         from cozempic.reload_lock import _slug_for as rl_slug
         from cozempic.spawn_lock import _slug_for as sl_slug
 
@@ -298,7 +298,6 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         and dashes) is already lowercase, so .lower() is a no-op. The slug must
         equal the first 12 chars of the UUID across all three producers.
         """
-        import re
         from cozempic.reload_lock import _slug_for as rl_slug
         from cozempic.spawn_lock import _slug_for as sl_slug
 
