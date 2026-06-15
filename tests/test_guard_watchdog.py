@@ -219,5 +219,61 @@ class TestCliCommand(unittest.TestCase):
         self.assertEqual(killed.get("sig"), signal.SIGTERM)
 
 
+class TestFixIdentityGate(unittest.TestCase):
+    """L2 HIGH: --fix must verify guard identity before sending SIGTERM.
+
+    Confused-deputy scenario: guard exits hard (SIGKILL / OOM), pidfile is
+    never unlinked, OS recycles the PID to an unrelated same-user process,
+    operator runs `cozempic guard-watchdog --fix`.  Without an identity gate,
+    the innocent process is SIGTERMed.
+
+    RED-at-base proof: before the fix, ``test_fix_refuses_to_kill_non_guard``
+    fails because os.kill IS called on the recycled pid (SIGTERM to innocent).
+    After the fix, the gate blocks the kill and the test passes.
+    """
+
+    def setUp(self):
+        self._td = TemporaryDirectory()
+        self.dir = Path(self._td.name)
+        (self.dir / "cozempic_guard_zzz.log").write_text(_respawn_storm(), encoding="utf-8")
+        (self.dir / "cozempic_guard_zzz.pid").write_text("7777", encoding="utf-8")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _run_fix(self, is_guard: bool) -> dict:
+        """Drive cmd_guard_watchdog(fix=True) with identity mock; return kill calls."""
+        from types import SimpleNamespace
+        from cozempic.cli import cmd_guard_watchdog
+        killed: dict = {}
+
+        def fake_kill(pid, sig):
+            killed["pid"], killed["sig"] = pid, sig
+
+        with mock.patch("cozempic.watchdog._pid_alive", return_value=True), \
+             mock.patch("cozempic.guard._is_cozempic_guard_process", return_value=is_guard), \
+             mock.patch("os.kill", fake_kill):
+            args = SimpleNamespace(fix=True, log_dir=str(self.dir), loop_trip=20)
+            cmd_guard_watchdog(args)
+        return killed
+
+    def test_fix_refuses_to_kill_non_guard(self):
+        """RED-at-base: a recycled (non-guard) pid must NOT receive SIGTERM.
+
+        Without guard_confirmed gate, os.kill IS called — this test FAILS at
+        base and PASSES after the fix adds the identity check.
+        """
+        killed = self._run_fix(is_guard=False)
+        self.assertNotIn("pid", killed,
+                         "os.kill was called on a recycled non-guard pid — "
+                         "confused-deputy bug: the identity gate is missing")
+
+    def test_fix_kills_confirmed_guard(self):
+        """A pid confirmed as a cozempic guard MUST receive SIGTERM under --fix."""
+        killed = self._run_fix(is_guard=True)
+        self.assertEqual(killed.get("pid"), 7777)
+        self.assertEqual(killed.get("sig"), signal.SIGTERM)
+
+
 if __name__ == "__main__":
     unittest.main()
