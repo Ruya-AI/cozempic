@@ -55,7 +55,17 @@ STORM_TRIP = 5
 # The guard's back-off cap (HARD_LOOP_BACKOFF_CAP), recorded for diagnostics.
 BACKOFF_CAP_S = 300
 
-_PRUNED_RE = re.compile(r"Pruned:\s+([0-9.]+|[0-9,]+)\s+tokens freed\s+\(([0-9.]+)%\)", re.IGNORECASE)
+# The token-count group must tolerate the K/M/G suffix and comma grouping that
+# guard._fmt_prune_result emits ("210.0K tokens freed", "1.2M tokens freed") for
+# any prune >= 1000 tokens — WITHOUT this, every productive prune line is
+# unparsed, so the futile-dominance ratio skews to ~1.0 and the watchdog
+# FALSE-FLAGS a healthy daemon as looping (and --fix would SIGTERM it). Only the
+# percent group (group 2) is consumed downstream, so the count suffix only needs
+# to be matched, not numerically parsed.
+_PRUNED_RE = re.compile(
+    r"Pruned:\s+[0-9][0-9,]*(?:\.[0-9]+)?[KMG]?\s+tokens freed\s+\(([0-9.]+)%\)",
+    re.IGNORECASE,
+)
 _BACKOFF_RE = re.compile(r"back-off \(next sleep:\s*(\d+)s", re.IGNORECASE)
 _DAEMON_START_RE = re.compile(r"Guard daemon started", re.IGNORECASE)
 # Circuit-breaker / daemon-exit markers (recorded for diagnostics — NOT treated
@@ -98,7 +108,7 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     for m in _PRUNED_RE.finditer(text):
         rep.total_prune_cycles += 1
         try:
-            pct = float(m.group(2))
+            pct = float(m.group(1))
         except (TypeError, ValueError):
             continue
         rep.recent_pcts.append(pct)
