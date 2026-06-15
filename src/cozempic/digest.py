@@ -21,6 +21,7 @@ from typing import Literal
 
 from ._validation import parse_env_bool
 from .helpers import get_content_blocks, get_msg_type, text_of
+from .tokens import _is_sidechain
 from .types import Message
 
 # ---------------------------------------------------------------------------
@@ -426,6 +427,14 @@ def extract_corrections(
 
     prev_assistant_text = ""
     for pos, (idx, msg, _) in enumerate(messages):
+        # Skip sub-agent (sidechain) turns entirely — they are scaffolding/tool
+        # prompts, not the human correcting Claude. Mining them is an L6
+        # injection: untrusted sub-agent content becomes a learned behavioral rule.
+        # Also skip their assistant text from prev_assistant_text so sidechain
+        # context never bleeds into the `before` field of a following main turn.
+        if _is_sidechain(msg):
+            continue
+
         if pos < since_turn:
             # Track assistant text even before our window
             if get_msg_type(msg) == "assistant":
