@@ -503,10 +503,12 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
         print(f"\n  [{_now()}] Signal {signum} received — final checkpoint...")
         try:
             checkpoint_team(session_path=session_path, quiet=False)
+        except Exception:
+            pass  # best-effort: corrupt TeamState must not block cleanup or clean exit
         finally:
-            # Cleanup must run even if checkpoint_team raises (e.g. corrupt
-            # TeamState) — a leaked pidfile or armed sentinel causes a false
-            # SIGTERM on the next session or an unwarned reload.
+            # Cleanup runs whether checkpoint succeeded or raised.
+            # A leaked pidfile or armed sentinel causes a false SIGTERM on
+            # the next session or an unwarned reload.
             if overflow_watcher:
                 overflow_watcher.stop()
             _safe_unlink_session_pidfile(session_id)

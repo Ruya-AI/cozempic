@@ -298,28 +298,30 @@ class TestRecordActiveTranscriptRetainsLivePids(unittest.TestCase):
 # ─────────── GC-1 MED: checkpoint_team raising must not block cleanup ─────────
 
 class TestSigtermHandlerCleanupSurvivesCheckpointRaise(unittest.TestCase):
-    """If checkpoint_team raises, _safe_unlink and clear_armed must still run.
+    """If checkpoint_team raises, cleanup must still run AND handler must exit cleanly.
 
-    GC-1 MED: the handler calls checkpoint_team THEN cleanup. If checkpoint_team
-    raises (e.g. serialization error on a corrupt TeamState), the cleanup is
-    skipped — pidfile and armed-sentinel leak.
-
-    Fix: wrap checkpoint_team in try/finally so cleanup always runs.
+    GC-1: the handler must swallow checkpoint exceptions (best-effort) so that
+    the finally-cleanup + sys.exit(0) always execute. With try/finally-only, a
+    checkpoint exception propagates past sys.exit(0) → SIGTERM handler exits
+    via an escaped traceback (not exit-0). The fix adds except Exception: pass
+    between try and finally.
     """
 
-    def test_cleanup_runs_even_if_checkpoint_raises(self):
-        """_safe_unlink_session_pidfile and clear_armed must be called even when
-        checkpoint_team raises.
+    def test_cleanup_runs_and_handler_exits_cleanly_if_checkpoint_raises(self):
+        """checkpoint_team raises → cleanup runs → handler raises SystemExit(0).
 
-        RED at base: the handler is a straight sequence — checkpoint_team()
-        raises → execution stops → unlink/clear never reached.
-        GREEN after fix: checkpoint_team in try/finally block.
+        RED at current HEAD: try/finally-only propagates RuntimeError — the
+        handler never reaches sys.exit(0), so the test catches RuntimeError
+        instead of SystemExit and the tightened assertion fails.
+        GREEN after fix: except Exception swallows checkpoint error → finally
+        cleanup runs → sys.exit(0) → only SystemExit escapes.
         """
         from cozempic import guard
 
         unlinked = []
         cleared = []
         sid = "deadbeef-0000-0000-0000-000000000000"
+        raised = []
 
         with (
             patch.object(guard, "checkpoint_team", side_effect=RuntimeError("boom")),
@@ -335,16 +337,20 @@ class TestSigtermHandlerCleanupSurvivesCheckpointRaise(unittest.TestCase):
             )
             try:
                 handler(signal.SIGTERM, None)
-            except SystemExit:
-                pass
+            except SystemExit as exc:
+                raised.append(("SystemExit", exc.code))
             except RuntimeError:
-                # If the fix isn't in place, RuntimeError propagates out of the handler.
-                pass
+                raised.append(("RuntimeError", None))
 
+        # Cleanup must have run.
         self.assertIn(sid, unlinked,
                       "_safe_unlink_session_pidfile not called when checkpoint_team raised")
         self.assertIn(sid, cleared,
                       "clear_armed not called when checkpoint_team raised")
+        # Handler must exit cleanly via sys.exit(0), not propagate RuntimeError.
+        self.assertEqual(raised, [("SystemExit", 0)],
+                         "Handler must raise SystemExit(0) — not propagate RuntimeError — "
+                         "when checkpoint_team fails")
 
 
 if __name__ == "__main__":
