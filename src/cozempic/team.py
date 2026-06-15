@@ -855,11 +855,16 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     #     Fail-safe: a missed completion → teammate stays "running" → gate over-defers
     #     (recoverable), never under-blocks (SIGKILL).
     #
-    #   idle_notification — ANY STRING message.content OR queue-operation.
-    #     Safe because the structural <teammate-message teammate_id="X"> wrapper is
-    #     required AND the teammate must already be in seen_teammates.  A user typing
-    #     this wrapper for an unspawned teammate is a no-op (resolved not in
-    #     seen_teammates → continue).
+    #   idle_notification — STRING message.content OR queue-operation, but ONLY from
+    #     genuine harness carriers (top-level teamName field required — H-1 fix).
+    #     Reason: a user can type <teammate-message teammate_id="X">{"type":"idle_
+    #     notification",...}</teammate-message> in plain content.  Without the teamName
+    #     gate, the idle-notif scan would transition the teammate to "idle" → gate
+    #     returns True → SIGKILL live work (phantom-IDLE, unrecoverable).
+    #     The harness always sets teamName on genuine teammate-message carriers
+    #     (confirmed: 220/220 genuine carriers have teamName; 0/220 user-typed do).
+    #     Fail-safe: a genuine idle-notif on a message without teamName is MISSED →
+    #     teammate stays "running" → gate over-defers (recoverable), never under-blocks.
     for line_idx, msg, byte_size in messages:
         if msg.get("type") == "queue-operation":
             _task_notif_content = msg.get("content", "")
@@ -869,7 +874,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
             raw = inner.get("content", "")
             # task-notifications: queue-operation only (see comment above — C-2).
             _task_notif_content = ""
-            # idle-notifications: any string content (structural wrapper guards it).
+            # idle-notifications: string content, but only when teamName present (H-1).
             _idle_notif_content = raw if isinstance(raw, str) else ""
 
         # ── task-notifications ────────────────────────────────────────────
@@ -924,6 +929,12 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # Fail-safe: a teammate-message beyond the cap is MISSED → teammate
         # stays "running" → safe_to_reload/agents_active keep it protected →
         # gate OVER-DEFERS (recoverable), never UNDER-BLOCKS (SIGKILL).
+        #
+        # H-1: require top-level teamName to authenticate the carrier.  Genuine
+        # harness idle-notification messages always carry teamName; user-typed
+        # messages never do.  A missing teamName → skip (over-defer, recoverable).
+        if not msg.get("teamName"):
+            continue
         for tm_match in _TEAMMATE_MSG_RE.finditer(_idle_notif_content[:_RELOAD_GATE_SCAN_CAP]):
             tm_id = tm_match.group(1).strip()
             tm_body = tm_match.group(2)

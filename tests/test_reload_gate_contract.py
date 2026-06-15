@@ -182,6 +182,16 @@ def _user(text):
     return {"type": "user", "message": {"role": "user", "content": text}}
 
 
+def _harness_user(text, team_name="squad"):
+    """Genuine harness teammate-message carrier — top-level teamName (H-1 gate).
+
+    The H-1 gate requires teamName on the message dict for idle-notification
+    scans.  Use this helper whenever the test represents a real harness delivery.
+    """
+    return {"type": "user", "teamName": team_name,
+            "message": {"role": "user", "content": text}}
+
+
 class TestReloadGateHardening1824(unittest.TestCase):
     """1.8.24 hardening on top of #117 — the over-block reducers + fail-safes that
     keep FINISHED/teamless sessions reloading while LIVE/ambiguous ones block.
@@ -258,7 +268,7 @@ class TestReloadGateHardening1824(unittest.TestCase):
         safe, _ = self._gate([
             _tu("u1", "Agent", {"description": "spin"}),
             _tr("u1", "Spawned successfully. agent_id: alice@squad"),
-            _user('<teammate-message teammate_id="alice@squad">{"type":"idle_notification"}</teammate-message>'),
+            _harness_user('<teammate-message teammate_id="alice@squad">{"type":"idle_notification"}</teammate-message>'),
             _idle_lead()])
         self.assertTrue(safe, "a finished (idle) team must reload, not over-block")
 

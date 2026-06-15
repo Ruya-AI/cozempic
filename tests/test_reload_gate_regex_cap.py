@@ -147,8 +147,23 @@ def _tr(idx: int, tool_use_id: str, text: str) -> tuple:
 
 
 def _uc(idx: int, text: str) -> tuple:
-    """3-tuple for a user message with plain string content."""
+    """3-tuple for a user message with plain string content (no teamName).
+
+    Simulates user-typed content. For genuine harness idle-notification carriers,
+    use _huc() which adds the top-level teamName required by the H-1 gate.
+    """
     d = {"message": {"role": "user", "content": text}}
+    return (idx, d, len(text))
+
+
+def _huc(idx: int, text: str, team_name: str = "myteam") -> tuple:
+    """3-tuple for a genuine harness idle-notification carrier (top-level teamName).
+
+    H-1 gate: the idle-notif scan in extract_team_state skips messages without
+    a top-level teamName field.  Use this helper when the test represents a real
+    harness delivery (where the harness always sets teamName on the carrier).
+    """
+    d = {"teamName": team_name, "message": {"role": "user", "content": text}}
     return (idx, d, len(text))
 
 
@@ -350,8 +365,9 @@ class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
             '{"type":"idle_notification","from":"worker"}'
             '</teammate-message>'
         )
-        # Well within the cap — no padding.
-        msgs = self._team_spawn_msgs() + [_uc(4, idle_notif)]
+        # Well within the cap — no padding.  Use _huc (genuine harness carrier)
+        # so the H-1 teamName gate passes and the idle-notif scan runs.
+        msgs = self._team_spawn_msgs() + [_huc(4, idle_notif)]
         state = self._extract(msgs)
         teammates = state.teammates if state else []
         worker = next(
