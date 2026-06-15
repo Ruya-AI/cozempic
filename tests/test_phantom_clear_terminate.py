@@ -398,6 +398,91 @@ class TestPhantomTerminate(unittest.TestCase):
         )
 
 
+# ─────────── Queue-op robustness (code-review B + D + efficiency) ────────────
+
+
+class TestQueueOpRobustness(unittest.TestCase):
+    """Code-review findings on the C-2 queue-op content path.
+
+      B (MED crash) — queue-op with content=null → extract_team_state TypeError.
+        The harness can deliver {"type":"queue-operation","content":null}
+        (JSON null → Python None).  Before fix: `content[:CAP]` → TypeError.
+        After fix: isinstance guard coerces None → "" (safe no-op, over-defers).
+
+      D (dead alias) — _idle_notif_content = _task_notif_content on queue-op
+        path is a latent hazard: queue-ops never carry teamName so the H-1 gate
+        will always skip them; but if the guard is ever loosened the alias would
+        silently activate the idle-notif scan on queue-op content.
+        After fix: _idle_notif_content = "" on the queue-op branch.
+
+      Efficiency — finditer on empty string is wasted work for every non-queue-op
+        message (the normal case).  After fix: guarded with if _task_notif_content.
+    """
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cozempic_qop_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _state(self, rows: list):
+        p = _write(self.tmp, rows)
+        return extract_team_state(load_messages(p))
+
+    def _gate(self, rows: list):
+        p = _write(self.tmp, rows)
+        m = load_messages(p)
+        return safe_to_reload(extract_team_state(m), m, p)
+
+    def _live_team_base(self) -> list:
+        return [
+            _tu("tc-1", "TeamCreate",
+                {"team_name": "myteam",
+                 "teammates": [{"name": "alice", "agentId": "alice@myteam"}]}),
+            _tr("tc-1", "Team 'myteam' created."),
+            _tu("sm-1", "SendMessage", {"to": "alice", "message": "start"}),
+            _tr("sm-1", "delivered"),
+        ]
+
+    def test_queue_op_null_content_does_not_crash(self):
+        """B RED: queue-op with content=null must not raise TypeError.
+
+        A harness-delivered queue-operation can carry JSON null as its content
+        field (edge case: failed task with no result body).  Before fix:
+        _task_notif_content = None → None[:CAP] → TypeError in the finditer
+        call.  After fix: isinstance(content, str) guard coerces None → "".
+        """
+        rows = self._live_team_base() + [
+            # JSON null content — will be deserialised as Python None
+            {"type": "queue-operation", "content": None},
+        ]
+        # Must not raise — the TypeError was the bug.
+        try:
+            safe, _ = self._gate(rows)
+        except TypeError as exc:
+            self.fail(
+                "extract_team_state raised TypeError on queue-op content=None "
+                "(B: null-content crash). Error: %s" % exc
+            )
+
+    def test_queue_op_null_content_does_not_terminate_teammate(self):
+        """B regression guard: null-content queue-op must not phantom-terminate.
+
+        After the null is coerced to "", no task-notification block is found,
+        so the teammate stays 'running' → gate defers (over-defers, recoverable).
+        """
+        rows = self._live_team_base() + [
+            {"type": "queue-operation", "content": None},
+        ]
+        safe, reason = self._gate(rows)
+        self.assertFalse(
+            safe,
+            "A null-content queue-op must not phantom-terminate the teammate. "
+            "Got safe=%r reason=%r" % (safe, reason),
+        )
+
+
 # ─────────────── C-3 regression guards (existing blanket-skip stays) ──────────
 # C-3 position-aware fix is DEFERRED (see module docstring).  The regression
 # guards below pin the EXISTING correct behavior that must not break.
