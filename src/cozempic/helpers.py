@@ -34,7 +34,7 @@ def atomic_write_text(target: _Path, data: str, encoding: str = "utf-8") -> None
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = _tempfile.mkstemp(
-        prefix=".tmp.", suffix=target.name, dir=str(target.parent)
+        prefix=".tmp." + target.name + ".", suffix=".partial", dir=str(target.parent)
     )
     tmp_path = _Path(tmp_name)
     try:

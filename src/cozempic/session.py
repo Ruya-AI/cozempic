@@ -864,7 +864,7 @@ def save_messages(
     import tempfile as _tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = _tempfile.mkstemp(
-        prefix=".tmp.", suffix=path.name, dir=str(path.parent)
+        prefix=".tmp." + path.name + ".", suffix=".partial", dir=str(path.parent)
     )
     tmp_path = Path(tmp_name)
     try:
