@@ -72,6 +72,7 @@ def default_token_thresholds_4tier(context_window: int = DEFAULT_CONTEXT_WINDOW)
 # Users on Pro (200K) can override with COZEMPIC_CONTEXT_WINDOW=200000.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Current models — default 1M (standard for Claude Code Max plans)
+    "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
     "claude-opus-4-5": 1_000_000,
@@ -161,11 +162,16 @@ def detect_context_window(messages: list[Message]) -> int:
     2. Model detection from session data (exact match, then prefix match)
     3. DEFAULT_CONTEXT_WINDOW (1M)
 
-    Handles model ID variants:
-    - "claude-opus-4-6[1m]" → 1M (exact match)
-    - "claude-opus-4-6-20260301[1m]" → 1M (prefix match with bracket-aware logic)
-    - "claude-opus-4-6" → 200K (exact match)
-    - "claude-opus-4-6-20260301" → 200K (prefix match)
+    Match order:
+    - "claude-opus-4-6" → 1M (exact match)
+    - "claude-opus-4-6-20260301" → 1M (prefix match for versioned IDs)
+    - "claude-haiku-9" (unknown Haiku) → 200K (family fallback, not the 1M default)
+    - "claude-future-99" (unknown family) → 1M (DEFAULT)
+
+    Claude Code writes the base model ID with no "[1m]" suffix (see the
+    MODEL_CONTEXT_WINDOWS note above), so a bracketed ID — should one ever appear
+    — is resolved by the same prefix logic
+    ("claude-opus-4-6[1m]".startswith("claude-opus-4-6")).
     """
     override = get_context_window_override()
     if override:
@@ -173,35 +179,17 @@ def detect_context_window(messages: list[Message]) -> int:
 
     model = detect_model(messages)
     if model:
-        # Exact match first
+        # Exact match, then prefix match for versioned IDs.
         if model in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[model]
-
-        # Prefix match for versioned model IDs.
-        # For bracket-suffixed models (e.g. "claude-opus-4-6-20260301[1m]"),
-        # check [1m]-suffixed keys first (they appear first in the dict),
-        # then standard keys. The prefix "claude-opus-4-6[1m]" won't match
-        # "claude-opus-4-6-20260301[1m]" via startswith, so we also try
-        # stripping the bracket suffix and matching the base, then re-applying.
-        bracket_suffix = ""
-        base_model = model
-        bracket_pos = model.find("[")
-        if bracket_pos != -1:
-            bracket_suffix = model[bracket_pos:]  # e.g. "[1m]"
-            base_model = model[:bracket_pos]      # e.g. "claude-opus-4-6-20260301"
-
-        # Try prefix match: base_model starts with a known key's base
         for prefix, window in MODEL_CONTEXT_WINDOWS.items():
-            prefix_base = prefix.split("[")[0] if "[" in prefix else prefix
-            prefix_bracket = prefix[len(prefix_base):] if "[" in prefix else ""
-            if base_model.startswith(prefix_base) and bracket_suffix == prefix_bracket:
+            if model.startswith(prefix):
                 return window
-
-        # Fallback: try without bracket suffix (model may not have one)
-        if not bracket_suffix:
-            for prefix, window in MODEL_CONTEXT_WINDOWS.items():
-                if "[" not in prefix and model.startswith(prefix):
-                    return window
+        # Family fallback for an unknown version: every known Haiku generation is
+        # 200K, so an unrecognised Haiku must NOT fall through to the 1M default
+        # (a 5x over-estimate that mis-times every guard tier on a real session).
+        if "haiku" in model.lower():
+            return 200_000
 
     return DEFAULT_CONTEXT_WINDOW
 
