@@ -170,7 +170,7 @@ def _hard_prune_counts_as_futile(result: dict) -> bool:
 
 from ._validation import ConfigError
 from .executor import run_prescription
-from .helpers import is_ssh_session, shell_quote, tag_pattern_matches, strip_pattern_tags
+from .helpers import _pid_is_alive as _pid_is_alive_canonical, is_ssh_session, shell_quote, tag_pattern_matches, strip_pattern_tags
 from .registry import PRESCRIPTIONS
 import cozempic.strategies  # noqa: F401 — register strategies so guard_prune_cycle can actually prune (#15)
 from .session import (
@@ -3633,8 +3633,7 @@ def _pid_is_alive(pid: int) -> bool:
     Canonical implementation lives in helpers._pid_is_alive (GC-3);
     this is the same function re-exported under the guard-internal name.
     """
-    from .helpers import _pid_is_alive as _canonical
-    return _canonical(pid)
+    return _pid_is_alive_canonical(pid)
 
 
 def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:

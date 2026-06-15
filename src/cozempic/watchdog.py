@@ -21,7 +21,6 @@ default and only terminates a confirmed-looping daemon under an explicit ``--fix
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path

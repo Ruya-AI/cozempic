@@ -25,6 +25,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from cozempic.helpers import _pid_is_alive as _canonical_pid_is_alive
+
 
 # ─────────────────────────── GC-1: SIGTERM handler ───────────────────────────
 
@@ -130,87 +132,64 @@ class TestPidIsAliveMigratedToHelpers(unittest.TestCase):
 
     def test_pid_is_alive_importable_from_helpers(self):
         """_pid_is_alive must be importable from cozempic.helpers."""
-        try:
-            from cozempic.helpers import _pid_is_alive
-        except ImportError:
-            self.fail("_pid_is_alive not found in cozempic.helpers — GC-3 not applied (RED)")
-        self.assertTrue(callable(_pid_is_alive))
+        self.assertTrue(callable(_canonical_pid_is_alive))
 
     def test_session_imports_pid_is_alive_from_helpers(self):
-        """cozempic.session._pid_alive must delegate to helpers._pid_is_alive (or be the same function)."""
-        from cozempic.helpers import _pid_is_alive as canonical
+        """cozempic.session._pid_alive must be the canonical helpers._pid_is_alive."""
         from cozempic import session
-
-        # After GC-3: session._pid_alive IS helpers._pid_is_alive
-        # (either via `from .helpers import _pid_is_alive as _pid_alive` or the function object matches)
-        self.assertIs(getattr(session, "_pid_alive", None), canonical,
+        self.assertIs(getattr(session, "_pid_alive", None), _canonical_pid_is_alive,
                       "session._pid_alive must be the canonical helpers._pid_is_alive after GC-3")
 
     def test_watchdog_imports_pid_is_alive_from_helpers(self):
-        """cozempic.watchdog._pid_alive must delegate to helpers._pid_is_alive."""
-        from cozempic.helpers import _pid_is_alive as canonical
+        """cozempic.watchdog._pid_alive must be the canonical helpers._pid_is_alive."""
         from cozempic import watchdog
-
-        self.assertIs(getattr(watchdog, "_pid_alive", None), canonical,
+        self.assertIs(getattr(watchdog, "_pid_alive", None), _canonical_pid_is_alive,
                       "watchdog._pid_alive must be the canonical helpers._pid_is_alive after GC-3")
 
 
 class TestPidIsAliveCanonicalBehavior(unittest.TestCase):
     """The canonical _pid_is_alive must match guard.py's behavior on all error paths."""
 
-    def _import_canonical(self):
-        from cozempic.helpers import _pid_is_alive
-        return _pid_is_alive
-
     def test_dead_pid_returns_false(self):
-        fn = self._import_canonical()
         with patch("os.kill", side_effect=ProcessLookupError):
-            self.assertFalse(fn(99999))
+            self.assertFalse(_canonical_pid_is_alive(99999))
 
     def test_permission_error_returns_true(self):
         """PermissionError: process exists but owned by another user — alive."""
-        fn = self._import_canonical()
         with patch("os.kill", side_effect=PermissionError):
-            self.assertTrue(fn(99999))
+            self.assertTrue(_canonical_pid_is_alive(99999))
 
     def test_overflow_error_returns_false(self):
         """Malformed huge PID → dead."""
-        fn = self._import_canonical()
         with patch("os.kill", side_effect=OverflowError):
-            self.assertFalse(fn(99999))
+            self.assertFalse(_canonical_pid_is_alive(99999))
 
     def test_posix_unknown_oserror_returns_true(self):
         """POSIX unknown OSError → fail-open (assume alive). This is the behavioral
         fix vs session.py's old _pid_alive which returned False here."""
-        import os as _os
-        fn = self._import_canonical()
         with (
             patch("os.kill", side_effect=OSError("unexpected")),
             patch("os.name", "posix"),
         ):
             # canonical: return os.name != "nt" → True on POSIX
-            self.assertTrue(fn(99999))
+            self.assertTrue(_canonical_pid_is_alive(99999))
 
     def test_windows_oserror_returns_false(self):
         """Windows OSError on os.kill(pid, 0) → dead."""
-        fn = self._import_canonical()
         with (
             patch("os.kill", side_effect=OSError("WinError 87")),
             patch("os.name", "nt"),
         ):
-            self.assertFalse(fn(99999))
+            self.assertFalse(_canonical_pid_is_alive(99999))
 
     def test_zero_pid_returns_false(self):
-        fn = self._import_canonical()
-        self.assertFalse(fn(0))
+        self.assertFalse(_canonical_pid_is_alive(0))
 
     def test_negative_pid_returns_false(self):
-        fn = self._import_canonical()
-        self.assertFalse(fn(-1))
+        self.assertFalse(_canonical_pid_is_alive(-1))
 
     def test_non_int_pid_returns_false(self):
-        fn = self._import_canonical()
-        self.assertFalse(fn("notanint"))  # type: ignore[arg-type]
+        self.assertFalse(_canonical_pid_is_alive("notanint"))  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
