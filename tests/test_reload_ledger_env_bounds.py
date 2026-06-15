@@ -1,4 +1,4 @@
-"""Tests for reload-storm guard env-var upper clamps.
+"""Tests for reload-storm guard env-var upper bounds.
 
 The reload-rate ledger uses two env-overridable knobs:
 
@@ -11,10 +11,16 @@ the ledger window effectively infinite, so the storm guard NEVER fires.
 This silently disables the protection for the session's lifetime.
 
 RED-at-base proof strategy:
-  - Set env var to a value far above the expected ceiling.
+  - Set env var to a value above the ceiling.
   - Call the ledger accessor function.
-  - Assert the returned value is <= the ceiling.
+  - Assert the returned value equals the safe default (not a huge int).
   - These assertions FAIL at base (raw huge int passes through), PASS after fix.
+
+Rejection semantics (not clamp semantics):
+  Out-of-range values are REJECTED → the safe default is returned (not
+  clamped to the ceiling). This is the conservative choice for a
+  storm-guard knob: an absurd value falls to the strict default, not the
+  lenient ceiling.
 
 Regression guard:
   - Normal in-range values must not be altered by the fix.
@@ -29,7 +35,11 @@ from unittest.mock import patch
 
 
 class TestReloadLedgerWindowSEnvBounds(unittest.TestCase):
-    """_reload_ledger_window_s() must clamp to <= 86400 s (1 day)."""
+    """_reload_ledger_window_s() rejects out-of-range values → safe default 600.
+
+    Out-of-range env values are REJECTED → the safe default (not clamped to
+    the bound) — the conservative choice for a storm-guard knob.
+    """
 
     def _call(self, env_val=None):
         # Import inside test to get the live (post-patch) definition.
@@ -43,37 +53,37 @@ class TestReloadLedgerWindowSEnvBounds(unittest.TestCase):
                 os.environ.pop("COZEMPIC_RELOAD_WINDOW_S", None)
             return _reload_ledger_window_s()
 
-    # ── RED-at-base: huge value must not pass through ─────────────────────────
+    # ── RED-at-base: out-of-range values must be rejected to default ──────────
 
-    def test_huge_window_env_is_clamped(self):
+    def test_huge_window_env_rejected_falls_back_to_default(self):
         """A 23-digit env value silently disables the storm guard at base.
 
         RED at base: max(60, int('10000000000000000000000')) == 10^22
         (>> 86400 s / 1 day), so the ledger never expires and the guard
         never fires.
-        GREEN after fix: parse_env_positive_int with maximum=86400 warns
-        and returns None → fallback 600.
+        GREEN after fix: parse_env_positive_int with maximum=86400 rejects
+        the value, returns None → fallback default 600.
         """
         result = self._call("10000000000000000000000")
-        self.assertLessEqual(
+        self.assertEqual(
             result,
-            86400,
+            600,
             f"_reload_ledger_window_s returned {result} for a huge env value "
-            f"— storm guard is silently disabled",
+            f"— expected rejection to safe default 600",
         )
 
-    def test_value_above_ceiling_is_clamped(self):
-        """86401 is just one second above the documented 86400 ceiling.
+    def test_window_above_ceiling_rejected_to_default(self):
+        """86401 is just one second above the 86400 ceiling.
 
-        RED at base: max(60, 86401) == 86401 (passes through unclamped).
-        GREEN after fix: warns and returns fallback 600.
+        RED at base: max(60, 86401) == 86401 (passes through unchecked).
+        GREEN after fix: rejected → fallback default 600.
         """
         result = self._call("86401")
-        self.assertLessEqual(
+        self.assertEqual(
             result,
-            86400,
+            600,
             f"_reload_ledger_window_s returned {result} for env=86401 "
-            f"— must reject values above the 86400 ceiling",
+            f"— expected rejection to safe default 600",
         )
 
     # ── Regression guards (must pass at base AND after fix) ──────────────────
@@ -83,11 +93,11 @@ class TestReloadLedgerWindowSEnvBounds(unittest.TestCase):
         self.assertEqual(self._call(), 600)
 
     def test_valid_value_within_bounds(self):
-        """A value well within [60, 86400] is returned as-is (clamped to floor)."""
+        """A value well within [60, 86400] is returned as-is."""
         self.assertEqual(self._call("1800"), 1800)
 
     def test_floor_clamp_at_60(self):
-        """Values below the floor 60 are raised to 60."""
+        """Values below the floor 60 are raised to 60 (genuine clamp, not reject)."""
         result = self._call("30")
         self.assertGreaterEqual(result, 60)
 
@@ -102,7 +112,11 @@ class TestReloadLedgerWindowSEnvBounds(unittest.TestCase):
 
 
 class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
-    """_reload_ledger_max() must clamp to <= 100 reloads per window."""
+    """_reload_ledger_max() rejects out-of-range values → safe default 3.
+
+    Out-of-range env values are REJECTED → the safe default (not clamped to
+    the bound) — the conservative choice for a storm-guard knob.
+    """
 
     def _call(self, env_val=None):
         from cozempic.guard import _reload_ledger_max
@@ -115,35 +129,35 @@ class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
                 os.environ.pop("COZEMPIC_RELOAD_MAX", None)
             return _reload_ledger_max()
 
-    # ── RED-at-base: huge value must not pass through ─────────────────────────
+    # ── RED-at-base: out-of-range values must be rejected to default ──────────
 
-    def test_huge_max_env_is_clamped(self):
+    def test_huge_max_env_rejected_falls_back_to_default(self):
         """999999999 reloads allowed → storm guard never trips.
 
         RED at base: max(1, int('999999999')) == 999999999 (guard never fires).
-        GREEN after fix: parse_env_positive_int with maximum=100 warns and
-        returns None → fallback 3.
+        GREEN after fix: parse_env_positive_int with maximum=100 rejects
+        the value, returns None → fallback default 3.
         """
         result = self._call("999999999")
-        self.assertLessEqual(
+        self.assertEqual(
             result,
-            100,
+            3,
             f"_reload_ledger_max returned {result} for a huge env value "
-            f"— storm guard is silently disabled",
+            f"— expected rejection to safe default 3",
         )
 
-    def test_value_above_ceiling_is_clamped(self):
-        """101 is just one above the documented 100 ceiling.
+    def test_max_above_ceiling_rejected_to_default(self):
+        """101 is just one above the 100 ceiling.
 
-        RED at base: max(1, 101) == 101 (passes through unclamped).
-        GREEN after fix: warns and returns fallback 3.
+        RED at base: max(1, 101) == 101 (passes through unchecked).
+        GREEN after fix: rejected → fallback default 3.
         """
         result = self._call("101")
-        self.assertLessEqual(
+        self.assertEqual(
             result,
-            100,
+            3,
             f"_reload_ledger_max returned {result} for env=101 "
-            f"— must reject values above the 100 ceiling",
+            f"— expected rejection to safe default 3",
         )
 
     # ── Regression guards (must pass at base AND after fix) ──────────────────
@@ -157,7 +171,7 @@ class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
         self.assertEqual(self._call("10"), 10)
 
     def test_floor_clamp_at_1(self):
-        """Values below the floor 1 are raised to 1."""
+        """Values below the floor 1 are raised to 1 (genuine clamp, not reject)."""
         result = self._call("0")
         self.assertGreaterEqual(result, 1)
 
