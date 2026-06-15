@@ -142,6 +142,7 @@ class GuardLoopHit:
     pid: int | None
     pid_alive: bool
     report: LoopReport
+    guard_confirmed: bool = False  # True iff pid_alive AND process is a cozempic guard
 
 
 def _read_pid(pid_file: Path) -> int | None:
@@ -194,11 +195,21 @@ def scan_guard_logs(
             continue
         pid_file = log_file.with_suffix(".pid")
         pid = _read_pid(pid_file) if pid_file.exists() else None
+        alive = _pid_alive(pid)
+        if alive and pid is not None:
+            # Lazy import to avoid a heavy module-level import of guard.py (large,
+            # side-effecty) and to prevent a circular import (guard imports watchdog
+            # indirectly through its own helpers).
+            from .guard import _is_cozempic_guard_process
+            confirmed = _is_cozempic_guard_process(pid)
+        else:
+            confirmed = False
         hits.append(GuardLoopHit(
             log_file=log_file,
             pid_file=pid_file if pid_file.exists() else None,
             pid=pid,
-            pid_alive=_pid_alive(pid),
+            pid_alive=alive,
             report=rep,
+            guard_confirmed=confirmed,
         ))
     return hits

@@ -209,10 +209,12 @@ class TestCliCommand(unittest.TestCase):
         self.assertEqual(cm.exception.code, 3)
 
     def test_fix_sends_sigterm(self):
+        """--fix SIGTERMs a pid confirmed as a cozempic guard (guard_confirmed=True)."""
         killed = {}
         def fake_kill(pid, sig):
             killed["pid"], killed["sig"] = pid, sig
         with mock.patch("cozempic.watchdog._pid_alive", lambda pid: True), \
+             mock.patch("cozempic.guard._is_cozempic_guard_process", return_value=True), \
              mock.patch("os.kill", fake_kill):
             self._run(fix=True)
         self.assertEqual(killed.get("pid"), 4242)
@@ -254,7 +256,11 @@ class TestFixIdentityGate(unittest.TestCase):
              mock.patch("cozempic.guard._is_cozempic_guard_process", return_value=is_guard), \
              mock.patch("os.kill", fake_kill):
             args = SimpleNamespace(fix=True, log_dir=str(self.dir), loop_trip=20)
-            cmd_guard_watchdog(args)
+            try:
+                cmd_guard_watchdog(args)
+            except SystemExit:
+                # sys.exit(3) when live loop not arrested (non-guard case) — expected
+                pass
         return killed
 
     def test_fix_refuses_to_kill_non_guard(self):
