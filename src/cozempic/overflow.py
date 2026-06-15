@@ -156,10 +156,36 @@ class OverflowRecovery:
         except OSError:
             return False
 
-        # Check last 20 lines against any known overflow marker.
+        # A marker counts ONLY in an actual API-ERROR line — NOT a user turn that
+        # merely discusses context limits ("my prompt is too long..."). The bare
+        # substring scan false-fired on normal user text and triggered an
+        # unsolicited kill+resume (mission-critical C6). Structural rule: parse the
+        # line and require either isApiErrorMessage:true, or a non-user message
+        # whose serialized content carries the marker.
+        import json as _json
         lines = tail.strip().split("\n")
         for line in lines[-20:]:
-            if any(marker in line for marker in OVERFLOW_MARKERS):
+            line = line.strip()
+            if not line or not any(m in line for m in OVERFLOW_MARKERS):
+                continue
+            try:
+                obj = _json.loads(line)
+            except (ValueError, _json.JSONDecodeError):
+                # Unparseable tail line carrying a marker — could be a raw TUI
+                # error echo; treat as overflow (conservative, pre-existing form).
+                return True
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("isApiErrorMessage") is True:
+                return True
+            # A user turn is the human typing — never an overflow signal.
+            mtype = obj.get("type")
+            role = obj.get("message", {}).get("role") if isinstance(obj.get("message"), dict) else None
+            if mtype == "user" or role == "user":
+                continue
+            # Non-user line (assistant/system/error) carrying the marker in its
+            # content => genuine overflow.
+            if any(m in _json.dumps(obj.get("message", obj)) for m in OVERFLOW_MARKERS):
                 return True
         return False
 
@@ -294,6 +320,26 @@ class OverflowRecovery:
                 f"(saved {result['saved_mb']:.1f}MB)",
                 file=sys.stderr,
             )
+
+        # 5b. SAFE-POINT GATE before any kill (mission-critical C6): reactive
+        # recovery must NOT terminate a live Claude that has in-flight work
+        # (running subagents / agent team / open tool call) — the prune output is
+        # already saved, so on an unsafe point we defer the kill rather than
+        # destroy in-flight state. Mirrors guard_prune_cycle's safe_to_reload gate,
+        # which the reactive path was missing.
+        try:
+            from .guard import safe_to_reload as _safe_to_reload
+            from .session import load_messages as _load_messages
+            from .team import extract_team_state as _extract_team_state
+            _msgs = _load_messages(self.session_path)
+            _safe, _reason = _safe_to_reload(_extract_team_state(_msgs), _msgs, self.session_path)
+        except Exception:
+            _safe, _reason = True, ""  # gate must never itself block a needed recovery
+        if not _safe:
+            print(f"  [{now}] In-flight work detected ({_reason}) — deferring kill; "
+                  f"prune saved, no resume this cycle.", file=sys.stderr)
+            checkpoint_team(session_path=self.session_path, quiet=True)
+            return
 
         # 6. Terminate Claude + auto-resume
         # Wave 2: acquire single-flight reload lock. If another reload

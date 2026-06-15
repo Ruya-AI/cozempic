@@ -168,6 +168,32 @@ class TestOverflowDetection(unittest.TestCase):
             finally:
                 breaker.reset()
 
+    def test_user_discussing_limits_does_not_false_trigger(self):
+        """Mission-critical C6: a USER turn that merely mentions overflow phrasing
+        must NOT trigger reactive kill+resume — only a real API-error line does."""
+        lines = [json.dumps({"type": "user", "message": {"role": "user",
+                 "content": "my prompt is too long — how do I raise the maximum context length?"}})] * 3
+        self._write_lines(lines)
+        breaker = CircuitBreaker(session_id="t-fp", max_recoveries=3); breaker.reset()
+        try:
+            rec = OverflowRecovery(self.session_path, "t-fp", self.tmpdir, breaker)
+            self.assertFalse(rec.detect_overflow(),
+                             "user text discussing context limits must not trigger overflow")
+        finally:
+            breaker.reset()
+
+    def test_api_error_message_flag_triggers(self):
+        lines = [json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+                 json.dumps({"type": "assistant", "isApiErrorMessage": True,
+                             "message": {"role": "assistant", "content": "Prompt is too long"}})]
+        self._write_lines(lines)
+        breaker = CircuitBreaker(session_id="t-api", max_recoveries=3); breaker.reset()
+        try:
+            rec = OverflowRecovery(self.session_path, "t-api", self.tmpdir, breaker)
+            self.assertTrue(rec.detect_overflow(), "isApiErrorMessage line must trigger")
+        finally:
+            breaker.reset()
+
     def test_no_overflow_in_normal_session(self):
         """Normal session content doesn't trigger detection."""
         lines = [
