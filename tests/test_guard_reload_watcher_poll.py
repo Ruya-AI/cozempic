@@ -145,6 +145,12 @@ class TestWatcherLogsSuccessWhenNewClaudeAppears(unittest.TestCase):
         self.status_path = Path(f"/tmp/cozempic_reload_{self.sid12}.status")
         self.status_path.unlink(missing_ok=True)
         self.addCleanup(self.status_path.unlink, missing_ok=True)
+        # E: register cleanup for guard_log so the file doesn't leak on macOS
+        # (gettempdir() resolves to /var/folders/…, not /tmp).
+        from cozempic.guard import _guard_tmp_root
+        guard_log = _guard_tmp_root() / "cozempic_guard.log"
+        self.guard_log = guard_log
+        self.addCleanup(guard_log.unlink, missing_ok=True)
 
     def test_watcher_logs_success_when_new_claude_appears(self):
         """New claude detected → success logged, no status file."""
@@ -156,10 +162,7 @@ class TestWatcherLogsSuccessWhenNewClaudeAppears(unittest.TestCase):
             )
 
         fake_new_pid = 94466
-        # GC-2: use _guard_tmp_root() instead of hardcoded /tmp to avoid
-        # real-file leaks on macOS where /tmp != tempfile.gettempdir().
-        from cozempic.guard import _guard_tmp_root
-        guard_log = _guard_tmp_root() / "cozempic_guard.log"
+        guard_log = self.guard_log  # set in setUp; addCleanup registered there
 
         scripts_run = []
         # Save the real Popen BEFORE the patch to avoid mock recursion in _fake_popen

@@ -353,5 +353,99 @@ class TestSigtermHandlerCleanupSurvivesCheckpointRaise(unittest.TestCase):
                          "when checkpoint_team fails")
 
 
+# ─────── A: SIGTERM finally — overflow_watcher.stop() raises ────────────────
+
+class TestSigtermHandlerCleanupSurvivesWatcherRaise(unittest.TestCase):
+    """If overflow_watcher.stop() raises inside the finally block, pidfile +
+    armed-sentinel cleanup must STILL run and sys.exit(0) must still fire.
+
+    Without per-step best-effort wrapping a raising stop() short-circuits the
+    finally block → pidfile + sentinel leak → false-SIGTERM on next session.
+    """
+
+    def test_cleanup_runs_and_exits_cleanly_if_overflow_watcher_raises(self):
+        """overflow_watcher.stop() raises → cleanup still runs → SystemExit(0).
+
+        RED at HEAD: the finally block calls stop() first with no try/except,
+        so a raising stop() propagates before _safe_unlink_session_pidfile and
+        clear_armed are reached, and sys.exit(0) is never called.
+        """
+        from cozempic import guard
+
+        unlinked = []
+        cleared = []
+        sid = "cafebabe-0001-0002-0003-000400050006"
+        raised = []
+
+        boom_watcher = MagicMock()
+        boom_watcher.stop.side_effect = RuntimeError("watcher exploded")
+
+        with (
+            patch.object(guard, "checkpoint_team"),
+            patch.object(guard, "_safe_unlink_session_pidfile",
+                         side_effect=lambda s: unlinked.append(s)),
+            patch.object(guard, "clear_armed",
+                         side_effect=lambda s, p: cleared.append(s)),
+        ):
+            handler = guard._make_sigterm_handler(
+                session_id=sid,
+                session_path=Path("/tmp"),
+                overflow_watcher=boom_watcher,
+            )
+            try:
+                handler(signal.SIGTERM, None)
+            except SystemExit as exc:
+                raised.append(("SystemExit", exc.code))
+            except RuntimeError:
+                raised.append(("RuntimeError", None))
+
+        self.assertIn(sid, unlinked,
+                      "_safe_unlink_session_pidfile not called when overflow_watcher.stop() raised")
+        self.assertIn(sid, cleared,
+                      "clear_armed not called when overflow_watcher.stop() raised")
+        self.assertEqual(raised, [("SystemExit", 0)],
+                         "Handler must exit cleanly via SystemExit(0) even when "
+                         "overflow_watcher.stop() raises — not propagate RuntimeError")
+
+
+# ─────── C: _pid_is_alive coercion — OverflowError from int(float) ──────────
+
+class TestPidIsAliveOverflowCoercion(unittest.TestCase):
+    """_pid_is_alive must return False (not raise) for float infinity inputs.
+
+    int(float('inf')) raises OverflowError.  The coercion branch only catches
+    (ValueError, TypeError) — so float('inf') propagates as an uncaught
+    OverflowError instead of returning False cleanly.
+    """
+
+    def test_float_inf_returns_false_not_raises(self):
+        """_pid_is_alive(float('inf')) must return False, not raise OverflowError.
+
+        RED at HEAD: except (ValueError, TypeError) in the coercion branch
+        does not catch OverflowError → OverflowError escapes the function.
+        GREEN after fix: OverflowError added to the coercion except clause.
+        """
+        try:
+            result = _canonical_pid_is_alive(float("inf"))  # type: ignore[arg-type]
+        except OverflowError:
+            self.fail(
+                "_pid_is_alive(float('inf')) raised OverflowError — "
+                "coercion except clause must catch OverflowError (finding C)"
+            )
+        self.assertFalse(result,
+                         "_pid_is_alive(float('inf')) must return False, not True")
+
+    def test_float_neg_inf_returns_false_not_raises(self):
+        """_pid_is_alive(float('-inf')) must return False (symmetric with +inf)."""
+        try:
+            result = _canonical_pid_is_alive(float("-inf"))  # type: ignore[arg-type]
+        except OverflowError:
+            self.fail(
+                "_pid_is_alive(float('-inf')) raised OverflowError — "
+                "coercion except clause must catch OverflowError (finding C)"
+            )
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
