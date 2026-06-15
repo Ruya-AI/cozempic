@@ -174,6 +174,16 @@ class TestContextWindowFamilyFallback(unittest.TestCase):
         for model in ["claude-haiku-5", "claude-haiku-4-6", "claude-haiku-4-6-20260601"]:
             messages = [make_assistant_with_model(0, model)]
             self.assertEqual(detect_context_window(messages), 200_000, f"{model} should be 200K")
+        # claude-haiku-4-5[1m] — deliberate behaviour CHANGE (1M → 200K), not
+        # preservation. The old bracket-aware loop required bracket_suffix == ""
+        # to enter the second prefix pass, so a bracket-suffixed Haiku fell through
+        # to DEFAULT (1M). The new simple prefix match correctly routes it to 200K
+        # via the prefix loop (startswith "claude-haiku-4-5"). This is an
+        # improvement, not a regression.
+        self.assertEqual(
+            detect_context_window([make_assistant_with_model(0, "claude-haiku-4-5[1m]")]),
+            200_000,
+        )
 
     def test_known_haiku_still_200k(self):
         messages = [make_assistant_with_model(0, "claude-haiku-4-5")]
@@ -187,17 +197,14 @@ class TestContextWindowFamilyFallback(unittest.TestCase):
         messages = [make_assistant_with_model(0, "claude-future-99")]
         self.assertEqual(detect_context_window(messages), DEFAULT_CONTEXT_WINDOW)
 
-    def test_bracket_suffix_still_resolves_by_prefix(self):
-        # CC does not emit "[1m]", but if it ever did, a plain prefix match must
-        # still resolve the window correctly (this is why the dead bracket-handling
-        # branch can be removed without behaviour loss).
+    def test_bracket_suffix_opus_resolves_by_prefix(self):
+        # CC does not emit "[1m]", but if it ever did for a 1M model, the simple
+        # prefix match handles it with no behaviour change vs the old bracket-aware
+        # code. This is the no-change direction that justifies removing the dead
+        # bracket-handling branch: claude-opus-4-6[1m] → 1M in both old and new code.
         self.assertEqual(
             detect_context_window([make_assistant_with_model(0, "claude-opus-4-6[1m]")]),
             1_000_000,
-        )
-        self.assertEqual(
-            detect_context_window([make_assistant_with_model(0, "claude-haiku-4-5[1m]")]),
-            200_000,
         )
 
 
