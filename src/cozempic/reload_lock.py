@@ -68,22 +68,32 @@ INIT_RELOAD_SENTINEL = "reload-sentinel"
 # UUIDs are hex+dashes (32 chars + 4 dashes), but session_id can be passed
 # as a path (e.g. from $TRANSCRIPT) which we normalize. Strip to first 12
 # chars for the lock filename so paths and UUIDs both produce a short slug.
-_SAFE_CHARS_RE = re.compile(r"[^a-zA-Z0-9_-]")
+# Lowercase-only char class: we .lower() before substitution (XF-1 fix) so
+# uppercase letters survive as their lowercase equivalent rather than as '_'.
+_SAFE_CHARS_RE = re.compile(r"[^a-z0-9_-]")
 
 
 def _slug_for(session_id: str) -> str:
     """Reduce session_id to a 12-char safe slug for the lock filename.
 
-    Mirrors the pid-file naming convention in guard.py — same session
-    always produces the same slug, so the lock and pid file co-locate.
+    Mirrors ``spawn_lock._slug_for`` and ``guard._reload_armed_path`` —
+    same session_id always produces the same slug across all three producers,
+    so the lock, pid file, and reload-sentinel co-locate correctly.
+
+    Lowercases BEFORE substitution (XF-1 fix): uppercase inputs such as a
+    UUID received before normalization produce the same slug as their
+    lowercase equivalents, preventing split-brain where the lock lives at
+    a different path than the pid/sentinel files.
     """
     if not session_id:
         return "default"
     # If it looks like a path, take the basename and drop suffix
     if "/" in session_id or "\\" in session_id or session_id.endswith(".jsonl"):
         session_id = Path(session_id).stem
-    # Sanitize and truncate
-    sanitized = _SAFE_CHARS_RE.sub("_", session_id)
+    # Lowercase BEFORE substitution so uppercase letters survive as their
+    # lowercase equivalents (a real character), not as the underscore
+    # placeholder. Matches spawn_lock._slug_for and guard._reload_armed_path.
+    sanitized = _SAFE_CHARS_RE.sub("_", session_id.lower())
     return sanitized[:12] or "default"
 
 

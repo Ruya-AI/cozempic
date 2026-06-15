@@ -200,9 +200,9 @@ _SAFE_CHARS_RE = re.compile(r"[^a-z0-9_-]")
 def _slug_for(session_id: str) -> str:
     """Reduce session_id to a 12-char safe slug for the PID file path.
 
-    Mirrors ``reload_lock._slug_for`` (relaxed char class) AND
-    ``guard._pid_file_for_session`` (lowercases first, then keeps only
-    ``[a-z0-9_-]``). Same session_id → same slug across all three.
+    Mirrors ``reload_lock._slug_for`` and ``guard._reload_armed_path`` —
+    all three lowercase BEFORE substitution so the same session_id always
+    maps to the same slug regardless of case (XF-1 parity fix).
     """
     if not session_id:
         return "default"
