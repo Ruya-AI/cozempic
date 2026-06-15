@@ -1758,7 +1758,7 @@ def _prescan_argv(argv: list[str]) -> list[str]:
             if tok == "--system-overhead-tokens" and i + 1 < len(argv):
                 val = argv[i + 1]
                 try:
-                    if int(val) <= 0:
+                    if int(val) < 0:
                         raise ValueError
                     os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = val
                 except ValueError:
@@ -1768,7 +1768,7 @@ def _prescan_argv(argv: list[str]) -> list[str]:
             if tok.startswith("--system-overhead-tokens="):
                 val = tok.split("=", 1)[1]
                 try:
-                    if int(val) <= 0:
+                    if int(val) < 0:
                         raise ValueError
                     os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = val
                 except ValueError:
