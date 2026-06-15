@@ -54,11 +54,11 @@ NATIVE_CORPUS = [float("nan"), float("inf"), float("-inf"), -0.0, _HUGE_INT,
 
 _UPPER = 10 ** 12  # any CLI/env validator output must be well under this
 
-# P-A test boundaries — reference production constants so a change to tokens.py
-# is automatically reflected here without a separate test-file update.
-_MAX_CONTEXT_WINDOW = t.MAX_CONTEXT_WINDOW        # 4_000_000
+# Pre-existing constants safe to reference at module scope (present on origin/main).
 _DEFAULT_CONTEXT_WINDOW = t.DEFAULT_CONTEXT_WINDOW  # 1_000_000
 _SYSTEM_OVERHEAD_DEFAULT = t.SYSTEM_OVERHEAD_TOKENS  # 21_000
+# NOTE: t.MAX_CONTEXT_WINDOW is NEW (not on origin/main), so it must be
+# accessed inside test methods to avoid an AttributeError at collection against base.
 
 
 @contextmanager
@@ -139,19 +139,19 @@ class TestParseEnvPositiveIntMaximum(unittest.TestCase):
     def test_huge_int_rejected_with_maximum(self):
         """10**400 > maximum=4_000_000 → must return None (not the huge int)."""
         with mock.patch.dict(os.environ, {"COZEMPIC_TEST_CW": str(_HUGE_INT)}):
-            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=_MAX_CONTEXT_WINDOW)
+            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=t.MAX_CONTEXT_WINDOW)
         self.assertIsNone(result, f"huge int leaked through: {result!r}")
 
     def test_above_maximum_rejected(self):
         """5_000_000 > 4_000_000 → None."""
         with mock.patch.dict(os.environ, {"COZEMPIC_TEST_CW": "5000000"}):
-            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=_MAX_CONTEXT_WINDOW)
+            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=t.MAX_CONTEXT_WINDOW)
         self.assertIsNone(result, f"above-max value leaked through: {result!r}")
 
     def test_below_maximum_accepted(self):
         """200_000 <= 4_000_000 → 200_000 (valid override)."""
         with mock.patch.dict(os.environ, {"COZEMPIC_TEST_CW": "200000"}):
-            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=_MAX_CONTEXT_WINDOW)
+            result = parse_env_positive_int("COZEMPIC_TEST_CW", maximum=t.MAX_CONTEXT_WINDOW)
         self.assertEqual(result, 200_000)
 
     def test_no_maximum_still_works(self):
@@ -304,6 +304,65 @@ class TestApplyTokenEnvOverrides(unittest.TestCase):
             cli._apply_token_env_overrides(args)
             self.assertEqual(os.environ["COZEMPIC_CONTEXT_WINDOW"], "200000")
             self.assertEqual(os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"], "30000")
+
+
+# ── H-1: _prescan_argv must allow --system-overhead-tokens 0 through to the env ──
+
+
+class TestPrescanArgvZeroOverhead(unittest.TestCase):
+    """H-1: _prescan_argv uses `< 0` (not `<= 0`) for --system-overhead-tokens,
+    so the legitimate 'no overhead' value 0 reaches the env var and is not silently
+    dropped with a spurious warning."""
+
+    def _clean_env(self):
+        return {k: v for k, v in os.environ.items()
+                if k != "COZEMPIC_SYSTEM_OVERHEAD_TOKENS"}
+
+    def test_zero_overhead_reaches_env_via_prescan(self):
+        """E2E: drive argv through _prescan_argv; assert env var is set to '0'.
+
+        This test is RED at base (prescan rejects 0 with `<= 0` gate) and GREEN
+        after the fix (gate changed to `< 0`).
+        """
+        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+            cleaned = cli._prescan_argv(["guard", "--system-overhead-tokens", "0"])
+            self.assertEqual(
+                os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"), "0",
+                "--system-overhead-tokens 0 was silently dropped by _prescan_argv "
+                "(gate was `<= 0`; must be `< 0` so 0 is passed through)"
+            )
+        # The flag must be consumed by prescan (not left for argparse to see)
+        self.assertNotIn("--system-overhead-tokens", cleaned)
+        self.assertNotIn("0", cleaned)
+
+    def test_zero_overhead_eq_form_reaches_env(self):
+        """E2E: --system-overhead-tokens=0 (= form) also goes through prescan correctly."""
+        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+            cli._prescan_argv(["guard", "--system-overhead-tokens=0"])
+            self.assertEqual(
+                os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"), "0",
+                "--system-overhead-tokens=0 (= form) was silently dropped by _prescan_argv"
+            )
+
+    def test_negative_overhead_still_rejected(self):
+        """Negatives must still be rejected; only 0 was wrongly excluded before."""
+        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+            cli._prescan_argv(["guard", "--system-overhead-tokens", "-1"])
+            self.assertIsNone(
+                os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"),
+                "negative --system-overhead-tokens must still be rejected by prescan"
+            )
+
+    def test_context_window_zero_still_rejected(self):
+        """--context-window 0 must still be rejected (0 IS invalid for context window)."""
+        env_key = "COZEMPIC_CONTEXT_WINDOW"
+        clean = {k: v for k, v in os.environ.items() if k != env_key}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            cli._prescan_argv(["guard", "--context-window", "0"])
+            self.assertIsNone(
+                os.environ.get(env_key),
+                "--context-window 0 must be rejected (0 is not a valid context window)"
+            )
 
 
 if __name__ == "__main__":
