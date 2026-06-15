@@ -135,6 +135,20 @@ class TestLongitudinalUnprunableLoop(unittest.TestCase):
         self.assertEqual(self.prune_calls, HARD_LOOP_EXIT_THRESHOLD,
                          "post-error cycles still reach the futile-loop K-exit")
 
+    def test_permanent_cycle_error_escalates_and_exits_not_inert(self):
+        # A DETERMINISTIC per-cycle error must NOT spin forever as an inert-but-alive
+        # daemon (watchdog-invisible) — it must escalate after GUARD_CYCLE_ERROR_EXIT
+        # and exit(1) so SessionStart respawns (C2). Estimator raises EVERY cycle.
+        from cozempic.guard import GUARD_CYCLE_ERROR_EXIT
+        calls = {"n": 0}
+        def always_raises(*a, **k):
+            calls["n"] += 1
+            raise TypeError("deterministic per-cycle failure")
+        exc = self._run_guard(token_estimator=always_raises)  # harness asserts SystemExit
+        self.assertEqual(exc.code, 1, "must exit(1) for respawn, not spin inert forever")
+        self.assertEqual(calls["n"], GUARD_CYCLE_ERROR_EXIT,
+                         f"must escalate after exactly {GUARD_CYCLE_ERROR_EXIT} consecutive errors")
+
 
 if __name__ == "__main__":
     unittest.main()

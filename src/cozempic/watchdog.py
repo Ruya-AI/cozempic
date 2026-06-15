@@ -75,6 +75,12 @@ _EXIT_RE = re.compile(
     r"giving up|consecutive empty|reload-loop)",
     re.IGNORECASE,
 )
+# C7: the inert/erroring-guard signature emits NO "Pruned:" line — a per-cycle
+# exception spinner logs "skipping a cycle after an unexpected error", and the
+# C2 escalation logs "cycle-error escalation" before exiting for respawn. The
+# watchdog must SEE these (it was previously blind to any non-futile-prune loop).
+_CYCLE_ERR_RE = re.compile(r"skipping a cycle after an unexpected error", re.IGNORECASE)
+_CYCLE_ESCALATION_RE = re.compile(r"cycle-error escalation", re.IGNORECASE)
 
 
 @dataclass
@@ -83,6 +89,8 @@ class LoopReport:
     total_prune_cycles: int = 0
     futile_cycles: int = 0
     daemon_starts: int = 0
+    cycle_errors: int = 0
+    cycle_escalations: int = 0
     max_backoff_s: int = 0
     has_backoff: bool = False
     has_exit: bool = False
@@ -123,6 +131,20 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
         rep.has_backoff = True
         rep.max_backoff_s = max(backoffs)
     rep.has_exit = bool(_EXIT_RE.search(text))
+
+    # C7: erroring/inert-guard signature (no "Pruned:" lines at all). Flag a daemon
+    # that keeps hitting per-cycle exceptions — either spinning (many skip lines) or
+    # respawn-cycling on a deterministic error (escalation markers).
+    rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
+    rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
+    if rep.cycle_errors >= loop_trip or rep.cycle_escalations >= 2:
+        rep.looping = True
+        rep.reason = (
+            f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations — "
+            f"guard is erroring every cycle (inert or respawn-cycling on a deterministic "
+            f"failure), not pruning; investigate the logged exception"
+        )
+        return rep
 
     futile_ratio = futile / rep.total_prune_cycles if rep.total_prune_cycles else 0.0
     if futile >= loop_trip and futile_ratio >= FUTILE_DOMINANCE:

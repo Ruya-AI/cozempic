@@ -54,6 +54,10 @@ from .safety import PruneValidationError
 HARD_LOOP_BACKOFF_START = 3
 HARD_LOOP_BACKOFF_CAP_SECONDS = 300
 HARD_LOOP_EXIT_THRESHOLD = 10
+# C2: consecutive per-cycle exceptions after which the daemon stops silently
+# spinning (inert-but-alive, watchdog-invisible) and exits for SessionStart to
+# respawn — turning a deterministic repeating failure into a visible respawn.
+GUARD_CYCLE_ERROR_EXIT = 5
 
 
 # ── Hard cap: K=10 exit deferral when agents_active (PR #93 item #4) ────────
@@ -884,6 +888,7 @@ def start_guard(
     prev_size = -1                    # last cycle's transcript size (idle detection)
     idle_cycles = 0                   # F: consecutive stable-size cycles
     noop_cycles = 0                   # G: cycles where a fire was skipped as a no-op
+    consecutive_cycle_errors = 0      # C2: deterministic per-cycle error -> escalate, not silent-inert
     interactive_mode = _detect_interactive(claude_pid)   # H
     force_pct = _force_reload_pct()                       # E
     force_threshold_tokens = (
@@ -1225,13 +1230,25 @@ def start_guard(
 
                 # End-of-cycle: remember this size so the next cycle can detect idle.
                 prev_size = current_size
+                consecutive_cycle_errors = 0  # a clean cycle clears the error streak
 
             except (KeyboardInterrupt, SystemExit):
                 raise  # voluntary exits (Ctrl-C, K-exit) reach the outer handler/finally
             except Exception as _cycle_exc:
                 # Defense-in-depth: one malformed cycle must never kill the daemon
-                # (the only outer handler is KeyboardInterrupt). Log and continue.
-                print(f"  Guard: skipping a cycle after an unexpected error: {_cycle_exc!r}", flush=True)
+                # (the only outer handler is KeyboardInterrupt). BUT a DETERMINISTIC
+                # per-cycle error must not silently spin forever as an inert-but-alive
+                # daemon (invisible to the watchdog). Count consecutive errors; after
+                # K, escalate with a watchdog-detectable marker and EXIT so the
+                # SessionStart hook respawns a fresh daemon (which also makes a
+                # genuine repeating failure visible as a respawn pattern).
+                consecutive_cycle_errors += 1
+                print(f"  Guard: skipping a cycle after an unexpected error "
+                      f"({consecutive_cycle_errors}/{GUARD_CYCLE_ERROR_EXIT}): {_cycle_exc!r}", flush=True)
+                if consecutive_cycle_errors >= GUARD_CYCLE_ERROR_EXIT:
+                    print(f"  Guard cycle-error escalation: {consecutive_cycle_errors} consecutive "
+                          f"cycle errors — exiting for respawn (last: {_cycle_exc!r}).", flush=True)
+                    sys.exit(1)
                 continue
     except KeyboardInterrupt:
         # Final checkpoint before exit
@@ -1493,7 +1510,7 @@ def guard_prune_cycle(
                     "projected_final_tokens": projected_final,
                     "would_free_mb": _ro_would_free / 1024 / 1024,
                     "original_bytes": original_bytes,
-                    "team_name": team_state.team_name or None,
+                    "team_name": _log_safe(team_state.team_name) or None,
                     "team_messages": team_state.message_count,
                     "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
                     "backup_path": None,
@@ -1511,7 +1528,7 @@ def guard_prune_cycle(
                     "saved_mb": 0.0,
                     "original_tokens": pre_te.total,
                     "final_tokens": pre_te.total,
-                    "team_name": team_state.team_name,
+                    "team_name": _log_safe(team_state.team_name),
                     "team_messages": team_state.message_count,
                     "checkpoint_path": None,
                     "backup_path": None,
@@ -1539,7 +1556,7 @@ def guard_prune_cycle(
                     "original_bytes": original_bytes,
                     "original_tokens": pre_te.total,
                     "final_tokens": pre_te.total,  # post_te not computed (early return)
-                    "team_name": team_state.team_name or None,
+                    "team_name": _log_safe(team_state.team_name) or None,
                     "team_messages": team_state.message_count,
                     "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
                     "backup_path": None,
@@ -1594,7 +1611,7 @@ def guard_prune_cycle(
                     "original_bytes": original_bytes,
                     "original_tokens": pre_te.total,
                     "final_tokens": post_te.total,
-                    "team_name": team_state.team_name or None,
+                    "team_name": _log_safe(team_state.team_name) or None,
                     "team_messages": team_state.message_count,
                     "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
                     "backup_path": None,
@@ -1681,7 +1698,7 @@ def guard_prune_cycle(
         "saved_mb": saved_bytes / 1024 / 1024,
         "original_tokens": pre_te.total,
         "final_tokens": post_te.total,
-        "team_name": team_state.team_name or None,
+        "team_name": _log_safe(team_state.team_name) or None,
         "team_messages": team_state.message_count,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "backup_path": None,
@@ -3964,3 +3981,14 @@ def _fmt_prune_result(result: dict) -> str:
 def _now() -> str:
     from datetime import datetime
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _log_safe(text, limit: int = 80) -> str:
+    """Make untrusted text safe to print into the guard log: collapse newlines /
+    control chars to spaces and cap length. Without this, an attacker-controlled
+    team_name could inject fake 'Pruned: 0 tokens freed (0.0%)' lines into the log
+    and trip cozempic guard-watchdog against a healthy daemon (C7 log-injection)."""
+    import re as _re
+    s = _re.sub(r"[\x00-\x1f\x7f]+", " ", str(text if text is not None else ""))
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s[:limit]
