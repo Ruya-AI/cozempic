@@ -3641,19 +3641,18 @@ def _pid_identity_match(pid: int, session_id: str | None) -> bool:
     return abs(current_start_time - recorded_start_time) < 0.1
 
 
-def _pid_is_alive(pid: int) -> bool:
-    """Bare process-liveness probe — does NOT consult the JSONL mtime.
-
-    Anti-resurrection: a dead PID must read as dead even when cozempic's own
-    ``save_messages`` just refreshed the session JSONL moments earlier.
-    ``_is_claude_process``'s mtime fallback would misread that fresh write as a
-    live Claude and let the reload watcher resurrect a session the user closed.
-    ``os.kill(pid, 0)`` answers liveness directly and is not fooled by it.
-
-    Canonical implementation lives in helpers._pid_is_alive (GC-3);
-    this is the same function re-exported under the guard-internal name.
-    """
-    return _pid_is_alive_canonical(pid)
+# Bare process-liveness probe — does NOT consult the JSONL mtime.
+#
+# Anti-resurrection: a dead PID must read as dead even when cozempic's own
+# ``save_messages`` just refreshed the session JSONL moments earlier.
+# ``_is_claude_process``'s mtime fallback would misread that fresh write as a
+# live Claude and let the reload watcher resurrect a session the user closed.
+# ``os.kill(pid, 0)`` answers liveness directly and is not fooled by it.
+#
+# Canonical implementation lives in helpers._pid_is_alive (GC-3);
+# module-level alias so callers in this module and tests that patch
+# ``guard._pid_is_alive`` continue to work without a wrapper call.
+_pid_is_alive = _pid_is_alive_canonical
 
 
 def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:
