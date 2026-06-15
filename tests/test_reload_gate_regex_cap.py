@@ -8,7 +8,8 @@ uncapped text through DOTALL lazy-star regexes:
 
 An attacker-sized message (many <task-notification> openers without closers)
 triggers O(openers × len) catastrophic backtracking, freezing the 30-second
-checkpoint/reload-gate loop — a quadratic-regex DoS (L3/L0, MED).
+checkpoint/reload-gate loop — a quadratic-regex DoS (L3/L0, MED). Measured
+at ~4-5s with 10,000 openers (~185KB); capped at 64KB takes <0.6s.
 
 recap.py already solved this for its own regexes (text[:32768] / text[:8000]).
 Fix mirrors that pattern: cap both scan sites at _RELOAD_GATE_SCAN_CAP = 65536.
@@ -35,8 +36,11 @@ from unittest.mock import patch
 # ── degenerate input that triggers catastrophic backtracking ──────────────────
 # Many <task-notification> openers without matching closers.  The DOTALL
 # lazy-star `(.*?)` must scan to the end of string for each opener trying to
-# find a closing tag — O(openers × len) work without a cap.
-_MANY_OPENERS = "<task-notification>" * 10_000   # ~185 KB — uncapped: ~4-5s; capped 64KB: <0.6s
+# find a closing tag — O(openers × len) work without a cap.  10k openers
+# (~185KB) gives ~4-5s uncapped on a modern machine; the 64KB cap reduces this
+# to <0.6s.  Large enough to stay >2s at base with margin; small enough to
+# complete within pytest's run window.
+_MANY_OPENERS = "<task-notification>" * 10_000   # 185 KB
 
 # A real task-notification payload well within the 64KB cap.
 _REAL_NOTIF = (
@@ -58,14 +62,14 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
         return detect_in_flight(msgs)
 
     def test_detect_in_flight_quadratic_input_bounded(self):
-        """REGRESSION GUARD — RED at base: uncapped scan on 3.8MB of openers blows up.
+        """REGRESSION GUARD — RED at base: uncapped scan on 185KB of openers blows up.
 
         Without the _RELOAD_GATE_SCAN_CAP[:65536] slice the regex must scan the
-        entire 3.8MB string for each of the 200,000 openers — measured wall time
-        is 10+ seconds (catastrophic backtracking). With the cap the truncated
-        input is trivially short and completes in milliseconds.
+        entire 185KB string for each of the 10,000 openers — measured wall time
+        is 4-5s (catastrophic backtracking). With the cap the truncated 64KB
+        input completes in <0.6s.
 
-        Budget: 2.0s (generous — the capped scan takes <5ms in practice).
+        Budget: 2.0s.
         """
         t0 = time.monotonic()
         result = self._detect(_MANY_OPENERS)
@@ -160,12 +164,13 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
             return extract_team_state(msgs)
 
     def test_extract_team_state_quadratic_input_bounded(self):
-        """REGRESSION GUARD — RED at base: uncapped scan on a message with 3.8MB of
+        """REGRESSION GUARD — RED at base: uncapped scan on a message with 185KB of
         openers freezes extract_team_state (called every checkpoint cycle).
 
-        team.py:862 iterates _TASK_NOTIF_BLOCK_RE over the raw `content` string
-        without slicing — the same catastrophic backtracking as guard.py's site.
-        With _RELOAD_GATE_SCAN_CAP[:65536] the truncated input is trivial.
+        team.py iterates _TASK_NOTIF_BLOCK_RE over the raw `content` string without
+        slicing — the same catastrophic backtracking as guard.py's site. Measured
+        at 4-5s on this machine with 10k openers. With _RELOAD_GATE_SCAN_CAP[:65536]
+        the truncated input completes in <0.6s.
 
         Budget: 2.0s.
         """
