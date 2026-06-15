@@ -31,7 +31,9 @@ class TestAtomicWrite:
         jsonl = tmp_path / "sess.jsonl"
         messages = _make_messages(jsonl)
         save_messages(jsonl, messages, create_backup=False)
-        assert not (tmp_path / "sess.tmp").exists()
+        # No atomic-write temp orphan of ANY naming remains (the mkstemp temp is
+        # ".tmp.<name>.<rand>.partial", never "sess.tmp" — the old assertion was vacuous).
+        assert list(tmp_path.glob(".tmp.*")) == []
 
     def test_content_correct_after_save(self, tmp_path):
         jsonl = tmp_path / "sess.jsonl"
@@ -64,9 +66,8 @@ class TestAtomicWrite:
 
         # Original file should be intact
         assert jsonl.read_text(encoding="utf-8") == original_text
-        # .tmp should be cleaned up
-        tmp_file = jsonl.with_suffix(".tmp")
-        assert not tmp_file.exists()
+        # the atomic-write temp must be cleaned up — no orphan of ANY naming
+        assert list(jsonl.parent.glob(".tmp.*")) == []
 
     def test_concurrent_writer_produces_valid_jsonl(self, tmp_path):
         """A background thread appending lines while save_messages runs must not
@@ -174,8 +175,8 @@ class TestSnapshotAndAppend:
 
         # File must be unchanged from the rewrite
         assert jsonl.read_text(encoding="utf-8") == original_text
-        # No orphaned .tmp left behind
-        assert not jsonl.with_suffix(".tmp").exists()
+        # No orphaned temp left behind (any naming, incl. the .partial temp)
+        assert list(jsonl.parent.glob(".tmp.*")) == []
 
     def test_no_orphan_backup_on_conflict(self, tmp_path):
         """Backup is NOT created when a conflict aborts the prune."""
@@ -233,9 +234,9 @@ class TestSnapshotAndAppend:
         with pytest.raises(PruneConflictError):
             save_messages(jsonl, messages, create_backup=False)
 
-        # original intact, no orphan tmp
+        # original intact, no orphan temp (any naming, incl. the .partial temp)
         assert jsonl.read_text(encoding="utf-8") == original_text
-        assert not jsonl.with_suffix(".tmp").exists()
+        assert list(jsonl.parent.glob(".tmp.*")) == []
 
     def test_held_open_replace_cleans_backup(self, tmp_path, monkeypatch):
         """#112: when the deferred-prune path fires with create_backup=True,
