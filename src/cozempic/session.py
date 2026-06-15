@@ -55,6 +55,22 @@ class _FileSnapshot:
         self.size: int = st.st_size
         self.content_hash: str = hashlib.md5(path.read_bytes()).hexdigest()
 
+    @classmethod
+    def from_bytes(cls, path: Path, raw: bytes) -> "_FileSnapshot":
+        """Build a snapshot whose size/hash describe `raw` exactly (the bytes the
+        caller actually loaded), with the inode from `path`. Pairing this with a
+        SINGLE read of the file (see load_messages_and_snapshot) closes the TOCTOU
+        where a line appended between snapshot() and a later load() landed in BOTH
+        the loaded messages AND the delta — duplicating it on append-merge."""
+        self = cls.__new__(cls)
+        try:
+            self.inode = path.stat().st_ino
+        except OSError:
+            self.inode = -1
+        self.size = len(raw)
+        self.content_hash = hashlib.md5(raw).hexdigest()
+        return self
+
     def classify(self, path: Path) -> Literal["unchanged", "appended", "conflict"]:
         """Classify what happened to the file since this snapshot was taken."""
         try:
@@ -701,6 +717,27 @@ def load_messages(path: Path) -> list[Message]:
             if parsed is not None:
                 messages.append(parsed)
     return messages
+
+
+def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapshot"]:
+    """Read the file ONCE and return (messages, snapshot) derived from the SAME
+    bytes — so the snapshot's size/hash exactly describe the loaded messages.
+
+    Use this on mutate-then-save paths instead of the two-step
+    ``snapshot_session(path)`` + ``load_messages(path)``: those took the snapshot
+    and then re-read the file, and any line appended in that window was both
+    loaded AND counted in the append delta, duplicating it on save (the TOCTOU
+    audit P1). Reading once eliminates the window entirely."""
+    raw = path.read_bytes()
+    snapshot = _FileSnapshot.from_bytes(path, raw)
+    messages: list[Message] = []
+    # splitlines() matches open()'s one-item-per-physical-line iteration (drops the
+    # trailing-newline artifact), so line indices align with load_messages().
+    for i, line in enumerate(raw.decode("utf-8", errors="replace").splitlines()):
+        parsed = _parse_one_line(line, i)
+        if parsed is not None:
+            messages.append(parsed)
+    return messages, snapshot
 
 
 # ─── Incremental JSONL read (read-only scan path) ───────────────────────────

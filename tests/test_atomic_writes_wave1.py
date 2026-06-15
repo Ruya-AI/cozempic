@@ -461,11 +461,13 @@ class TestDoctorRespectsPruneLock(unittest.TestCase):
                     self._done = True
                 return self._real.classify(p)
 
-        real_factory = S.snapshot_session
-        def injecting_factory(path):
-            return _InjectingSnapshot(real_factory(path), path)
+        # doctor now reads once via _FileSnapshot.from_bytes(path, raw); wrap that
+        # so the append is injected between the read and classify.
+        real_from_bytes = S._FileSnapshot.from_bytes.__func__
+        def injecting_from_bytes(cls, path, raw):
+            return _InjectingSnapshot(real_from_bytes(cls, path, raw), path)
 
-        with mock.patch.object(S, "snapshot_session", injecting_factory):
+        with mock.patch.object(S._FileSnapshot, "from_bytes", classmethod(injecting_from_bytes)):
             D.fix_corrupted_tool_use()
 
         final = sess.read_text(encoding="utf-8")
@@ -487,8 +489,8 @@ class TestDoctorRespectsPruneLock(unittest.TestCase):
         src = inspect.getsource(fix_orphaned_tool_results)
         self.assertIn("_PruneLock", src,
             "fix_orphaned_tool_results must use _PruneLock")
-        self.assertIn("snapshot_session", src,
-            "fix_orphaned_tool_results must take a pre-load snapshot")
+        self.assertIn("load_messages_and_snapshot", src,
+            "fix_orphaned_tool_results must read once (snapshot+messages from same bytes)")
         self.assertIn("Skipped", src,
             "fix_orphaned_tool_results must report skipped sessions")
 
@@ -534,8 +536,9 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
         sess = {"path": sess_path, "session_id": "mcpbehav1", "project": "-mcp",
                 "size": sess_path.stat().st_size, "mtime": 0, "lines": 20}
 
-        # Snapshot wrapper that injects a same-prefix rewrite (→ classify=="conflict").
-        real_factory = S.snapshot_session
+        # treat_session reads once via load_messages_and_snapshot; wrap _FileSnapshot
+        # .from_bytes so the returned snapshot injects a same-prefix rewrite at
+        # classify time (→ "conflict"), simulating a concurrent mutation mid-prune.
         class _Conflicting:
             def __init__(self, real, path): self._r, self._p, self._done = real, path, False
             @property
@@ -548,8 +551,12 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
                     self._done = True
                 return self._r.classify(p)
 
+        real_from_bytes = S._FileSnapshot.from_bytes.__func__
+        def injecting_from_bytes(cls, path, raw):
+            return _Conflicting(real_from_bytes(cls, path, raw), path)
+
         with mock.patch.object(S, "find_current_session", lambda *a, **k: sess), \
-             mock.patch.object(S, "snapshot_session", lambda p: _Conflicting(real_factory(p), p)):
+             mock.patch.object(S._FileSnapshot, "from_bytes", classmethod(injecting_from_bytes)):
             out = mod.treat_session(prescription="standard", execute=True)
 
         self.assertIn("Aborted: session changed mid-prune", out,
@@ -567,8 +574,8 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
         # + the abort messages for both error paths
         self.assertIn("_PruneLock", src,
             "MCP treat_session must use _PruneLock")
-        self.assertIn("snapshot_session", src,
-            "MCP treat_session must take a pre-load snapshot")
+        self.assertIn("load_messages_and_snapshot", src,
+            "MCP treat_session must read once (snapshot+messages from same bytes)")
         self.assertIn("PruneLockError", src,
             "MCP treat_session must handle PruneLockError")
         self.assertIn("PruneConflictError", src,

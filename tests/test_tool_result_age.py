@@ -86,6 +86,26 @@ class TestMinifyDiffGate(unittest.TestCase):
         self.assertEqual(_minify_tool_content(content), content,
                          "a lone hunk-shaped line must not trigger collapse of indented logs")
 
+    def test_git_log_p_second_commit_body_preserved(self):
+        # Fleet P1: content after a hunk (a git-log-p second commit's indented
+        # message body) must survive — in_hunk must reset after the hunk ends.
+        from cozempic.strategies.standard import _minify_tool_content
+        ctx = "".join(f" ctx line {i}\n" for i in range(12))
+        content = (
+            "commit abc123\n"
+            "--- a/x.py\n+++ b/x.py\n@@ -1,14 +1,14 @@\n" + ctx + "-old\n+new\n"
+            "\n"
+            "commit def456\n"
+            "Author: someone\n"
+            "\n"
+            "    SECOND_COMMIT_BODY_LINE_DO_NOT_LOSE\n"
+            "    more indented body text that must survive\n"
+        )
+        out = _minify_tool_content(content)
+        self.assertIn("unchanged lines", out, "the real hunk must still collapse")
+        self.assertIn("SECOND_COMMIT_BODY_LINE_DO_NOT_LOSE", out,
+                      "content after the hunk must NOT be collapsed away")
+
     def test_indented_config_after_fake_hunk_preserved(self):
         from cozempic.strategies.standard import _minify_tool_content
         content = (

@@ -349,6 +349,7 @@ class TestGuardCycleGate(unittest.TestCase):
                 return MagicMock(total=40_000)
 
         with patch("cozempic.guard._guard_tmp_root", return_value=self.scratch), \
+             patch("cozempic.guard.load_messages_and_snapshot", return_value=(load_msgs, MagicMock())), \
              patch("cozempic.guard.load_messages", return_value=load_msgs), \
              patch("cozempic.guard.prune_with_team_protect", return_value=(pruned, {}, team_state)), \
              patch("cozempic.guard.save_messages", side_effect=lambda *a, **k: None), \

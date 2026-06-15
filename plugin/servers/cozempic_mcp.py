@@ -142,7 +142,7 @@ def treat_session(prescription: str = "standard", execute: bool = False) -> str:
     """
     from cozempic.session import (
         _PruneLock, PruneConflictError, PruneLockError,
-        find_current_session, load_messages, save_messages, snapshot_session,
+        find_current_session, load_messages, load_messages_and_snapshot, save_messages,
     )
     from cozempic.registry import PRESCRIPTIONS
     from cozempic.executor import run_prescription
@@ -159,12 +159,11 @@ def treat_session(prescription: str = "standard", execute: bool = False) -> str:
         return f"Unknown prescription '{prescription}'. Options: {', '.join(PRESCRIPTIONS)}"
 
     path = sess["path"]
-    # Take snapshot BEFORE load so append-conflict detection works (parallel
-    # to cmd_treat/cmd_strategy/cmd_reload in cli.py). Without this, a guard
-    # daemon prune cycle running concurrently could silently overwrite our
-    # output — the same data-loss path Wave 1 fixed in the CLI.
-    snapshot = snapshot_session(path) if execute else None
-    messages = load_messages(path)
+    # Read once: snapshot + messages from identical bytes for append-conflict
+    # detection (parallel to cmd_treat/cmd_strategy/cmd_reload in cli.py), without
+    # a TOCTOU window where a concurrent append lands in both messages and delta.
+    messages, _snap = load_messages_and_snapshot(path)
+    snapshot = _snap if execute else None
     strategy_names = PRESCRIPTIONS[prescription]
 
     original_bytes = sum(b for _, _, b in messages)

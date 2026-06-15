@@ -137,6 +137,28 @@ class TestSnapshotAndAppend:
         reloaded = load_messages(jsonl)
         assert len(reloaded) == len(messages)
 
+    def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):
+        """Read-once: a line appended AFTER load_messages_and_snapshot must be
+        recovered exactly ONCE on save (not duplicated). Regression for the TOCTOU
+        where the old snapshot-then-load pattern counted a window-append in both
+        the loaded messages and the delta."""
+        from cozempic.session import load_messages_and_snapshot
+        jsonl = tmp_path / "sess.jsonl"
+        _make_messages(jsonl, n=5)
+        messages, snap = load_messages_and_snapshot(jsonl)
+        assert len(messages) == 5
+        # Claude appends a NEW line after our read.
+        extra = json.dumps({"message": {"role": "assistant", "content": "appended-once"}}) + "\n"
+        with open(jsonl, "a", encoding="utf-8") as f:
+            f.write(extra)
+        # classify must see exactly that one appended line as the delta.
+        assert snap.classify(jsonl) == "appended"
+        save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+        reloaded = load_messages(jsonl)
+        contents = [m["message"]["content"] for _, m, _ in reloaded]
+        assert contents.count("appended-once") == 1, "window-appended line must appear once (no TOCTOU dup)"
+        assert len(reloaded) == 6, "5 pruned + 1 appended delta = 6"
+
     def test_equal_size_inplace_rewrite_is_conflict_not_clobbered(self, tmp_path):
         """Same-SIZE different-CONTENT rewrite must classify as conflict, not
         'unchanged' — otherwise save_messages silently os.replace()s over Claude's

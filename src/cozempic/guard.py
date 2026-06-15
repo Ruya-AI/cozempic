@@ -182,6 +182,7 @@ from .session import (
     find_current_session,
     find_sessions,
     load_messages,
+    load_messages_and_snapshot,
     load_messages_incremental,
     save_messages,
     snapshot_session,
@@ -1402,16 +1403,17 @@ def guard_prune_cycle(
 
     try:
         with _PruneLock(session_path):
-            # Snapshot before load so we can detect Claude appending mid-prune
-            snap = snapshot_session(session_path)
-
-            # Size guard: skip prune for very large sessions (OOM risk #74)
+            # Size guard: skip prune for very large sessions (OOM risk #74).
+            # Cheap stat — do it before the full read.
             file_size_mb = session_path.stat().st_size / 1024 / 1024
             if file_size_mb > 200:
                 print(f"  [{_now()}] Session {file_size_mb:.0f}MB exceeds 200MB — skipping prune (OOM risk).", file=sys.stderr)
                 return _no_change
 
-            messages = load_messages(session_path)
+            # Read once: messages + snapshot from identical bytes so a line Claude
+            # appends mid-prune can't be both loaded AND counted in the delta
+            # (TOCTOU append-duplication). Replaces snapshot_session()+load_messages().
+            messages, snap = load_messages_and_snapshot(session_path)
             original_bytes = sum(b for _, _, b in messages)
 
             # --protect-pattern (#122): tag matching messages so the strategies spare

@@ -587,7 +587,11 @@ def _collapse_diff_context(diff_text: str) -> str:
         elif in_hunk and line.startswith(" "):
             context_run += 1
         else:
-            # Outside a hunk, OR a non-context line inside one → keep verbatim.
+            # A non-context line: we're no longer inside a hunk's body. Reset
+            # in_hunk so indented content AFTER the hunk (e.g. a git-log-p second
+            # commit's message body, or trailing prose) is kept verbatim and never
+            # collapsed (the audit P1 — in_hunk was set but never reset).
+            in_hunk = False
             _flush()
             result.append(line)
 

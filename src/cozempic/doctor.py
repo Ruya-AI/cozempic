@@ -523,7 +523,7 @@ def fix_corrupted_tool_use() -> str:
     import re
     import shutil
 
-    from .session import _PruneLock, PruneLockError, snapshot_session, _parse_delta_lines
+    from .session import _PruneLock, PruneLockError, _FileSnapshot, _parse_delta_lines
 
     sessions = find_sessions()
     total_fixed = 0
@@ -555,13 +555,14 @@ def fix_corrupted_tool_use() -> str:
         backup = path.with_suffix(f".{ts}.jsonl.bak")
         shutil.copy2(path, backup)
 
-        # Snapshot the file BEFORE reading so that, if Claude appends new lines
-        # while we repair, we can recover them instead of clobbering with our
-        # stale read (mirrors fix_orphaned_tool_results' snapshot→save_messages
-        # path — this function previously read_text→atomic_write with no snapshot,
-        # silently dropping any concurrent append = data loss).
-        snapshot = snapshot_session(path)
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        # Read the file ONCE and derive both the working buffer AND the snapshot
+        # from the SAME bytes (snapshot.from_bytes) — so a line Claude appends in
+        # the window cannot land in both `lines` and the append-delta (the TOCTOU
+        # duplication audit P1). Recovers concurrent appends without clobbering;
+        # this function previously read_text→atomic_write with no snapshot at all.
+        _raw = path.read_bytes()
+        snapshot = _FileSnapshot.from_bytes(path, _raw)
+        lines = _raw.decode("utf-8", errors="replace").splitlines(keepends=True)
         fixed_in_session = 0
 
         for idx, line in enumerate(lines):
@@ -743,7 +744,7 @@ def fix_orphaned_tool_results() -> str:
     """
     from .session import (
         _PruneLock, PruneConflictError, PruneLockError,
-        load_messages, save_messages, snapshot_session,
+        load_messages_and_snapshot, save_messages,
     )
 
     sessions = find_sessions()
@@ -761,11 +762,9 @@ def fix_orphaned_tool_results() -> str:
 
         from .executor import fix_orphaned_tool_results as _fix
         path = sess["path"]
-        # Take snapshot BEFORE load_messages so append-conflict detection
-        # in save_messages can correctly identify if Claude wrote new lines
-        # between our load and save.
-        snapshot = snapshot_session(path)
-        messages = load_messages(path)
+        # Read once: messages + snapshot from the SAME bytes so a concurrent
+        # append can't be both loaded AND counted in the delta (TOCTOU dup).
+        messages, snapshot = load_messages_and_snapshot(path)
         fixed_messages, orphans = _fix(messages)
 
         if orphans > 0:
