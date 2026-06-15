@@ -2512,6 +2512,8 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             with (
                 patch("cozempic.session.get_projects_dir", return_value=tmp_path),
                 patch("cozempic.session._session_id_from_process", return_value=None),
+                # Block Strategy 1 (active-transcript keyed by live Claude PID)
+                # so a real running session in the developer's home cannot bypass strict.
                 patch("cozempic.session.find_claude_pid", return_value=None),
             ):
                 result = checkpoint_team(cwd=cwd_a, quiet=True)

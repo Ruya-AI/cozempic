@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,19 +20,30 @@ def _write_session(proj_dir: Path, session_id: str, content: str = "") -> Path:
     return p
 
 
+@contextmanager
+def _isolated_session_home(projects_dir: Path, process_session_id: str | None = None):
+    """Isolate find_current_session from the developer's real ~/.claude state.
+
+    Patches three seams that would otherwise let a live Claude session bleed in:
+    - get_projects_dir  → tmp projects dir (isolates Strategy 4/5)
+    - _session_id_from_process → controllable (isolates Strategy 2)
+    - find_claude_pid   → None (isolates Strategy 1: lookup_active_transcript)
+    """
+    with (
+        patch("cozempic.session.get_projects_dir", return_value=projects_dir),
+        patch("cozempic.session._session_id_from_process", return_value=process_session_id),
+        patch("cozempic.session.find_claude_pid", return_value=None),
+    ):
+        yield
+
+
 class TestStrictMode:
     def test_strict_returns_none_when_only_fallback_available(self, tmp_path):
         """With no process or CWD match, strict=True returns None instead of guessing."""
         proj = tmp_path / "projects" / "-some-other-path"
         _write_session(proj, "aaaa1111-0000-0000-0000-000000000000")
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            # Block Strategy 1 (active-transcript lookup keyed by live Claude PID)
-            # so a real running Claude session in the developer's home cannot win.
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd="/unrelated/path", strict=True)
 
         assert result is None
@@ -41,11 +53,7 @@ class TestStrictMode:
         proj = tmp_path / "projects" / "-some-other-path"
         _write_session(proj, "aaaa1111-0000-0000-0000-000000000000")
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd="/unrelated/path", strict=False)
 
         assert result is not None
@@ -57,12 +65,8 @@ class TestStrictMode:
         proj = tmp_path / "projects" / "-some-path"
         _write_session(proj, session_id)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=session_id),
-            # Block Strategy 1 so this test exercises Strategy 2 exclusively.
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        # Pass session_id as process_session_id so Strategy 2 fires; Strategy 1 stays off.
+        with _isolated_session_home(tmp_path / "projects", process_session_id=session_id):
             result = find_current_session(strict=True)
 
         assert result is not None
@@ -83,15 +87,11 @@ class TestStrictMode:
         sess_under = "cccc3333-0000-0000-0000-000000000000"
         _write_session(proj_under, sess_under)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd=cwd_under, strict=True)
 
         assert result is not None, (
-            f"Strategy 3 did not find underscore-cwd project. "
+            f"Strategy 4 did not find underscore-cwd project. "
             f"Expected slug '-Users-foo-topstep-automation' to match literal dir."
         )
         assert result["session_id"] == sess_under
@@ -108,11 +108,7 @@ class TestStrictMode:
         sess_dot = "eeee5555-0000-0000-0000-000000000000"
         _write_session(proj_dot, sess_dot)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd=cwd_dot, strict=True)
 
         assert result is not None, (
@@ -125,11 +121,7 @@ class TestStrictMode:
         projects = tmp_path / "projects"
         projects.mkdir()
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=projects),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(projects):
             assert find_current_session(strict=True) is None
             assert find_current_session(strict=False) is None
 
@@ -146,11 +138,7 @@ class TestStrictMode:
         session_id = "ffff6666-0000-0000-0000-000000000000"
         _write_session(proj, session_id)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd="/Users/x/proj/", strict=True)
 
         assert result is not None, (
@@ -161,21 +149,21 @@ class TestStrictMode:
 
 
 # ---------------------------------------------------------------------------
-# TestStrategy3ExactMatch — Bug B: substring → exact-match in Strategy 3
+# TestStrategy3ExactMatch — Bug B: substring → exact-match in Strategy 4
 # ---------------------------------------------------------------------------
 
 class TestStrategy3ExactMatch:
-    """Strategy 3 must use exact-match on slug, not substring."""
+    """Strategy 4 (CWD slug) must use exact-match on slug, not substring."""
 
     def test_underscore_project_found_after_slug_fix(self, tmp_path):
-        """Strategy 3 must find an underscore-path project via its exact slug.
+        """Strategy 4 must find an underscore-path project via its exact slug.
 
         Fixture uses the LITERAL dir name '-Users-x-topstep-automation' (not derived
         from cwd_to_project_slug) so the test is independent of the function under test.
-        strict=True disables Strategy 4 — if Strategy 3 misses, returns None (RED).
+        strict=True disables Strategy 5 — if Strategy 4 misses, returns None (RED).
 
         RED-at-base (815485d): broken slug '-Users-x-topstep_automation' (keeps '_')
-        ≠ literal dir '-Users-x-topstep-automation' → Strategy 3 finds 0 matches →
+        ≠ literal dir '-Users-x-topstep-automation' → Strategy 4 finds 0 matches →
         strict=True → None → assertIsNotNone FAILS.
         """
         cwd = "/Users/x/topstep_automation"
@@ -186,11 +174,7 @@ class TestStrategy3ExactMatch:
         session_id = "dddd4444-0000-0000-0000-000000000000"
         _write_session(proj, session_id)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd=cwd, strict=True)
 
         assert result is not None, (
@@ -214,11 +198,7 @@ class TestStrategy3ExactMatch:
         _write_session(proj_foo, sess_foo)
         _write_session(proj_foobar, sess_foobar)
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd=cwd_foo, strict=True)
 
         assert result is not None
@@ -232,11 +212,7 @@ class TestStrategy3ExactMatch:
         proj = tmp_path / "projects" / "-some-other-path"
         _write_session(proj, "aaaa1111-0000-0000-0000-000000000000")
 
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=None),
-        ):
+        with _isolated_session_home(tmp_path / "projects"):
             result = find_current_session(cwd="/unrelated/underscore_path", strict=True)
 
         assert result is None, (
