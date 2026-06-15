@@ -62,9 +62,15 @@ BACKOFF_CAP_S = 300
 # FALSE-FLAGS a healthy daemon as looping (and --fix would SIGTERM it). The count
 # is matched but NOT captured (the percent is the only capture group, group 1, and
 # the only value consumed downstream), so the K/M/comma suffix only needs tolerating.
+# Anchored to line-start (re.M, optional leading whitespace) — the guard emits its
+# real prune line as "  Pruned: …" at the START of a log line. Anchoring stops a
+# "Pruned: 0 tokens freed (0.0%)" substring embedded MID-line (e.g. inside a
+# Team '<attacker-name>' state preserved log line) from forging a futile-prune
+# match and false-tripping the watchdog (C7 log-injection — the residual the
+# newline-only _log_safe scrub didn't cover).
 _PRUNED_RE = re.compile(
-    r"Pruned:\s+[0-9][0-9,]*(?:\.[0-9]+)?[KMG]?\s+tokens freed\s+\(([0-9.]+)%\)",
-    re.IGNORECASE,
+    r"^\s*Pruned:\s+[0-9][0-9,]*(?:\.[0-9]+)?[KMG]?\s+tokens freed\s+\(([0-9.]+)%\)",
+    re.IGNORECASE | re.MULTILINE,
 )
 _BACKOFF_RE = re.compile(r"back-off \(next sleep:\s*(\d+)s", re.IGNORECASE)
 _DAEMON_START_RE = re.compile(r"Guard daemon started", re.IGNORECASE)
@@ -137,12 +143,18 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     # respawn-cycling on a deterministic error (escalation markers).
     rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
     rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
-    if rep.cycle_errors >= loop_trip or rep.cycle_escalations >= 2:
+    # Only flag the erroring/inert signature when it actually dominates — a HEALTHY
+    # long-lived daemon logs occasional TRANSIENT (recovered) cycle errors amid
+    # productive pruning, and must NOT be flagged (else --fix SIGTERMs it). The
+    # reliable "stuck" signals are: >=2 escalations (a daemon that gave up and
+    # respawn-cycled on a deterministic failure), OR many cycle errors with NO
+    # productive prunes at all (erroring INSTEAD of pruning).
+    if rep.cycle_escalations >= 2 or (rep.cycle_errors >= loop_trip and rep.total_prune_cycles == 0):
         rep.looping = True
         rep.reason = (
-            f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations — "
-            f"guard is erroring every cycle (inert or respawn-cycling on a deterministic "
-            f"failure), not pruning; investigate the logged exception"
+            f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations with "
+            f"{rep.total_prune_cycles} productive prunes — guard is erroring instead of pruning "
+            f"(inert or respawn-cycling on a deterministic failure); investigate the logged exception"
         )
         return rep
 

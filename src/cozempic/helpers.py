@@ -356,6 +356,10 @@ def is_protected(msg: dict) -> bool:
 _PATTERN_PROTECTED_KEY: str = "__cozempic_pattern_protected__"
 _MAX_PROTECT_PATTERN_LEN: int = 1000
 _MAX_PROTECT_MATCH_BYTES: int = 256 * 1024
+# Hard per-surface cap on the no-SIGALRM (Windows / non-main-thread) match path,
+# where no wall-clock timer can interrupt a runaway regex. Bounds worst-case
+# backtracking to a few KB regardless of any shape-detector completeness gap.
+_NO_BUDGET_MATCH_CAP: int = 4096
 _PROTECT_OVERMATCH_WARN_FRACTION: float = 0.8
 
 
@@ -537,7 +541,8 @@ def tag_pattern_matches(messages: list, patterns: list) -> int:
     # this cycle, warn) — the same OUTCOME as the POSIX fail-open, delivered
     # before the match instead of via a timer. Safe-shaped patterns proceed.
     _budget = _protect_match_budget()
-    if _budget > 0 and not _have_sigalrm():
+    _no_budget = _budget > 0 and not _have_sigalrm()
+    if _no_budget:
         risky = [p for p in patterns if _pattern_is_redos_risky(getattr(p, "pattern", str(p)))]
         if risky:
             import sys
@@ -559,6 +564,14 @@ def tag_pattern_matches(messages: list, patterns: list) -> int:
                     matchable += 1
                 if msg_dict.get(_PATTERN_PROTECTED_KEY):
                     continue
+                # DEFINITIVE no-budget bound (independent of the shape detector's
+                # completeness): with no real timer, cap each surface to
+                # _NO_BUDGET_MATCH_CAP chars so even a catastrophic pattern the
+                # detector MISSED backtracks over a few KB (bounded ms), never the
+                # full 256KB surface (effectively infinite). On POSIX the SIGALRM
+                # timer is the bound, so no cap there.
+                if _no_budget:
+                    texts = [t[:_NO_BUDGET_MATCH_CAP] for t in texts]
                 if any(p.search(t) for t in texts for p in patterns):
                     msg_dict[_PATTERN_PROTECTED_KEY] = True
                     count += 1

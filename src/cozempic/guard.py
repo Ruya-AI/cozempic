@@ -889,6 +889,8 @@ def start_guard(
     idle_cycles = 0                   # F: consecutive stable-size cycles
     noop_cycles = 0                   # G: cycles where a fire was skipped as a no-op
     consecutive_cycle_errors = 0      # C2: deterministic per-cycle error -> escalate, not silent-inert
+    last_agents_active = False        # C2: don't escalate-exit while a subagent team is live
+    logged_decode_skip = False        # C1/C2: log a non-UTF-8 session once, don't respawn-storm
     interactive_mode = _detect_interactive(claude_pid)   # H
     force_pct = _force_reload_pct()                       # E
     force_threshold_tokens = (
@@ -984,6 +986,7 @@ def start_guard(
                         s.status in ("running", "unknown")
                         for s in state.subagents
                     )
+                last_agents_active = agents_active  # C2: remembered for the escalation gate
 
                 # ── E: interactive reload gating ──────────────────────────
                 # Interactive sessions never reload mid-turn — they wait for an idle
@@ -1234,6 +1237,17 @@ def start_guard(
 
             except (KeyboardInterrupt, SystemExit):
                 raise  # voluntary exits (Ctrl-C, K-exit) reach the outer handler/finally
+            except UnicodeDecodeError as _dec_exc:
+                # C1/C2 crossfix: a non-UTF-8 session makes the strict loader raise
+                # EVERY cycle. Escalating+respawning on it would be a RESPAWN STORM
+                # (the error is deterministic — a fresh daemon hits it too). Treat it
+                # as a BENIGN skip: this session just isn't prunable until its bytes
+                # become valid UTF-8. Do NOT count toward the escalation; log once.
+                if not logged_decode_skip:
+                    print(f"  Guard: session is not valid UTF-8 — skipping prune for this "
+                          f"session (not an error, no respawn): {_dec_exc!r}", flush=True)
+                    logged_decode_skip = True
+                continue
             except Exception as _cycle_exc:
                 # Defense-in-depth: one malformed cycle must never kill the daemon
                 # (the only outer handler is KeyboardInterrupt). BUT a DETERMINISTIC
@@ -1246,6 +1260,14 @@ def start_guard(
                 print(f"  Guard: skipping a cycle after an unexpected error "
                       f"({consecutive_cycle_errors}/{GUARD_CYCLE_ERROR_EXIT}): {_cycle_exc!r}", flush=True)
                 if consecutive_cycle_errors >= GUARD_CYCLE_ERROR_EXIT:
+                    # C2: defer the escalation-exit while a subagent team is live —
+                    # don't drop guard coverage mid-team. Cap the counter so it
+                    # escalates promptly once the team goes quiescent.
+                    if last_agents_active:
+                        print(f"  Guard: {consecutive_cycle_errors} cycle errors but agents are "
+                              f"active — deferring respawn until quiescent.", flush=True)
+                        consecutive_cycle_errors = GUARD_CYCLE_ERROR_EXIT  # hold at threshold
+                        continue
                     print(f"  Guard cycle-error escalation: {consecutive_cycle_errors} consecutive "
                           f"cycle errors — exiting for respawn (last: {_cycle_exc!r}).", flush=True)
                     sys.exit(1)

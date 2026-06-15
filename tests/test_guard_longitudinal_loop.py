@@ -149,6 +149,24 @@ class TestLongitudinalUnprunableLoop(unittest.TestCase):
         self.assertEqual(calls["n"], GUARD_CYCLE_ERROR_EXIT,
                          f"must escalate after exactly {GUARD_CYCLE_ERROR_EXIT} consecutive errors")
 
+    def test_unicode_decode_error_is_benign_skip_not_respawn_storm(self):
+        # C1/C2 crossfix: a non-UTF-8 session raises UnicodeDecodeError every cycle.
+        # It must NOT count toward the escalation (which would respawn-storm); the
+        # guard skips that session and keeps running. Raise it 8x (> the exit
+        # threshold of 5) then behave; the run must reach the normal K-exit (code 0),
+        # proving the decode error never escalated to the respawn exit(1).
+        from cozempic.guard import GUARD_CYCLE_ERROR_EXIT
+        calls = {"n": 0}
+        def decode_then_ok(*a, **k):
+            calls["n"] += 1
+            if calls["n"] <= GUARD_CYCLE_ERROR_EXIT + 3:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return 600_000
+        exc = self._run_guard(token_estimator=decode_then_ok)
+        self.assertEqual(exc.code, 0, "UnicodeDecodeError must be a benign skip, not escalate to exit(1)")
+        self.assertGreater(calls["n"], GUARD_CYCLE_ERROR_EXIT + 3,
+                           "must keep running past the error threshold (decode errors don't escalate)")
+
 
 if __name__ == "__main__":
     unittest.main()
