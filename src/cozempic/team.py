@@ -911,7 +911,10 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # ── idle-notifications (P0-D) ────────────────────────────────────
         # <teammate-message teammate_id="X">{"type":"idle_notification",...}</teammate-message>
         # Transition status to "idle" UNLESS a later SendMessage re-activated it.
-        for tm_match in _TEAMMATE_MSG_RE.finditer(content):
+        # Fail-safe: a teammate-message beyond the cap is MISSED → teammate
+        # stays "running" → safe_to_reload/agents_active keep it protected →
+        # gate OVER-DEFERS (recoverable), never UNDER-BLOCKS (SIGKILL).
+        for tm_match in _TEAMMATE_MSG_RE.finditer(content[:_RELOAD_GATE_SCAN_CAP]):
             tm_id = tm_match.group(1).strip()
             tm_body = tm_match.group(2)
             resolved = _name_to_agent_id.get(tm_id, tm_id)

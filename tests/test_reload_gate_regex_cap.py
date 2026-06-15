@@ -212,5 +212,135 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
         )
 
 
+def _tc(idx: int, team_name: str, teammate_name: str, agent_id: str) -> tuple:
+    """3-tuple for a TeamCreate tool_use that registers a teammate.
+
+    Both `name` and `agentId` are required: extract_team_state only adds to
+    seen_teammates when agentId is non-empty (see team.py:667).
+    """
+    d = {"message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": f"tc-{idx}", "name": "TeamCreate",
+         "input": {"team_name": team_name,
+                   "teammates": [{"name": teammate_name, "agentId": agent_id}]}}
+    ]}}
+    return (idx, d, 200)
+
+
+def _tc_result(idx: int, team_name: str) -> tuple:
+    """3-tuple for the TeamCreate tool_result."""
+    text = f"Team '{team_name}' created."
+    d = {"message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": f"tc-{idx - 1}", "content": text}
+    ]}}
+    return (idx, d, len(text))
+
+
+class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
+    """team.py _TEAMMATE_MSG_RE.finditer(content) must be capped at _RELOAD_GATE_SCAN_CAP.
+
+    _TEAMMATE_MSG_RE uses a negative-lookahead form ((?:(?!<teammate-message).)*?)
+    which is O(n) linear for opener-only input (the NLA fails fast on '<').  It is
+    therefore NOT quadratic on opener-only strings, so a timing test is not the right
+    proof mechanism here.
+
+    The correct RED/GREEN proof is a BOUNDARY test: an idle-notification placed PAST
+    the 64KB cap boundary must NOT be processed after the cap is applied (teammate
+    stays "running" — the fail-safe over-defer direction).  Without the cap the same
+    notification IS processed (teammate transitions to "idle").
+
+    This proves the cap is applied to _TEAMMATE_MSG_RE (class-of-bug fold: all three
+    uncapped DOTALL block-regex scans on the same `content` are now capped).
+    """
+
+    def _extract(self, msgs):
+        from cozempic.team import extract_team_state
+        with patch("cozempic.team.load_team_configs", return_value=[]):
+            return extract_team_state(msgs)
+
+    @staticmethod
+    def _team_spawn_msgs():
+        """TeamCreate + result 3-tuples that register 'worker@myteam' as a teammate.
+
+        Both name='worker' and agentId='worker@myteam' are required so that:
+        1. seen_teammates['worker@myteam'] is created (agentId gate at team.py:667)
+        2. _name_to_agent_id['worker'] -> 'worker@myteam' is set (name lookup index)
+        3. The idle-notification uses teammate_id="worker" which resolves via index
+        """
+        return [
+            _tc(0, "myteam", "worker", "worker@myteam"),
+            _tc_result(1, "myteam"),
+            # SendMessage to worker → marks it as "running" in seen_teammates
+            _tu(2, "sm-1", "SendMessage", {"to": "worker", "message": "start"}),
+            _tr(3, "sm-1", "delivered"),
+        ]
+
+    def test_teammate_msg_cap_boundary_does_not_transition(self):
+        """RED without cap: idle-notification PAST 64KB transitions teammate to idle.
+        GREEN with cap:  idle-notification PAST 64KB is not scanned → stays running.
+
+        Fail-safe direction: missed notification → teammate stays "running" →
+        safe_to_reload/agents_active keep protecting it → gate OVER-DEFERS (recoverable),
+        never UNDER-BLOCKS (SIGKILL).
+
+        To reproduce RED manually: revert team.py:914 to
+          `for tm_match in _TEAMMATE_MSG_RE.finditer(content):`
+        and run this test — it will fail because the status becomes "idle".
+        """
+        from cozempic.guard import _RELOAD_GATE_SCAN_CAP
+
+        idle_notif = (
+            '<teammate-message teammate_id="worker" summary="done">'
+            '{"type":"idle_notification","from":"worker"}'
+            '</teammate-message>'
+        )
+        # Pad so the notification starts PAST the cap boundary.
+        pad = " " * (_RELOAD_GATE_SCAN_CAP + 10)
+        content_past_cap = pad + idle_notif
+
+        msgs = self._team_spawn_msgs() + [_uc(4, content_past_cap)]
+        state = self._extract(msgs)
+        teammates = state.teammates if state else []
+        # Registered as agent_id='worker@myteam', name='worker'
+        worker = next(
+            (t for t in teammates if "worker" in t.agent_id or "worker" in (t.name or "")),
+            None,
+        )
+        self.assertIsNotNone(worker, "worker teammate must be registered after TeamCreate")
+        self.assertNotEqual(
+            worker.status, "idle",
+            "idle-notification PAST the 64KB cap must NOT transition the teammate — "
+            "the _TEAMMATE_MSG_RE scan must be capped at _RELOAD_GATE_SCAN_CAP. "
+            f"Got status={worker.status!r}. Fail-safe: staying 'running' over-defers "
+            "the reload (recoverable), never SIGKILL."
+        )
+
+    def test_teammate_msg_within_cap_still_transitions(self):
+        """Correctness guard (GREEN at base and after fix): an idle-notification
+        WITHIN the 64KB cap must still transition the teammate to idle.
+
+        Verifies the cap does not break the happy path — a normal idle-notification
+        is parsed and the teammate status transitions correctly.
+        """
+        idle_notif = (
+            '<teammate-message teammate_id="worker" summary="done">'
+            '{"type":"idle_notification","from":"worker"}'
+            '</teammate-message>'
+        )
+        # Well within the cap — no padding.
+        msgs = self._team_spawn_msgs() + [_uc(4, idle_notif)]
+        state = self._extract(msgs)
+        teammates = state.teammates if state else []
+        worker = next(
+            (t for t in teammates if "worker" in t.agent_id or "worker" in (t.name or "")),
+            None,
+        )
+        self.assertIsNotNone(worker, "worker teammate must be registered after TeamCreate")
+        self.assertEqual(
+            worker.status, "idle",
+            f"idle-notification within 64KB must transition teammate to 'idle'; "
+            f"got status={worker.status!r}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
