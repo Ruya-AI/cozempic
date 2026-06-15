@@ -83,13 +83,13 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-sonnet-4-6": 1_000_000,
     "claude-sonnet-4-5": 1_000_000,
     # Haiku — 200K (not available on 1M in Claude Code)
-    "claude-haiku-4-5": 200_000,
+    "claude-haiku-4-5": HAIKU_CONTEXT_WINDOW,
     # Older models — 200K
     "claude-3-5-sonnet": 200_000,
-    "claude-3-5-haiku": 200_000,
+    "claude-3-5-haiku": HAIKU_CONTEXT_WINDOW,
     "claude-3-opus": 200_000,
     "claude-3-sonnet": 200_000,
-    "claude-3-haiku": 200_000,
+    "claude-3-haiku": HAIKU_CONTEXT_WINDOW,
 }
 
 
