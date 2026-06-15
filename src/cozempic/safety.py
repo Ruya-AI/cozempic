@@ -74,6 +74,27 @@ def _last_compact_boundary(
     return last
 
 
+def _last_active_compact_boundary_idx(
+    messages: list[tuple[int, dict, int]],
+) -> int | None:
+    """Return the line index of the last ACTIVE compact_boundary in messages.
+
+    An active boundary is one WITHOUT ``hasPreservedSegment=True``.
+    Returns None when no active boundary is found (normal non-compacted sessions).
+
+    Used by enforce_floor and validate_post_prune to determine which messages
+    are pre-boundary and therefore must not be re-added (P0-A) or required to
+    survive (C2 eligibility).
+    """
+    last_idx: int | None = None
+    for idx, msg, _ in messages:
+        if (msg.get("type") == "system"
+                and msg.get("subtype") == "compact_boundary"
+                and not msg.get("hasPreservedSegment")):
+            last_idx = idx
+    return last_idx
+
+
 def _build_orphan_shells(
     msgs_before: list[tuple[int, dict, int]],
 ) -> set[str]:
@@ -205,12 +226,7 @@ def validate_post_prune(
     # pre-boundary root; the compact_boundary itself becomes the new session root
     # (with parentUuid=None after _relink_parent_chain). Requiring the original
     # root to survive would contradict the collapse contract.
-    compact_boundary_before_line_idx: int | None = None
-    for idx, msg, _ in msgs_before:
-        if (msg.get("type") == "system"
-                and msg.get("subtype") == "compact_boundary"
-                and not msg.get("hasPreservedSegment")):
-            compact_boundary_before_line_idx = idx
+    compact_boundary_before_line_idx = _last_active_compact_boundary_idx(msgs_before)
     original_root_uuids: set[str] = set()
     for idx, msg, _ in msgs_before:
         if msg.get("parentUuid") is None and msg.get("uuid"):
@@ -483,13 +499,7 @@ def enforce_floor(
     # compact-summary-collapse legitimately dropped. Re-adding them would create a
     # 2-root DAG fork (root-0 and cb-1 both have parentUuid=None).
     # We compute the boundary line index here so step 2a/b/c can all skip pre-boundary.
-    compact_boundary_line_idx: int | None = None
-    for idx, msg, _ in msgs_before:
-        if (msg.get("type") == "system"
-                and msg.get("subtype") == "compact_boundary"
-                and not msg.get("hasPreservedSegment")):
-            compact_boundary_line_idx = idx
-            # keep scanning to find the LAST boundary (defensive; normally only one)
+    compact_boundary_line_idx = _last_active_compact_boundary_idx(msgs_before)
     # compact_boundary_line_idx is None when no active boundary exists (normal sessions).
 
     def _is_pre_boundary(candidate_idx: int) -> bool:
