@@ -28,6 +28,9 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            # Block Strategy 1 (active-transcript lookup keyed by live Claude PID)
+            # so a real running Claude session in the developer's home cannot win.
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd="/unrelated/path", strict=True)
 
@@ -41,6 +44,7 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd="/unrelated/path", strict=False)
 
@@ -48,7 +52,7 @@ class TestStrictMode:
         assert result["session_id"] == "aaaa1111-0000-0000-0000-000000000000"
 
     def test_strict_succeeds_when_process_detected(self, tmp_path):
-        """Process-based detection (Strategy 1) satisfies strict mode."""
+        """Process-based detection (Strategy 2) satisfies strict mode."""
         session_id = "bbbb2222-0000-0000-0000-000000000000"
         proj = tmp_path / "projects" / "-some-path"
         _write_session(proj, session_id)
@@ -56,6 +60,8 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=session_id),
+            # Block Strategy 1 so this test exercises Strategy 2 exclusively.
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(strict=True)
 
@@ -63,7 +69,7 @@ class TestStrictMode:
         assert result["session_id"] == session_id
 
     def test_strict_succeeds_on_cwd_slug_match(self, tmp_path):
-        """CWD slug match (Strategy 3) satisfies strict mode — underscore and dot variants.
+        """CWD slug match (Strategy 4) satisfies strict mode — underscore and dot variants.
 
         Fixture dirs use HARDCODED literal names (what Claude Code actually writes to disk),
         independent of cwd_to_project_slug. If the slug formula regresses, the computed
@@ -80,6 +86,7 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd=cwd_under, strict=True)
 
@@ -90,7 +97,7 @@ class TestStrictMode:
         assert result["session_id"] == sess_under
 
     def test_strict_succeeds_on_dot_cwd_slug_match(self, tmp_path):
-        """Dot-path cwd (double-dash slug) is found by Strategy 3 in strict mode.
+        """Dot-path cwd (double-dash slug) is found by Strategy 4 in strict mode.
 
         Fixture dir uses HARDCODED literal name.
         '/Users/foo/.claude' → '-Users-foo--claude' (dot→dash produces double-dash).
@@ -104,11 +111,12 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd=cwd_dot, strict=True)
 
         assert result is not None, (
-            f"Strategy 3 did not find dot-path project. "
+            f"Strategy 4 did not find dot-path project. "
             f"Expected slug '-Users-foo--claude' to match literal dir."
         )
         assert result["session_id"] == sess_dot
@@ -120,6 +128,7 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=projects),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             assert find_current_session(strict=True) is None
             assert find_current_session(strict=False) is None
@@ -140,6 +149,7 @@ class TestStrictMode:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd="/Users/x/proj/", strict=True)
 
@@ -179,6 +189,7 @@ class TestStrategy3ExactMatch:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd=cwd, strict=True)
 
@@ -206,29 +217,31 @@ class TestStrategy3ExactMatch:
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd=cwd_foo, strict=True)
 
         assert result is not None
         assert result["session_id"] == sess_foo, (
             f"Expected session for '-Users-x-foo', got {result['session_id']!r}. "
-            "Prefix collision: Strategy 3 is still using substring match."
+            "Prefix collision: Strategy 4 is still using substring match."
         )
 
     def test_strategy4_strict_returns_none_on_no_match(self, tmp_path):
-        """strict=True blocks Strategy 4 fallback when no slug matches."""
+        """strict=True blocks Strategy 5 fallback when no slug matches."""
         proj = tmp_path / "projects" / "-some-other-path"
         _write_session(proj, "aaaa1111-0000-0000-0000-000000000000")
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
             patch("cozempic.session._session_id_from_process", return_value=None),
+            patch("cozempic.session.find_claude_pid", return_value=None),
         ):
             result = find_current_session(cwd="/unrelated/underscore_path", strict=True)
 
         assert result is None, (
             "strict=True must return None when no slug matches. "
-            "Strategy 4 fallback is leaking through."
+            "Strategy 5 fallback is leaking through."
         )
 
 

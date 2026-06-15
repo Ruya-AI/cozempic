@@ -2422,6 +2422,9 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             with (
                 patch("cozempic.session.get_projects_dir", return_value=tmp_path),
                 patch("cozempic.session._session_id_from_process", return_value=None),
+                # Block Strategy 1 (active-transcript keyed by live Claude PID)
+                # so a real running session in the developer's home cannot bypass strict.
+                patch("cozempic.session.find_claude_pid", return_value=None),
             ):
                 result = checkpoint_team(cwd=cwd_a, quiet=True)
 
@@ -2509,14 +2512,15 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             with (
                 patch("cozempic.session.get_projects_dir", return_value=tmp_path),
                 patch("cozempic.session._session_id_from_process", return_value=None),
+                patch("cozempic.session.find_claude_pid", return_value=None),
             ):
                 result = checkpoint_team(cwd=cwd_a, quiet=True)
 
-            # After fix: Strategy 3 finds A's session → extracts TOPSTEP state → writes to A's dir
+            # After fix: Strategy 4 finds A's session → extracts TOPSTEP state → writes to A's dir
             self.assertIsNotNone(
                 result,
-                "checkpoint_team returned None — Strategy 3 did not find project A's session. "
-                "At base: broken slug misses A → Strategy 4 picks B → writes to B → A has no checkpoint."
+                "checkpoint_team returned None — Strategy 4 did not find project A's session. "
+                "At base: broken slug misses A → Strategy 5 picks B → writes to B → A has no checkpoint."
             )
             # A's checkpoint must exist and contain TOPSTEP (not FANNU)
             a_cp = proj_a / "team-checkpoint.md"
