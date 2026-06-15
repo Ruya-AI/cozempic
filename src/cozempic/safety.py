@@ -631,12 +631,18 @@ def enforce_floor(
                 if btype == "tool_use":
                     tid = block.get("id", "")
                     for p in tool_use_id_to_results.get(tid, set()):
-                        if p not in must_preserve:
+                        # M-1 (review): don't re-add a PRE-boundary pair partner past an
+                        # active compact_boundary — else step-3 pair-closure re-introduces a
+                        # pre-boundary root (the 2-root fork P0-A prevents elsewhere; C9 would
+                        # otherwise have to abort the prune).
+                        pe = before_by_uuid.get(p)
+                        if p not in must_preserve and not (pe and _is_pre_boundary(pe[0])):
                             new_additions.add(p)
                 elif btype == "tool_result":
                     tid = block.get("tool_use_id", "")
                     for owner in tool_use_id_to_owner.get(tid, set()):
-                        if owner not in must_preserve:
+                        oe = before_by_uuid.get(owner)
+                        if owner not in must_preserve and not (oe and _is_pre_boundary(oe[0])):
                             new_additions.add(owner)
         if not new_additions:
             break
