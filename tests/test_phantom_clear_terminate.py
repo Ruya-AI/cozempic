@@ -253,11 +253,6 @@ class TestPhantomTerminate(unittest.TestCase):
         m = load_messages(p)
         return safe_to_reload(extract_team_state(m), m, p)
 
-    def _state(self, rows: list):
-        p = _write(self.tmp, rows)
-        m = load_messages(p)
-        return extract_team_state(m)
-
     def _live_team_base(self) -> list:
         """Three messages setting up a live teammate (TeamCreate + SendMessage)."""
         return [
