@@ -133,8 +133,8 @@ def validate_post_prune(
 ) -> None:
     """Validate the pruned message list. Raise PruneValidationError on failure.
 
-    Checks run fail-fast in order C3 → C2 → C4 → C5 → C6 → C7 → C1 → C8 (semantic
-    checks before structural so the failure attribution is actionable):
+    Checks run fail-fast in order C3 → C2 → C9 → C4 → C5 → C6 → C7 → C1 → C8
+    (semantic checks before structural so the failure attribution is actionable):
 
       C1. parentUuid resolution — baseline-relative + orphan-shell-aware: only
           flag a parent that (a) WAS in msgs_before, (b) is absent from msgs_after,
@@ -142,9 +142,9 @@ def validate_post_prune(
           (parent ∉ before_uuids) and legitimately-dropped orphan-shell parents
           are both valid and skipped.
       C2. Root preserved — at least one ELIGIBLE original ``parentUuid=null`` uuid
-          from msgs_before must survive. Eligible = NOT a legit_removed_orphan_shell.
-          An orphan-shell root's removal is legitimate; it is excluded from the
-          required-root set (REVIEW-max B.11 + C-1 correctness fix).
+          from msgs_before must survive. Eligible = NOT a legit_removed_orphan_shell
+          AND NOT a pre-boundary root legitimately retired by compact-summary-collapse
+          (P0-A fix: compact_boundary becomes the new root in that case).
       C3. Conversation survival — ≥1 user AND ≥1 assistant survives.
       C4. compact_boundary — if msgs_before had a system/compact_boundary
           entry, the LAST such entry MUST survive.
@@ -158,6 +158,9 @@ def validate_post_prune(
           ``tool_result`` existed in msgs_before MUST keep that result in
           msgs_after (a dangling tool_use is structurally valid but
           unresumable; mirror of the orphaned-tool_result handling).
+      C9. Single-root invariant — baseline-relative: msgs_after must not have
+          MORE roots (parentUuid=None, non-orphan-shell) than msgs_before.
+          Catches 2-root DAG forks introduced by any strategy or floor bug.
 
     Each check is CONDITIONAL on its precondition existing in msgs_before —
     a session that never had a permission-mode entry passes C5 trivially.
@@ -197,9 +200,24 @@ def validate_post_prune(
     # ELIGIBLE = not a legit_removed_orphan_shell (C-1 fix): an orphan-shell
     # root is legitimately dropped by fix_orphaned_tool_results; its absence
     # must not trigger C2. (REVIEW-max B.11 + C-1 correctness fix.)
+    # ELIGIBLE also excludes pre-boundary roots when an active compact_boundary
+    # exists (P0-A fix): compact-summary-collapse legitimately retires the
+    # pre-boundary root; the compact_boundary itself becomes the new session root
+    # (with parentUuid=None after _relink_parent_chain). Requiring the original
+    # root to survive would contradict the collapse contract.
+    compact_boundary_before_line_idx: int | None = None
+    for idx, msg, _ in msgs_before:
+        if (msg.get("type") == "system"
+                and msg.get("subtype") == "compact_boundary"
+                and not msg.get("hasPreservedSegment")):
+            compact_boundary_before_line_idx = idx
     original_root_uuids: set[str] = set()
-    for _, msg, _ in msgs_before:
+    for idx, msg, _ in msgs_before:
         if msg.get("parentUuid") is None and msg.get("uuid"):
+            # Pre-boundary root legitimately dropped by compact-summary-collapse.
+            if (compact_boundary_before_line_idx is not None
+                    and idx < compact_boundary_before_line_idx):
+                continue
             original_root_uuids.add(msg["uuid"])
     eligible_roots = original_root_uuids - legit_removed_orphan_shells
     if eligible_roots and not (eligible_roots & surviving_uuids):
@@ -214,6 +232,39 @@ def validate_post_prune(
                 "expected_root_uuids": sorted(eligible_roots),
                 "before_count": len(msgs_before),
                 "after_count": len(msgs_after),
+            },
+        )
+
+    # ── C9: single-root invariant (no multi-root fork) ───────────────────────
+    # P0-A enforces this in enforce_floor; C9 is the defensive net that catches
+    # any future code path creating a second DAG root (e.g. a new strategy, a
+    # floor edge case, a hasPreservedSegment interaction).
+    # BASELINE-RELATIVE: only raise if msgs_after has MORE roots than msgs_before.
+    # This allows legitimate 2-chain team sessions (2 roots before → 2 after = OK;
+    # 1 root before → 2 after = C9).
+    before_roots_count = sum(
+        1 for _, msg, _ in msgs_before
+        if not msg.get("parentUuid") and msg.get("uuid")
+        and msg.get("uuid") not in legit_removed_orphan_shells
+    )
+    after_roots: list[str] = [
+        msg.get("uuid", "")
+        for _, msg, _ in msgs_after
+        if not msg.get("parentUuid")
+        and msg.get("uuid")
+        and msg.get("uuid") not in legit_removed_orphan_shells
+    ]
+    if len(after_roots) > before_roots_count:
+        raise PruneValidationError(
+            reason=(
+                f"prune introduced additional DAG roots: "
+                f"{len(after_roots)} roots after vs {before_roots_count} before"
+            ),
+            evidence={
+                "failed_check": "C9",
+                "root_uuids_after": sorted(after_roots),
+                "root_count_after": len(after_roots),
+                "root_count_before": before_roots_count,
             },
         )
 
@@ -427,6 +478,25 @@ def enforce_floor(
     # ── Step 2: must-preserve candidates ─────────────────────────────────────
     must_preserve: set[str] = set()
 
+    # P0-A: If there is an active compact_boundary (hasPreservedSegment not set),
+    # all messages at indices BEFORE the boundary are pre-boundary turns that
+    # compact-summary-collapse legitimately dropped. Re-adding them would create a
+    # 2-root DAG fork (root-0 and cb-1 both have parentUuid=None).
+    # We compute the boundary line index here so step 2a/b/c can all skip pre-boundary.
+    compact_boundary_line_idx: int | None = None
+    for idx, msg, _ in msgs_before:
+        if (msg.get("type") == "system"
+                and msg.get("subtype") == "compact_boundary"
+                and not msg.get("hasPreservedSegment")):
+            compact_boundary_line_idx = idx
+            # keep scanning to find the LAST boundary (defensive; normally only one)
+    # compact_boundary_line_idx is None when no active boundary exists (normal sessions).
+
+    def _is_pre_boundary(candidate_idx: int) -> bool:
+        """True iff the candidate is a pre-boundary turn that must not be re-added."""
+        return (compact_boundary_line_idx is not None
+                and candidate_idx < compact_boundary_line_idx)
+
     # preserve_first_message pins the first parentUuid=null root. NOTE: with the
     # default (True) this also satisfies validate_post_prune C2 (which requires an
     # original root to survive). Setting preserve_first_message=False together with
@@ -436,13 +506,17 @@ def enforce_floor(
     # re-adding the original root would undo compact-summary-collapse, which
     # legitimately drops the pre-boundary root in favor of the compact summary.
     if cfg.preserve_first_message:
-        for _, msg, _ in msgs_before:
+        for idx, msg, _ in msgs_before:
             if msg.get("parentUuid") is None and msg.get("uuid"):
-                must_preserve.add(msg["uuid"])
+                if not _is_pre_boundary(idx):
+                    must_preserve.add(msg["uuid"])
                 break
 
+    # Pre-boundary turns must not be re-added (P0-A). Exclude them from all
+    # must-preserve candidate lists so last_k and survival-cap never pin them.
     users_in_order = [
-        (idx, m) for idx, m, _ in msgs_before if m.get("type") == "user"
+        (idx, m) for idx, m, _ in msgs_before
+        if m.get("type") == "user" and not _is_pre_boundary(idx)
     ]
     # Real conversational user turns exclude tool_result-carrier user messages
     # (whose content is tool_result blocks, not a user utterance) — used for the
@@ -458,10 +532,11 @@ def enforce_floor(
 
     user_turns_in_order = [
         (idx, m) for idx, m, _ in msgs_before
-        if m.get("type") == "user" and _is_real_user_turn(m)
+        if m.get("type") == "user" and _is_real_user_turn(m) and not _is_pre_boundary(idx)
     ]
     asst_in_order = [
-        (idx, m) for idx, m, _ in msgs_before if m.get("type") == "assistant"
+        (idx, m) for idx, m, _ in msgs_before
+        if m.get("type") == "assistant" and not _is_pre_boundary(idx)
     ]
 
     last_k = max(0, int(cfg.preserve_last_k_turns))
