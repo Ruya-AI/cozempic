@@ -245,12 +245,17 @@ def strategy_metadata_strip(messages: list[Message], config: dict) -> StrategyRe
     total_pruned = 0
     replaced = 0
 
-    # Capture exact token counts before stripping (usage fields will be deleted)
+    # Capture exact token counts before stripping (usage fields will be deleted).
+    # Coerce via _as_int — a present-but-null/string usage value (malformed
+    # transcript) would otherwise raise TypeError here and crash `treat --rx gentle`
+    # (and silently disable SOFT-tier gentle pruning in the daemon). Sibling of the
+    # tokens.py coercion fix (the #123 fix-one-miss-the-sibling lesson).
+    from ..tokens import _as_int
     exact_tokens_before = 0
     for _, msg, _ in messages:
         usage = msg.get("message", {}).get("usage")
         if isinstance(usage, dict):
-            exact_tokens_before += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+            exact_tokens_before += _as_int(usage.get("input_tokens", 0)) + _as_int(usage.get("output_tokens", 0))
 
     for pos, (idx, msg, size) in enumerate(messages):
         if is_protected(msg):

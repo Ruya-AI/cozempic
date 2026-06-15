@@ -112,6 +112,45 @@ class TestHardening1828(unittest.TestCase):
         return {"type": "assistant", "message": {"role": "assistant",
                 "content": [{"type": "tool_use", "id": i, "name": "Bash", "input": {"command": "x"}}]}}
 
+    def test_redos_fails_closed_when_no_sigalrm(self):
+        # Windows / non-main-thread: no SIGALRM budget can be armed, and a pure
+        # thread can't interrupt a CPU-bound re match — so a redos-shaped pattern
+        # must be REFUSED up front (fail closed), not run unbounded. Emulate "no
+        # SIGALRM" by patching _have_sigalrm (real Windows e2e needs a Windows box).
+        import os, time
+        from cozempic import helpers
+        with mock.patch.object(helpers, "_have_sigalrm", return_value=False), \
+             mock.patch.dict(os.environ, {"COZEMPIC_PROTECT_MATCH_SECONDS": "2.0"}):
+            evil = compile_protect_patterns([r"(a+)+$"])
+            msgs = [(0, _txt("a" * 5000 + "!"), 50)]  # would hang for minutes if matched
+            buf = io.StringIO()
+            t0 = time.perf_counter()
+            with redirect_stderr(buf):
+                n = tag_pattern_matches(msgs, evil)
+            dt = time.perf_counter() - t0
+            self.assertLess(dt, 1.0, "must refuse the risky pattern before matching, not hang")
+            self.assertEqual(n, 0, "fail closed: no protection applied")
+            self.assertNotIn(_PATTERN_PROTECTED_KEY, msgs[0][1])
+            self.assertIn("no time budget on this platform", buf.getvalue())
+
+    def test_safe_pattern_still_works_when_no_sigalrm(self):
+        # A non-redos pattern must still match normally on the no-SIGALRM path.
+        from cozempic import helpers
+        with mock.patch.object(helpers, "_have_sigalrm", return_value=False):
+            pats = compile_protect_patterns([r"GATE CONTRACT R\d+"])
+            msgs = [(0, _txt("GATE CONTRACT R1 standing rule"), 10)]
+            self.assertEqual(tag_pattern_matches(msgs, pats), 1)
+            self.assertIn(_PATTERN_PROTECTED_KEY, msgs[0][1])
+
+    def test_redos_shape_detector(self):
+        from cozempic.helpers import _pattern_is_redos_risky as risky
+        self.assertTrue(risky(r"(a+)+$"))
+        self.assertTrue(risky(r"(a*)*"))
+        self.assertTrue(risky(r"(ab+c)*"))
+        self.assertFalse(risky(r"GATE CONTRACT R\d+"))
+        self.assertFalse(risky(r"foo|bar|baz"))
+        self.assertFalse(risky(r"R\d{1,5}"))
+
     def test_redos_pattern_fails_open_within_budget(self):
         # A catastrophic-backtracking pattern must NOT hang the prune/daemon — it
         # times out and fails open (no protection this cycle), not seconds/minutes.

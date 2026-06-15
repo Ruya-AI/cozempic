@@ -70,6 +70,36 @@ class TestMinifyDiffGate(unittest.TestCase):
         self.assertIn("unchanged lines", out, "a real unified diff must still collapse context")
         self.assertIn("+new", out)
 
+    def test_single_fake_hunk_line_with_indented_logs_preserved(self):
+        # Fleet repro: ONE hunk-shaped line in non-diff output (no ---/+++ envelope)
+        # must NOT open the gate; indented log lines must survive verbatim.
+        from cozempic.strategies.standard import _minify_tool_content
+        content = (
+            "Replaying journal @@ -1 +1 @@ marker found:\n"
+            "   ERROR connection refused to db-primary\n"
+            "   ERROR connection refused to db-replica\n"
+            "   WARN retry budget exhausted\n"
+            "   INFO falling back to cache\n"
+            "   INFO request completed in 4.2s\n"
+            "done\n"
+        )
+        self.assertEqual(_minify_tool_content(content), content,
+                         "a lone hunk-shaped line must not trigger collapse of indented logs")
+
+    def test_indented_config_after_fake_hunk_preserved(self):
+        from cozempic.strategies.standard import _minify_tool_content
+        content = (
+            "@@ -1 +1 @@\n"
+            "   api_key = SECRET_DO_NOT_LOSE\n"
+            "   host = db-primary\n"
+            "   port = 5432\n"
+            "   timeout = 30\n"
+            "   retries = 5\n"
+        )
+        out = _minify_tool_content(content)
+        self.assertIn("SECRET_DO_NOT_LOSE", out, "indented config must never be collapsed away")
+        self.assertEqual(out, content)
+
     def test_non_diff_with_at_at_substring_preserved(self):
         # Prose/log that merely contains '@@' and space-indented lines must be
         # returned VERBATIM — not run through the diff collapser.

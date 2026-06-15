@@ -526,13 +526,14 @@ def _minify_tool_content(content: str) -> str:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Collapse diff context lines — but ONLY for a GENUINE unified diff. The old
-    # gate (startswith "diff " OR a bare "\n@@" substring) over-triggered on any
-    # content that merely contained "\n@@" (logs, code, prose discussing diffs);
-    # _collapse_diff_context then collapsed every space-prefixed line into
-    # "[...unchanged...]", silently destroying real (indented) content. Require an
-    # actual hunk header `@@ -a,b +c,d @@` so non-diff content is never collapsed.
-    if "\0" not in content and _UNIFIED_HUNK_RE.search(content):
+    # Collapse diff context lines — but ONLY for a GENUINE unified diff. The gate
+    # requires the unified-diff ENVELOPE (a `--- `/`+++ ` file-header pair or a
+    # `diff ` command line) AND a real hunk header. A lone coincidental `@@ … @@`
+    # line in non-diff output (a git-log fragment, CI text, an indented config
+    # block) no longer triggers collapse — and even past the gate,
+    # _collapse_diff_context only collapses context lines INSIDE a hunk, so it can
+    # never wholesale-destroy indented non-diff content (the audit P1).
+    if "\0" not in content and _looks_like_unified_diff(content):
         collapsed = _collapse_diff_context(content)
         if collapsed != content:
             return collapsed
@@ -542,30 +543,54 @@ def _minify_tool_content(content: str) -> str:
 
 # A real unified-diff hunk header, anchored at line start: "@@ -12,7 +12,9 @@".
 _UNIFIED_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M)
+# The file-header pair every unified diff carries: a "--- …" line immediately
+# followed by a "+++ …" line.
+_DIFF_FILE_HDR_RE = re.compile(r"^--- .*\n\+\+\+ ", re.M)
+
+
+def _looks_like_unified_diff(content: str) -> bool:
+    """True only for content with the unified-diff envelope (so we never collapse
+    non-diff output that merely contains a hunk-shaped line)."""
+    if not _UNIFIED_HUNK_RE.search(content):
+        return False
+    if _DIFF_FILE_HDR_RE.search(content):
+        return True
+    return content.startswith("diff ") or "\ndiff --git " in content or "\ndiff " in content
 
 
 def _collapse_diff_context(diff_text: str) -> str:
-    """Strip unchanged context lines from unified diffs, keep +/- and headers."""
+    """Strip unchanged context lines from unified diffs, keep +/- and headers.
+
+    Context lines (" "-prefixed) are collapsed ONLY while inside a hunk (after an
+    `@@` header). Lines before the first hunk, and any non-hunk content, are kept
+    verbatim — so a stray indented block cannot be destroyed even if the gate
+    passed on a real diff that also contains trailing prose."""
     lines = diff_text.split("\n")
     result = []
     context_run = 0
+    in_hunk = False
+
+    def _flush():
+        nonlocal context_run
+        if context_run > 0:
+            result.append(f"  [...{context_run} unchanged lines...]")
+            context_run = 0
 
     for line in lines:
-        if line.startswith(("diff ", "---", "+++", "@@", "+", "-")):
-            if context_run > 0:
-                result.append(f"  [...{context_run} unchanged lines...]")
-                context_run = 0
+        if line.startswith("@@"):
+            _flush()
+            in_hunk = True
             result.append(line)
-        elif line.startswith(" "):
+        elif line.startswith(("diff ", "---", "+++", "+", "-")):
+            _flush()
+            result.append(line)
+        elif in_hunk and line.startswith(" "):
             context_run += 1
         else:
-            if context_run > 0:
-                result.append(f"  [...{context_run} unchanged lines...]")
-                context_run = 0
+            # Outside a hunk, OR a non-context line inside one → keep verbatim.
+            _flush()
             result.append(line)
 
-    if context_run > 0:
-        result.append(f"  [...{context_run} unchanged lines...]")
-
+    _flush()
     collapsed = "\n".join(result)
     return collapsed if len(collapsed) < len(diff_text) else diff_text

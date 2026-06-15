@@ -422,10 +422,43 @@ def _protect_match_budget() -> float:
     return min(v, 60.0)
 
 
+def _have_sigalrm() -> bool:
+    """True iff a real SIGALRM wall-clock budget can be armed here (POSIX main
+    thread). On Windows SIGALRM is absent; off the main thread signal.signal
+    raises. Factored out so both the budget CM and the Windows fail-closed
+    pre-check agree, and so tests can emulate Windows by patching this."""
+    import signal
+    import threading
+    if not hasattr(signal, "SIGALRM"):
+        return False
+    return threading.current_thread() is threading.main_thread()
+
+
+# Classic catastrophic-backtracking shapes: a quantified group that is itself
+# quantified — (x+)+ , (x*)* , (x+)* — or two unbounded quantifiers adjacent
+# across a group close. Conservative (may false-positive); used ONLY to fail
+# CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
+# relax the POSIX SIGALRM path.
+import re as _re_redos
+_REDOS_SHAPE = _re_redos.compile(
+    r"\([^)]*[+*][^)]*\)\s*[+*]"      # (…+…)+ / (…*…)* / (…+…)*
+    r"|[+*]\s*\)[?]?\s*[+*]",         # +)+  *)*  +)?* …
+)
+
+
+def _pattern_is_redos_risky(pattern: str) -> bool:
+    """Heuristic: True if PATTERN has a nested/adjacent unbounded quantifier that
+    can backtrack catastrophically. Used to fail closed on platforms without a
+    real match-time budget (a pure-Python thread cannot interrupt a CPU-bound
+    `re` match, so a thread-watchdog is not a real safeguard)."""
+    return bool(_REDOS_SHAPE.search(pattern))
+
+
 def _match_time_budget(seconds: float):
     """Best-effort wall-clock budget for regex matching via SIGALRM (POSIX main
-    thread only). On Windows or a non-main thread it yields WITHOUT a timeout — the
-    pattern-length + per-surface input caps remain the only bound there (documented).
+    thread only). On Windows or a non-main thread it yields WITHOUT a timeout —
+    tag_pattern_matches compensates there by REFUSING redos-shaped patterns up
+    front (fail closed), so the daemon can't be frozen by a poisoned pattern.
     Returns a context manager."""
     import signal
     from contextlib import contextmanager
@@ -466,10 +499,26 @@ def tag_pattern_matches(messages: list, patterns: list) -> int:
     is flagged even when unmatchable carriers/singletons dilute the total."""
     if not patterns:
         return 0
+    # Windows / non-main-thread fail-closed: when the budget is enabled but no
+    # real SIGALRM timer can be armed, a redos-shaped pattern could freeze the
+    # daemon with no interrupt. Refuse such a pattern up front (skip protection
+    # this cycle, warn) — the same OUTCOME as the POSIX fail-open, delivered
+    # before the match instead of via a timer. Safe-shaped patterns proceed.
+    _budget = _protect_match_budget()
+    if _budget > 0 and not _have_sigalrm():
+        risky = [p for p in patterns if _pattern_is_redos_risky(getattr(p, "pattern", str(p)))]
+        if risky:
+            import sys
+            print("  Cozempic: --protect-pattern matching has no time budget on this "
+                  "platform (no SIGALRM) and a supplied pattern can backtrack "
+                  "catastrophically; skipping pattern protection this cycle. Simplify "
+                  "the pattern or set COZEMPIC_PROTECT_MATCH_SECONDS=0 to opt out.",
+                  file=sys.stderr)
+            return 0
     count = 0
     matchable = 0
     try:
-        with _match_time_budget(_protect_match_budget()):
+        with _match_time_budget(_budget):
             for _, msg_dict, _ in messages:
                 if not isinstance(msg_dict, dict):
                     continue
