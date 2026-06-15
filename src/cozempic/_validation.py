@@ -188,10 +188,10 @@ def parse_env_positive_int(name: str, *, maximum: int | None = None) -> int | No
     ``pct = total / window`` rounds toward 0 when window is huge).
     """
     raw = os.environ.get(name)
-    if raw is None or raw == "":
+    if raw is None or raw.strip() == "":
         return None
     try:
-        value = int(raw)
+        value = int(raw.strip())
     except ValueError:
         _env_warn(name, raw, "must be an integer")
         return None
@@ -217,10 +217,10 @@ def parse_env_non_negative_int(name: str, *, maximum: int | None = None) -> int 
     context window would zero out usable context — cap at the default window.
     """
     raw = os.environ.get(name)
-    if raw is None or raw == "":
+    if raw is None or raw.strip() == "":
         return None
     try:
-        value = int(raw)
+        value = int(raw.strip())
     except ValueError:
         _env_warn(name, raw, "must be an integer")
         return None

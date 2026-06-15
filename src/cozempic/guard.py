@@ -2367,17 +2367,15 @@ def _guard_tmp_root() -> Path:
 # auto-reloading it (and accounts it to the breaker so the daemon exits) rather
 # than churning kill→resume→re-bloat forever. Window/cap are env-overridable.
 def _reload_ledger_window_s() -> int:
-    try:
-        return max(60, int(os.environ.get("COZEMPIC_RELOAD_WINDOW_S", "600")))
-    except Exception:
-        return 600
+    from ._validation import parse_env_positive_int
+    v = parse_env_positive_int("COZEMPIC_RELOAD_WINDOW_S", maximum=86400)
+    return max(60, v) if v is not None else 600
 
 
 def _reload_ledger_max() -> int:
-    try:
-        return max(1, int(os.environ.get("COZEMPIC_RELOAD_MAX", "3")))
-    except Exception:
-        return 3
+    from ._validation import parse_env_positive_int
+    v = parse_env_positive_int("COZEMPIC_RELOAD_MAX", maximum=100)
+    return max(1, v) if v is not None else 3
 
 
 # ── In-flight work detector (1.8.22 safe-point gate, component A) ─────────────
