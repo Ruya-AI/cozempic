@@ -3068,3 +3068,97 @@ class TestDigestInjectMessage(unittest.TestCase):
     def test_synced_count(self):
         out = self._run(Path("/x/memory"), 3, ["rule"])
         self.assertIn("Synced 3", out)
+
+
+# ---------------------------------------------------------------------------
+# L6 — sidechain turns must not be mined as corrections
+# ---------------------------------------------------------------------------
+
+class TestSidechainInjectionGuard(unittest.TestCase):
+    """L6 injection: sub-agent (sidechain) user-turns must NEVER produce a DigestRule.
+
+    Confused-deputy scenario: a sub-agent conversation has isSidechain=True on every
+    message. Its user-side turns (scaffolding prompts) can carry EXPLICIT_CORRECTION
+    phrases. Without an isSidechain guard, extract_corrections mines those as if they
+    were the human's own corrections → untrusted sub-agent scaffolding becomes a
+    learned behavioral rule injected into the main session.
+
+    RED-at-base proof: before the guard, a sidechain user-turn with
+    "don't add Co-Authored-By" yields 1 DigestRule. After the guard: 0 rules.
+
+    Paired positive test: the IDENTICAL turn WITHOUT isSidechain DOES produce a rule
+    (proves the flag is the discriminant, not the phrase).
+    """
+
+    CORRECTION_PHRASE = "don't add Co-Authored-By to commits"
+
+    def _make_sidechain_user(self, line_idx: int, text: str) -> tuple:
+        """A user-role turn with isSidechain=True at the top level."""
+        return make_message(line_idx, {
+            "type": "user",
+            "isSidechain": True,
+            "message": {"role": "user", "content": text},
+        })
+
+    def _make_sidechain_assistant(self, line_idx: int, text: str) -> tuple:
+        """An assistant-role turn with isSidechain=True at the top level."""
+        return make_message(line_idx, {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        })
+
+    def test_sidechain_user_turn_produces_no_rule(self):
+        """RED-at-base: a sidechain user-turn carrying an EXPLICIT_CORRECTION phrase
+        must yield 0 rules. Without the guard, extract_corrections mines it and yields
+        1 rule — the confused-deputy injection.
+        """
+        messages = [
+            self._make_sidechain_user(0, self.CORRECTION_PHRASE),
+        ]
+        rules = extract_corrections(messages)
+        self.assertEqual(
+            len(rules), 0,
+            "sidechain (sub-agent) user-turn must NOT produce a DigestRule — "
+            "isSidechain guard is missing (L6 confused-deputy injection)"
+        )
+
+    def test_main_turn_same_phrase_produces_rule(self):
+        """Positive control: the SAME phrase in a main-session (non-sidechain) turn
+        MUST produce exactly 1 rule. This proves the isSidechain flag is the
+        discriminant, not the phrase itself.
+        """
+        messages = [
+            make_user(0, self.CORRECTION_PHRASE),
+        ]
+        rules = extract_corrections(messages)
+        self.assertEqual(
+            len(rules), 1,
+            "a main-session user-turn with EXPLICIT_CORRECTION must produce a rule"
+        )
+
+    def test_sidechain_assistant_does_not_pollute_prev_assistant_text(self):
+        """A sidechain assistant-turn in the pre-window must NOT set prev_assistant_text.
+
+        Without the guard, a sidechain assistant turn sets prev_assistant_text, so the
+        next main-session user-turn sees a non-empty prev_assistant_text and may be
+        classified differently (e.g. APOLOGY_FOLLOW_UP instead of EXPLICIT_CORRECTION).
+        This is a pollution of context between sidechain and main turns.
+        """
+        # Sidechain assistant turn (pre-window), then main user correction.
+        # The sidechain assistant text is irrelevant scaffolding; the main rule
+        # should have an empty `before` field (prev_assistant_text not polluted).
+        messages = [
+            self._make_sidechain_assistant(0, "Sub-agent said something here."),
+            make_user(1, self.CORRECTION_PHRASE),
+        ]
+        rules = extract_corrections(messages)
+        self.assertEqual(len(rules), 1, "main-session correction after sidechain assistant must be captured")
+        self.assertEqual(
+            rules[0].before, "",
+            "prev_assistant_text must NOT be set from a sidechain assistant turn — "
+            "sidechain context must not bleed into main-session rule evidence"
+        )
