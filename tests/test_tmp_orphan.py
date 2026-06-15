@@ -189,9 +189,6 @@ class TestAtomicWriteTmpNotJsonl:
         RED at base: suffix=path.name → ".tmp.<rand>session.jsonl" ends in ".jsonl".
         GREEN after P-A: suffix=".partial" → ends in ".partial".
         """
-        import cozempic.session as session_mod
-        import importlib
-
         jsonl = tmp_path / "session.jsonl"
         content = _real_session_content()
         jsonl.write_text(content, encoding="utf-8")
