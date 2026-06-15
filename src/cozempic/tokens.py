@@ -65,6 +65,10 @@ def default_token_thresholds_4tier(context_window: int = DEFAULT_CONTEXT_WINDOW)
     hard2 = int(context_window * DEFAULT_HARD2_TOKEN_PCT)
     return soft, hard1, hard2
 
+# Every known Haiku generation ships with a 200K context window; revisit if a
+# future Haiku launches with a larger window.
+HAIKU_CONTEXT_WINDOW = 200_000
+
 # Model → context window mapping
 # Claude Code does NOT append "[1m]" to model IDs in the JSONL — the model
 # field always contains the base ID (e.g., "claude-opus-4-7"). 1M context is
@@ -188,8 +192,12 @@ def detect_context_window(messages: list[Message]) -> int:
         # Family fallback for an unknown version: every known Haiku generation is
         # 200K, so an unrecognised Haiku must NOT fall through to the 1M default
         # (a 5x over-estimate that mis-times every guard tier on a real session).
-        if "haiku" in model.lower():
-            return 200_000
+        # Segment-match (split on "-") rather than substring to avoid spurious hits
+        # on hypothetical composite names like "claude-opus-haiku-distill".
+        # A model that genuinely can't be resolved defaults to 200K — the
+        # conservative direction (smaller window → guard fires earlier = safe).
+        if "haiku" in model.lower().split("-"):
+            return HAIKU_CONTEXT_WINDOW
 
     return DEFAULT_CONTEXT_WINDOW
 
