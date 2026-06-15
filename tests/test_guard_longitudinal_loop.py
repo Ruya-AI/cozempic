@@ -62,12 +62,12 @@ class TestLongitudinalUnprunableLoop(unittest.TestCase):
                 "live_write_skipped": False, "would_free_mb": 0.0,
                 "original_bytes": self.session.stat().st_size}
 
-    def _run_guard(self):
+    def _run_guard(self, token_estimator=None):
         patches = {
             "find_current_session": lambda *a, **k: self.sess,
             "load_messages": lambda *a, **k: [(0, {"type": "user"}, 10)],
             "checkpoint_team": lambda *a, **k: _EmptyState(),
-            "quick_token_estimate": lambda *a, **k: 600_000,   # >= 55% of 1M, < 80%
+            "quick_token_estimate": token_estimator or (lambda *a, **k: 600_000),   # >= 55% of 1M, < 80%
             "guard_prune_cycle": self._futile_prune,
             "cleanup_old_backups": lambda *a, **k: None,
             "ping_install_if_new": lambda *a, **k: None,
@@ -116,6 +116,24 @@ class TestLongitudinalUnprunableLoop(unittest.TestCase):
         backoff_sleeps = [s for s in self.sleeps if s > 2]
         self.assertEqual(backoff_sleeps, sorted(backoff_sleeps),
                          "back-off must grow, not oscillate")
+
+    def test_cycle_error_does_not_kill_daemon(self):
+        # A per-cycle exception (e.g. a malformed-usage TypeError that escaped the
+        # token estimator before the _as_int fix) must NOT kill the daemon — the
+        # loop-body guard logs and continues. Raise on the first 3 cycles, then
+        # behave normally so the run still reaches the K-exit (proving survival).
+        calls = {"n": 0}
+        def flaky_estimator(*a, **k):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                raise TypeError("unsupported operand type(s) for +: 'NoneType' and 'int'")
+            return 600_000
+        exc = self._run_guard(token_estimator=flaky_estimator)
+        # Survived the 3 raising cycles and still reached the clean K-exit.
+        self.assertEqual(exc.code, 0, "daemon must survive bad cycles and K-exit cleanly")
+        self.assertGreater(calls["n"], 3, "must have continued past the raising cycles")
+        self.assertEqual(self.prune_calls, HARD_LOOP_EXIT_THRESHOLD,
+                         "post-error cycles still reach the futile-loop K-exit")
 
 
 if __name__ == "__main__":

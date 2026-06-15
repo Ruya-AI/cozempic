@@ -217,6 +217,25 @@ def detect_context_window(messages: list[Message]) -> int:
     return DEFAULT_CONTEXT_WINDOW
 
 
+def _as_int(value) -> int:
+    """Coerce a JSONL `usage` field to a non-negative int, tolerating junk.
+
+    A malformed transcript can carry a present-but-null/string/float usage value
+    (e.g. ``"input_tokens": null``). The bare ``.get(k, 0)`` default only covers a
+    MISSING key, so ``None + 0`` (or ``"x" + 0``) raises TypeError — and that
+    escapes the guard daemon's per-cycle loop (whose only handler is
+    KeyboardInterrupt), killing the daemon with no respawn. Coerce defensively:
+    bool/None/str/garbage -> 0, float -> int, negative -> 0.
+    """
+    if isinstance(value, bool):  # bool is an int subclass — treat True/False as 0
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, float):
+        return int(value) if value > 0 else 0
+    return 0
+
+
 def _is_sidechain(msg: dict) -> bool:
     """Check if a message belongs to a sidechain (subagent) conversation."""
     return bool(msg.get("isSidechain"))
@@ -279,10 +298,10 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
         if not usage or not isinstance(usage, dict):
             continue
 
-        input_tok = usage.get("input_tokens", 0)
-        output_tok = usage.get("output_tokens", 0)
-        cache_create = usage.get("cache_creation_input_tokens", 0)
-        cache_read = usage.get("cache_read_input_tokens", 0)
+        input_tok = _as_int(usage.get("input_tokens", 0))
+        output_tok = _as_int(usage.get("output_tokens", 0))
+        cache_create = _as_int(usage.get("cache_creation_input_tokens", 0))
+        cache_read = _as_int(usage.get("cache_read_input_tokens", 0))
 
         # The cumulative context size is the sum of all token components
         total = input_tok + cache_create + cache_read + output_tok
@@ -482,10 +501,10 @@ def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDO
                 if not usage or not isinstance(usage, dict):
                     continue
 
-                input_tok = usage.get("input_tokens", 0)
-                output_tok = usage.get("output_tokens", 0)
-                cache_create = usage.get("cache_creation_input_tokens", 0)
-                cache_read = usage.get("cache_read_input_tokens", 0)
+                input_tok = _as_int(usage.get("input_tokens", 0))
+                output_tok = _as_int(usage.get("output_tokens", 0))
+                cache_create = _as_int(usage.get("cache_creation_input_tokens", 0))
+                cache_read = _as_int(usage.get("cache_read_input_tokens", 0))
                 return input_tok + cache_create + cache_read + output_tok
             # No usage in this tail — grow to the next (larger) size and retry.
 

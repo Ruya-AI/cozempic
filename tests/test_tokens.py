@@ -124,6 +124,33 @@ def make_thinking_only(line_idx: int) -> tuple[int, dict, int]:
     return make_message(line_idx, msg)
 
 
+class TestUsageCoercion(unittest.TestCase):
+    """A malformed transcript (present-but-null/string/float usage field) must not
+    crash the token estimators — the bare .get(k,0) only defaults a MISSING key, so
+    `None + 0` raised TypeError that escaped the guard daemon loop and killed it."""
+
+    def test_as_int_coerces_junk_to_zero(self):
+        from cozempic.tokens import _as_int
+        self.assertEqual(_as_int(500), 500)
+        self.assertEqual(_as_int(3.9), 3)
+        self.assertEqual(_as_int(None), 0)
+        self.assertEqual(_as_int("1234"), 0)     # strings are not summed
+        self.assertEqual(_as_int(True), 0)       # bool is an int subclass — treat as 0
+        self.assertEqual(_as_int(-5), 0)         # negative -> 0
+        self.assertEqual(_as_int([]), 0)
+
+    def test_extract_usage_tolerates_null_field(self):
+        msg = {
+            "type": "assistant",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [],
+                        "usage": {"input_tokens": None, "output_tokens": 50,
+                                  "cache_read_input_tokens": "oops", "cache_creation_input_tokens": 10}},
+        }
+        r = extract_usage_tokens([(0, msg, 100)])  # (idx, msg, bytes) tuples
+        self.assertIsNotNone(r)
+        self.assertEqual(r["total"], 60)  # 0 + 10 + 0 + 50, no crash
+
+
 class TestExtractUsageTokens(unittest.TestCase):
 
     def test_extracts_from_last_assistant(self):
