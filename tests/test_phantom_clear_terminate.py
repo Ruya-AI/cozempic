@@ -1,21 +1,34 @@
-"""Tests for Sub-PR C: phantom-clear/terminate + trailer-skip correctness.
+"""Tests for Sub-PR C: phantom-clear/terminate correctness.
 
-Three bug classes fixed:
+Two bug classes implemented (C-1, C-2); one deferred (C-3):
+
   C-1 — _completion_text in guard.py included user-typed message.content string,
          letting a user paste a task-notification to phantom-CLEAR a live Agent launch
          (outcome: SIGKILL live work).
+         FIX: _completion_text now returns only the root `content` string (queue-op).
+
   C-2 — team.py second-pass scanned task-notifications from ANY string message.content,
          letting a user type a task-notification to phantom-TERMINATE a live teammate
          (outcome: SIGKILL live team).
-  C-3 — _AGENT_DONE_TRAILER_RE blanket `continue` dropped ENTIRE tool_result when it
-         contained a foreground-done duration_ms trailer, even if a NESTED background
-         sub-launch ack preceded the trailer.  The nested launch was never credited.
+         FIX: task-notifications restricted to queue-operation root content; idle-
+         notifications retain the broader surface (structural wrapper guards them).
 
-All three: fail-safe direction is OVER-DEFER (missed completion → guard defers longer
-→ recoverable), NEVER UNDER-BLOCK (phantom-clear/skip → SIGKILL → unrecoverable).
+  C-3 — DEFERRED (PLAN §C-3): _AGENT_DONE_TRAILER_RE blanket-skip drops ENTIRE
+         tool_result with duration_ms trailer, even if a nested BG launch ack precedes
+         it.  Position-aware fix (PLAN design) CANNOT be cleanly implemented without
+         false-positives: a foreground agent's prose output can quote the full launch
+         marker text BEFORE the duration_ms trailer (proven by the pre-existing
+         test_agent_output_quoting_launch_not_credited in test_reload_gate_contract.py
+         line 382-391).  Position-alone cannot distinguish real nested launches from
+         prose quotations.  The blanket-skip stays; C-3 deferred to a follow-up PR
+         requiring a structural marker (e.g. a JSON-parseable nested_agent_id field in
+         the harness ack) that is positionally and structurally distinct from prose.
 
-Ground-truth gated: after implementing C-1+C-2+C-3, the real fixture tests in
-TestRealHarnessFixtures (test_reload_gate_contract.py) MUST still hold:
+Fail-safe direction: OVER-DEFER (missed completion → guard defers longer →
+recoverable), NEVER UNDER-BLOCK (phantom-clear/skip → SIGKILL → unrecoverable).
+
+Ground-truth gated: after C-1 + C-2, the real fixture tests in TestRealHarnessFixtures
+(test_reload_gate_contract.py) MUST still hold:
   live_team.jsonl  → safe_to_reload returns False (defer)
   finished_team.jsonl → safe_to_reload returns True (quiescent)
 """
@@ -327,43 +340,22 @@ class TestPhantomTerminate(unittest.TestCase):
         )
 
 
-# ─────────────────────────── C-3: trailer-skip regression ────────────────────
-
-# A foreground Agent result that ALSO contains a nested background sub-launch ack
-# before the duration_ms trailer.  The outer Agent finished (FG done), but the inner
-# Agent is still live (BG launch) and must be credited.
-_NESTED_BG_BEFORE_TRAILER = (
-    "[outer foreground agent output — analysis complete]\n\n"
-    "Async agent launched successfully.\n"
-    "agentId: nested-bg-agent (internal ID - do not mention to user. "
-    "Use SendMessage with to: 'nested-bg-agent' to continue this agent.)\n"
-    "The agent is working in the background.\n\n"
-    "<usage>subagent_tokens: 5000\ntool_uses: 10\nduration_ms: 98765</usage>"
-)
-
-# A foreground Agent result where the prose QUOTES a launch ack AFTER the trailer
-# (echoing it, not launching it).  Must NOT be credited.
-_FG_DONE_WITH_QUOTED_LAUNCH_AFTER_TRAILER = (
-    "[output]\n\n"
-    "agentId: outer-fg-agent (use SendMessage ...)\n"
-    "<usage>subagent_tokens: 1000\ntool_uses: 5\nduration_ms: 11111</usage>\n"
-    "For reference, here is what the harness emits on a BG launch:\n"
-    "Async agent launched successfully.\nagentId: phantom-after-trailer"
-)
+# ─────────────── C-3 regression guards (existing blanket-skip stays) ──────────
+# C-3 position-aware fix is DEFERRED (see module docstring).  The regression
+# guards below pin the EXISTING correct behavior that must not break.
 
 
-class TestTrailerSkipRegression(unittest.TestCase):
-    """C-3: _AGENT_DONE_TRAILER_RE blanket-skip must become position-aware.
+class TestTrailerSkipRegressionGuards(unittest.TestCase):
+    """Regression guards for the existing _AGENT_DONE_TRAILER_RE blanket-skip.
 
-    Before: any tool_result containing 'duration_ms: N' is entirely SKIPPED, even
-    if it carries a genuine nested background sub-launch ack that precedes the trailer.
-    After: only the Agent launch extractor is position-gated — launch acks BEFORE
-    the trailer are credited; launch acks AFTER the trailer are not (prose-quoted).
-    WF and BG extractors are unaffected (duration_ms is Agent-tool-only).
+    C-3 (PLAN §C-3: nested-BG position-aware) is DEFERRED because position-alone
+    cannot distinguish a real nested launch from prose-quoted launch text that
+    precedes the trailer (proven by test_agent_output_quoting_launch_not_credited
+    in test_reload_gate_contract.py).  These guards pin the existing behavior.
     """
 
     def setUp(self):
-        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cozempic_c3_"))
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cozempic_c3g_"))
 
     def tearDown(self):
         import shutil
@@ -373,52 +365,8 @@ class TestTrailerSkipRegression(unittest.TestCase):
         p = _write(self.tmp, rows)
         return detect_in_flight(load_messages(p))
 
-    def test_nested_bg_launch_before_trailer_is_counted(self):
-        """RED at base: a nested BG launch ack before the duration_ms trailer is dropped.
-
-        Expected after fix: 'nested-bg-agent' in inflight["ids"] AND agent=True.
-        At base (before fix): agent=False (the entire result was skipped).
-        """
-        rows = [
-            _tu("ag-1", "Agent", {}),
-            _tr("ag-1", _NESTED_BG_BEFORE_TRAILER),
-        ]
-        result = self._inflight(rows)
-        self.assertTrue(
-            result["agent"],
-            "A nested BG launch ACK that PRECEDES the duration_ms trailer must be "
-            "credited (outer FG done does not cancel an inner BG launch). "
-            "Got inflight=%r" % result,
-        )
-        self.assertIn(
-            "nested-bg-agent", result["ids"],
-            "nested-bg-agent must appear in inflight ids. Got ids=%r" % result["ids"],
-        )
-
-    def test_fg_done_result_launch_ack_after_trailer_not_counted(self):
-        """Regression guard: a launch ack that appears AFTER the trailer is prose-quoted.
-
-        The harness appends usage blocks last; genuine nested BG launch acks appear
-        before the trailer. A launch ack after the trailer is the agent's prose
-        discussing/echoing the protocol — must NOT be credited.
-        """
-        rows = [
-            _tu("ag-1", "Agent", {}),
-            _tr("ag-1", _FG_DONE_WITH_QUOTED_LAUNCH_AFTER_TRAILER),
-        ]
-        result = self._inflight(rows)
-        self.assertFalse(
-            result["agent"],
-            "A launch ack that appears AFTER the duration_ms trailer is prose-quoted; "
-            "must NOT be credited. Got inflight=%r" % result,
-        )
-        self.assertNotIn(
-            "phantom-after-trailer", result["ids"],
-            "phantom-after-trailer (post-trailer) must not appear in ids. Got=%r" % result["ids"],
-        )
-
     def test_pure_background_result_no_trailer_counted(self):
-        """Regression guard: a pure BG launch result (no duration_ms) must still be counted."""
+        """Pure BG launch result (no duration_ms) must still be detected."""
         rows = [
             _tu("ag-1", "Agent", {}),
             _tr("ag-1", _BG_LAUNCH_ACK),
@@ -429,7 +377,7 @@ class TestTrailerSkipRegression(unittest.TestCase):
         self.assertIn("agent-live-001", result["ids"])
 
     def test_pure_foreground_result_with_trailer_no_launch_not_counted(self):
-        """Regression guard: a FG-done result with no launch ack must not fabricate a launch."""
+        """FG-done result with trailer and no launch ack must not fabricate a launch."""
         rows = [
             _tu("ag-1", "Agent", {}),
             _tr("ag-1", _FG_DONE_TRAILER),

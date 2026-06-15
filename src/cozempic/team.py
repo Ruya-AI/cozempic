@@ -845,28 +845,38 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                         state.team_name = team_m.group(1).strip()
 
     # ── Second pass: scan for task-notifications and idle-notifications ──
-    # Both XML patterns live in string content (user messages or queue-operations).
-    # Combining them in one pass avoids a third full-transcript scan.
+    # Both XML patterns live in string content (user messages or queue-operations),
+    # but with different surface restrictions:
     #
-    # Sources:
-    #   task-notification — <task-notification>…</task-notification> (subagent done)
-    #   idle_notification — <teammate-message teammate_id="X">{"type":"idle_notification"…}
+    #   task-notification — QUEUE-OPERATION ROOT CONTENT ONLY.
+    #     Reason: a user can type (or paste) any <task-notification> string.  If the
+    #     second pass accepted user-typed message.content it would phantom-TERMINATE a
+    #     live teammate, making safe_to_reload return True → SIGKILL (PR-8 C-2 fix).
+    #     Fail-safe: a missed completion → teammate stays "running" → gate over-defers
+    #     (recoverable), never under-blocks (SIGKILL).
+    #
+    #   idle_notification — ANY STRING message.content OR queue-operation.
+    #     Safe because the structural <teammate-message teammate_id="X"> wrapper is
+    #     required AND the teammate must already be in seen_teammates.  A user typing
+    #     this wrapper for an unspawned teammate is a no-op (resolved not in
+    #     seen_teammates → continue).
     for line_idx, msg, byte_size in messages:
-        # Extract content string from either schema
         if msg.get("type") == "queue-operation":
-            content = msg.get("content", "")
+            _task_notif_content = msg.get("content", "")
+            _idle_notif_content = _task_notif_content
         else:
             inner = msg.get("message", {})
-            content = inner.get("content", "")
-
-        if not isinstance(content, str):
-            continue
+            raw = inner.get("content", "")
+            # task-notifications: queue-operation only (see comment above — C-2).
+            _task_notif_content = ""
+            # idle-notifications: any string content (structural wrapper guards it).
+            _idle_notif_content = raw if isinstance(raw, str) else ""
 
         # ── task-notifications ────────────────────────────────────────────
         # Parse each notification block, then its fields INDEPENDENTLY (order- and
         # extra-tag tolerant) so the REAL format (<tool-use-id>/<output-file> between
         # <task-id> and <status>) still clears a completed teammate/subagent.
-        for _blk in _TASK_NOTIF_BLOCK_RE.finditer(content[:_RELOAD_GATE_SCAN_CAP]):
+        for _blk in _TASK_NOTIF_BLOCK_RE.finditer(_task_notif_content[:_RELOAD_GATE_SCAN_CAP]):
             _body = _blk.group(1)
             _id_m = _TASK_NOTIF_ID_RE.search(_body)
             _st_m = _TASK_NOTIF_STATUS_RE.search(_body)
@@ -914,7 +924,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # Fail-safe: a teammate-message beyond the cap is MISSED → teammate
         # stays "running" → safe_to_reload/agents_active keep it protected →
         # gate OVER-DEFERS (recoverable), never UNDER-BLOCKS (SIGKILL).
-        for tm_match in _TEAMMATE_MSG_RE.finditer(content[:_RELOAD_GATE_SCAN_CAP]):
+        for tm_match in _TEAMMATE_MSG_RE.finditer(_idle_notif_content[:_RELOAD_GATE_SCAN_CAP]):
             tm_id = tm_match.group(1).strip()
             tm_body = tm_match.group(2)
             resolved = _name_to_agent_id.get(tm_id, tm_id)

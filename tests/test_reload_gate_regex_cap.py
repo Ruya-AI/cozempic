@@ -152,6 +152,17 @@ def _uc(idx: int, text: str) -> tuple:
     return (idx, d, len(text))
 
 
+def _qop(idx: int, text: str) -> tuple:
+    """3-tuple for a queue-operation (genuine harness delivery surface).
+
+    Task-notifications restricted to queue-operation after Sub-PR C-2 — use
+    this helper instead of _uc() for correctness-guard tests that verify
+    task-notification parsing in extract_team_state.
+    """
+    d = {"type": "queue-operation", "content": text}
+    return (idx, d, len(text))
+
+
 class TestExtractTeamStateReDoSCap(unittest.TestCase):
     """team.py _TASK_NOTIF_BLOCK_RE.finditer(content) must be capped at _RELOAD_GATE_SCAN_CAP."""
 
@@ -200,6 +211,10 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
 
         Verifies the cap does not break the happy path — a normal notification is
         parsed and clears the subagent's running status.
+
+        Note: task-notifications are restricted to queue-operation content after
+        Sub-PR C-2 (user-typed message.content task-notifications are excluded
+        to prevent phantom-terminate). This test uses the correct surface (queue-op).
         """
         notif_text = (
             "<task-notification>"
@@ -208,7 +223,10 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
             "<result>all done</result>"
             "</task-notification>"
         )
-        msgs = self._agent_spawn_msgs() + [_uc(2, notif_text)]
+        # Use queue-operation (genuine harness surface) rather than user string content.
+        # Sub-PR C-2: task-notifications in message.content are excluded (phantom-terminate
+        # prevention); queue-op is the correct delivery surface.
+        msgs = self._agent_spawn_msgs() + [_qop(2, notif_text)]
         state = self._extract(msgs)
         subagents = state.subagents if state else []
         finder = next((s for s in subagents if "finder" in s.agent_id), None)

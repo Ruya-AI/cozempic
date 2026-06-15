@@ -2459,21 +2459,28 @@ def _block_text(b: dict) -> str:
 
 
 def _completion_text(msg: dict) -> str:
-    """Text from a message's GENUINE harness-delivery surfaces only — the root
-    `content` string (queue-operation notifications, verified to be where real
-    task-notifications land) and a user message's top-level string content. It
-    deliberately EXCLUDES tool_result blocks and assistant text blocks, so a
-    <task-notification> merely quoted/echoed inside some tool's output or the
-    model's prose cannot CLEAR a genuinely in-flight launch (a false-negative →
-    SIGKILL). Mirror of the launch side's tool-type correlation."""
-    parts = []
+    """Text from a message's GENUINE harness-delivery surfaces only.
+
+    Genuine surfaces:
+      * root `content` string: queue-operation notifications (harness-written,
+        verified against tests/fixtures/harness/*.jsonl 2026-06-09).
+
+    EXCLUDED deliberately:
+      * `message.content` STRING: user-typed free text. A user can type any
+        <task-notification> string to phantom-clear a genuinely live launch
+        (→ SIGKILL). Principle: a completion-matcher must FAIL TOWARD over-block
+        (missed clear → defer reload → recoverable) NEVER under-block
+        (phantom-clear → SIGKILL live work → unrecoverable).
+      * tool_result blocks: handled by the launch-extractor loop (launch side).
+      * assistant text: not a completion-delivery surface.
+
+    Completions are scanned only on genuine harness-delivery surfaces
+    (queue-operation root content); user-typed text is excluded.
+    """
     root = msg.get("content")
     if isinstance(root, str):
-        parts.append(root)
-    c = (msg.get("message") or {}).get("content")
-    if isinstance(c, str):
-        parts.append(c)
-    return "\n".join(parts)
+        return root
+    return ""
 
 
 # Which tool a launch marker must be paired with to count as a REAL launch (vs a
@@ -2496,8 +2503,9 @@ def detect_in_flight(messages) -> dict:
     or in the model's prose can't fabricate a PHANTOM in-flight task that wedges
     the gate (verified against a live workflow run). A result whose tool_use was
     pruned away is credited conservatively, so a REAL launch is never missed (the
-    catastrophic direction). Completions are matched broadly — they only ever
-    CLEAR an id, so a quoted one is harmless.
+    catastrophic direction). Completions are scanned only on genuine
+    harness-delivery surfaces (queue-operation root content); user-typed
+    message.content is excluded to prevent phantom-clears (→ SIGKILL).
     """
     launched_wf: set[str] = set()
     launched_bg: set[str] = set()
