@@ -137,6 +137,30 @@ class TestSnapshotAndAppend:
         reloaded = load_messages(jsonl)
         assert len(reloaded) == len(messages)
 
+    def test_unicode_line_separators_do_not_split_a_json_line(self, tmp_path):
+        """A raw U+2028/U+2029/U+0085 inside a JSON string (legal; JS JSON.stringify
+        emits U+2028/U+2029 unescaped) must NOT split the line. str.splitlines()
+        would tear it into invalid fragments and corrupt it on save — the loaders
+        must match text-mode open() (split on \\n/\\r only). Parity across all three
+        readers + a save round-trip that preserves the line."""
+        from cozempic.session import load_messages_and_snapshot, load_messages_incremental
+        jsonl = tmp_path / "u.jsonl"
+        for sep in (" ", " ", ""):
+            msg = {"type": "assistant", "message": {"role": "assistant", "content": f"a{sep}b"}}
+            keep = {"type": "user", "message": {"role": "user", "content": "ok"}}
+            jsonl.write_bytes((json.dumps(msg, ensure_ascii=False) + "\n"
+                               + json.dumps(keep) + "\n").encode("utf-8"))
+            a = load_messages(jsonl)
+            b, snap = load_messages_and_snapshot(jsonl)
+            c = load_messages_incremental(jsonl)
+            assert len(a) == len(b) == len(c) == 2, f"{sep!r}: a valid JSON line must stay one line"
+            assert [m for _, m, _ in a] == [m for _, m, _ in b], f"{sep!r}: parsed dicts must match"
+            assert not any(m.get("_parse_error") for _, m, _ in b), f"{sep!r}: no fragment parse-errors"
+            # Save round-trip keeps the separator-bearing message intact (no corruption).
+            save_messages(jsonl, b, create_backup=False, snapshot=snap)
+            reloaded = load_messages(jsonl)
+            assert reloaded[0][1]["message"]["content"] == f"a{sep}b", f"{sep!r}: content corrupted on save"
+
     def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):
         """Read-once: a line appended AFTER load_messages_and_snapshot must be
         recovered exactly ONCE on save (not duplicated). Regression for the TOCTOU

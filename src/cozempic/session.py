@@ -708,6 +708,24 @@ def _parse_one_line(raw: str, idx: int) -> Message | None:
         return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
 
 
+def _split_physical_lines(text: str) -> list[str]:
+    """Split JSONL text into physical lines EXACTLY as text-mode open() iterates.
+
+    Critically NOT ``str.splitlines()``: that also breaks on Unicode line
+    separators (U+2028 / U+2029 / U+0085 and the C0 VT/FF/FS/GS/RS) which are
+    LEGAL raw inside JSON strings — JS ``JSON.stringify`` (CC's transcript writer)
+    emits U+2028/U+2029 unescaped — so splitlines() would tear a single valid JSON
+    line into multiple un-parseable fragments and corrupt it on save. open() text
+    mode only universal-newline-splits on \\n / \\r / \\r\\n, which we replicate:
+    normalize \\r\\n and \\r to \\n, split on \\n, drop the trailing-newline artifact.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # final newline does not start a new physical line
+    return lines
+
+
 def load_messages(path: Path) -> list[Message]:
     """Load JSONL file. Returns list of (line_index, message_dict, byte_size)."""
     messages: list[Message] = []
@@ -731,9 +749,7 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     raw = path.read_bytes()
     snapshot = _FileSnapshot.from_bytes(path, raw)
     messages: list[Message] = []
-    # splitlines() matches open()'s one-item-per-physical-line iteration (drops the
-    # trailing-newline artifact), so line indices align with load_messages().
-    for i, line in enumerate(raw.decode("utf-8", errors="replace").splitlines()):
+    for i, line in enumerate(_split_physical_lines(raw.decode("utf-8", errors="replace"))):
         parsed = _parse_one_line(line, i)
         if parsed is not None:
             messages.append(parsed)
@@ -789,7 +805,10 @@ def _parse_jsonl_chunk(
     """
     out: list[Message] = []
     lines_consumed = 0
-    for offset, raw in enumerate(chunk.splitlines()):
+    # _split_physical_lines (not str.splitlines) so a raw U+2028/U+2029/U+0085
+    # inside a JSON string doesn't tear one line into invalid fragments — keeps
+    # this read-only incremental path consistent with load_messages().
+    for offset, raw in enumerate(_split_physical_lines(chunk)):
         lines_consumed += 1
         parsed = _parse_one_line(raw, start_line_index + offset)
         if parsed is not None:
