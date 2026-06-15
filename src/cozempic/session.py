@@ -753,7 +753,11 @@ def _split_physical_lines(text: str) -> list[str]:
     mode only universal-newline-splits on \\n / \\r / \\r\\n, which we replicate:
     normalize \\r\\n and \\r to \\n, split on \\n, drop the trailing-newline artifact.
     """
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Only pay the two full-buffer normalization copies when a CR is actually
+    # present — JSONL is overwhelmingly \n-only, so the common path is a single
+    # split() with no extra copy (C9: cuts the read-once peak-memory multiplier).
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()  # final newline does not start a new physical line
@@ -788,7 +792,9 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     # the prune (UnicodeDecodeError, a ValueError subclass) exactly as the strict
     # load_messages did, NOT be silently rewritten to U+FFFD and os.replace()'d over
     # the live transcript. The caller handles the raise the same way it always did.
-    for i, line in enumerate(_split_physical_lines(raw.decode("utf-8"))):
+    text = raw.decode("utf-8")
+    del raw  # C9: free the bytes copy before line processing to cap peak memory
+    for i, line in enumerate(_split_physical_lines(text)):
         parsed = _parse_one_line(line, i)
         if parsed is not None:
             messages.append(parsed)
