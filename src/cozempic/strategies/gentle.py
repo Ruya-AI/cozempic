@@ -253,7 +253,10 @@ def strategy_metadata_strip(messages: list[Message], config: dict) -> StrategyRe
     from ..tokens import _as_int
     exact_tokens_before = 0
     for _, msg, _ in messages:
-        usage = msg.get("message", {}).get("usage")
+        inner = msg.get("message")
+        if not isinstance(inner, dict):  # a non-dict "message" (str/None) would crash .get()
+            continue
+        usage = inner.get("usage")
         if isinstance(usage, dict):
             exact_tokens_before += _as_int(usage.get("input_tokens", 0)) + _as_int(usage.get("output_tokens", 0))
 

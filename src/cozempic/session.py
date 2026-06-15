@@ -137,10 +137,16 @@ def _parse_delta_lines(delta: bytes) -> list[str]:
     """Parse appended bytes into validated JSONL lines.
 
     Raises ValueError if the delta does not end on a newline boundary (Claude
-    mid-write) or json.JSONDecodeError if any line is not valid JSON.
+    mid-write), if the bytes are not valid UTF-8 (UnicodeDecodeError, a ValueError
+    subclass), or json.JSONDecodeError if any line is not valid JSON.
     Returns a list of raw JSON line strings (no trailing newline per element).
     """
-    text = delta.decode("utf-8", errors="replace")
+    # STRICT decode — this delta is appended to the WRITE buffer. An invalid byte
+    # must raise (caller treats it as a conflict and skips), never be written as
+    # U+FFFD. save_messages wraps this in except (ValueError, JSONDecodeError),
+    # and UnicodeDecodeError is a ValueError subclass, so a bad-byte delta is
+    # correctly handled as "incomplete/conflict — defer", not a corrupting merge.
+    text = delta.decode("utf-8")
     if not text.endswith("\n"):
         raise ValueError("delta does not end on newline boundary — Claude may be mid-write")
     lines = []
@@ -777,7 +783,12 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     raw = path.read_bytes()
     snapshot = _FileSnapshot.from_bytes(path, raw)
     messages: list[Message] = []
-    for i, line in enumerate(_split_physical_lines(raw.decode("utf-8", errors="replace"))):
+    # STRICT decode (no errors="replace") — this feeds save_messages on the WRITE
+    # path. A non-UTF-8 byte (binary tool_result, truncated multibyte) must ABORT
+    # the prune (UnicodeDecodeError, a ValueError subclass) exactly as the strict
+    # load_messages did, NOT be silently rewritten to U+FFFD and os.replace()'d over
+    # the live transcript. The caller handles the raise the same way it always did.
+    for i, line in enumerate(_split_physical_lines(raw.decode("utf-8"))):
         parsed = _parse_one_line(line, i)
         if parsed is not None:
             messages.append(parsed)

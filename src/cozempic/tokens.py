@@ -166,7 +166,7 @@ def detect_model(messages: list[Message]) -> str | None:
             continue
         if msg.get("isSidechain"):
             continue
-        inner = msg.get("message", {})
+        inner = _inner_dict(msg)
         model = inner.get("model", "")
         if model and model != "<synthetic>":
             return model
@@ -232,8 +232,25 @@ def _as_int(value) -> int:
     if isinstance(value, int):
         return value if value > 0 else 0
     if isinstance(value, float):
-        return int(value) if value > 0 else 0
+        # inf/nan are valid JSON numbers (1e999 -> inf, json accepts NaN/Infinity)
+        # and int(inf) raises OverflowError / int(nan) raises ValueError — which
+        # would escape into the guard loop. Treat non-finite as 0.
+        import math
+        if not math.isfinite(value) or value <= 0:
+            return 0
+        return int(value)
     return 0
+
+
+def _inner_dict(msg: dict) -> dict:
+    """The message's inner dict, or {} if 'message' is missing OR a non-dict.
+
+    `msg.get("message", {})` only defaults a MISSING key — a present-but-non-dict
+    "message" (a plain string, which occurs in real JSONL) makes the following
+    `.get()` raise AttributeError and (pre-fix) escape into the guard loop. Coerce
+    a non-dict to {} so every message-access site is crash-safe."""
+    inner = msg.get("message")
+    return inner if isinstance(inner, dict) else {}
 
 
 def _is_sidechain(msg: dict) -> bool:
@@ -290,7 +307,7 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
         if msg.get("_parse_error"):
             continue
 
-        inner = msg.get("message", {})
+        inner = _inner_dict(msg)
         # Skip synthetic messages — their usage is all zeros
         if inner.get("model") == "<synthetic>":
             continue
@@ -367,7 +384,7 @@ def estimate_tokens_heuristic(
                 msg_chars += _estimate_block_chars(block)
         else:
             # Simple message with string content
-            inner = msg.get("message", {})
+            inner = _inner_dict(msg)
             content = inner.get("content", "")
             if isinstance(content, str):
                 msg_chars = len(content)
@@ -494,7 +511,7 @@ def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDO
                 if msg.get("isSidechain"):
                     continue
 
-                inner = msg.get("message", {})
+                inner = _inner_dict(msg)
                 if inner.get("model") == "<synthetic>":
                     continue
                 usage = inner.get("usage")
@@ -539,7 +556,7 @@ def calibrate_ratio(messages: list[Message]) -> float | None:
             for block in blocks:
                 total_chars += _estimate_block_chars(block)
         else:
-            inner = msg.get("message", {})
+            inner = _inner_dict(msg)
             content = inner.get("content", "")
             if isinstance(content, str):
                 total_chars += len(content)

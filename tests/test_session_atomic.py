@@ -177,6 +177,21 @@ class TestSnapshotAndAppend:
         assert not any(m.get("_parse_error") for _, m, _ in reloaded), "appended U+2028 line torn into fragments"
         assert reloaded[-1][1]["message"]["content"] == "x y", "appended separator line corrupted on merge"
 
+    def test_invalid_utf8_aborts_not_corrupts(self, tmp_path):
+        """Mission-critical: a non-UTF-8 byte on the WRITE path must raise (safe
+        abort, file untouched) — NOT be silently rewritten to U+FFFD and saved.
+        Regression: load_messages_and_snapshot used errors='replace'."""
+        jsonl = tmp_path / "bad.jsonl"
+        good = b'{"type":"user","message":{"role":"user","content":"keep"}}\n'
+        jsonl.write_bytes(good + b'{"type":"user","message":{"role":"user","content":"raw \xff byte"}}\n')
+        before = jsonl.read_bytes()
+        with pytest.raises(UnicodeDecodeError):
+            load_messages_and_snapshot(jsonl)
+        assert jsonl.read_bytes() == before, "file must be byte-untouched on a decode abort"
+        # And the strict load_messages agrees (both abort on the same input).
+        with pytest.raises(UnicodeDecodeError):
+            load_messages(jsonl)
+
     def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):
         """Read-once: a line appended AFTER load_messages_and_snapshot must be
         recovered exactly ONCE on save (not duplicated). Regression for the TOCTOU

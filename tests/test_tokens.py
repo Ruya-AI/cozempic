@@ -139,6 +139,25 @@ class TestUsageCoercion(unittest.TestCase):
         self.assertEqual(_as_int(-5), 0)         # negative -> 0
         self.assertEqual(_as_int([]), 0)
 
+    def test_as_int_nonfinite_does_not_raise(self):
+        # 1e999 -> inf, json accepts NaN/Infinity; int(inf) raises OverflowError /
+        # int(nan) raises ValueError — those must be coerced to 0, not escape.
+        from cozempic.tokens import _as_int
+        self.assertEqual(_as_int(float("inf")), 0)
+        self.assertEqual(_as_int(float("-inf")), 0)
+        self.assertEqual(_as_int(float("nan")), 0)
+        self.assertEqual(_as_int(1e999), 0)
+
+    def test_inner_dict_non_dict_message_is_safe(self):
+        # A present-but-non-dict "message" (a plain string) must not crash the
+        # token sites (the bare .get('message',{}) default only covers a missing key).
+        from cozempic.tokens import _inner_dict, extract_usage_tokens, quick_token_estimate
+        self.assertEqual(_inner_dict({"message": "a string"}), {})
+        self.assertEqual(_inner_dict({"message": None}), {})
+        self.assertEqual(_inner_dict({"message": {"x": 1}}), {"x": 1})
+        # extract_usage_tokens must not crash on a non-dict message line
+        self.assertIsNone(extract_usage_tokens([(0, {"type": "assistant", "message": "oops"}, 10)]))
+
     def test_extract_usage_tolerates_null_field(self):
         msg = {
             "type": "assistant",
