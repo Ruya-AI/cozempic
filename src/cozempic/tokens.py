@@ -25,8 +25,11 @@ SYSTEM_OVERHEAD_TOKENS = 21_000
 # 4M = 4x the current 1M max — generous headroom — above which we reject and
 # fall back to model-detected window so the guard keeps firing.
 MAX_CONTEXT_WINDOW = 4_000_000
-# A system-overhead override at or above a full default context window is
-# nonsensical (it would zero out usable context). Cap at the default window.
+# A system-overhead override above the default context window (1M) is a coarse
+# absurdity ceiling: it catches huge-int DoS / fat-finger overrides that would
+# zero out usable context, not a per-user-plan guarantee (a Pro user on a 200K
+# window can still set overhead=900K; the ceiling is intentionally loose).
+# The bound is strict-greater-than (> maximum), so exactly 1M is still accepted.
 MAX_SYSTEM_OVERHEAD_TOKENS = DEFAULT_CONTEXT_WINDOW
 
 # 4-tier pruning thresholds as fractions of context window
