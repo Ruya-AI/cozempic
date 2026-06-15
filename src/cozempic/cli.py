@@ -974,8 +974,9 @@ def cmd_guard_watchdog(args):
     A process safeguard outside the daemon: an OLD or broken guard that fails to
     self-arrest (the f641174c / PilotCC reload-loop) keeps spinning until killed.
     This reads the guard logs and flags the loop signature. ``--fix`` SIGTERMs a
-    LIVE looping daemon (our own process — stopping a harmful loop is safe); the
-    default is report-only.
+    LIVE looping daemon that has been IDENTITY-VERIFIED as a cozempic guard
+    process; without that check, a recycled PID (kernel reuse after hard exit)
+    could be an innocent unrelated process. The default mode is report-only.
     """
     import signal
     from .watchdog import scan_guard_logs
@@ -1000,13 +1001,16 @@ def cmd_guard_watchdog(args):
         print(f"      {h.report.reason}")
         print(f"      futile={h.report.futile_cycles} total={h.report.total_prune_cycles} "
               f"backoff_max={h.report.max_backoff_s}s exit_seen={h.report.has_exit}")
-        if getattr(args, "fix", False) and h.pid_alive and h.pid:
+        if getattr(args, "fix", False) and h.guard_confirmed:
             try:
                 os.kill(int(h.pid), signal.SIGTERM)
                 print(f"      → SIGTERM sent to looping daemon pid {h.pid}")
                 arrested += 1
             except (ProcessLookupError, PermissionError, OSError) as e:
                 print(f"      ! could not signal pid {h.pid}: {e}")
+        elif getattr(args, "fix", False) and h.pid_alive and h.pid:
+            print(f"      → pid {h.pid} is alive but is NOT a cozempic guard "
+                  f"(recycled?) — refusing to kill")
         elif h.pid_alive:
             print(f"      → re-run with --fix to terminate this looping daemon "
                   f"(or: kill {h.pid})")
