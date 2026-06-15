@@ -252,6 +252,65 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         self.assertEqual(path.parent, Path(tempfile.gettempdir()))
         self.assertEqual(path.name, "cozempic_reload_abc123.lock")
 
+    def test_slug_parity_three_producers_agree_on_uppercase_input(self):
+        """All three slug producers must produce identical output for an uppercase input.
+
+        reload_lock._slug_for was missing .lower() (XF-1 / L5): for a session_id
+        with uppercase letters (e.g. a UUID received before normalization), it
+        produced a DIFFERENT slug than spawn_lock._slug_for and guard._reload_armed_path.
+        That split-brain causes the lock and the pid/sentinel files to live at
+        different paths — the concurrency guard is silently bypassed.
+
+        RED-at-base: reload_lock._slug_for("ABCD1234EFGH-XX") == "ABCD1234EFGH"
+        (uppercase kept), while spawn_lock._slug_for produces "abcd1234efgh"
+        and guard._reload_armed_path produces "abcd1234efgh" → assertEqual FAILS.
+        """
+        import re
+        from cozempic.reload_lock import _slug_for as rl_slug
+        from cozempic.spawn_lock import _slug_for as sl_slug
+
+        # Non-UUID uppercase input: 12+ chars, contains upper letters.
+        raw = "ABCD1234EFGH-XX"
+
+        # guard._reload_armed_path inline formula (re.sub + .lower(), truncate 12)
+        guard_slug = re.sub(r"[^a-z0-9_-]", "_", raw.lower())[:12]
+
+        rl = rl_slug(raw)
+        sl = sl_slug(raw)
+
+        self.assertEqual(
+            rl, sl,
+            f"reload_lock slug {rl!r} != spawn_lock slug {sl!r} for uppercase input {raw!r}. "
+            "reload_lock._slug_for is missing .lower() — XF-1 split-brain bug."
+        )
+        self.assertEqual(
+            rl, guard_slug,
+            f"reload_lock slug {rl!r} != guard slug {guard_slug!r} for uppercase input {raw!r}."
+        )
+        # Sanity: all three must be fully lowercase (no uppercase can survive)
+        self.assertEqual(rl, rl.lower(), f"Slug {rl!r} contains uppercase letters.")
+
+    def test_slug_parity_uuid_input_unchanged(self):
+        """Standard lowercase UUID inputs must produce identical slugs across all three
+        producers both before and after the XF-1 fix — no regression.
+
+        This is a zero-change verification: a well-formed UUID (all lowercase hex
+        and dashes) is already lowercase, so .lower() is a no-op. The slug must
+        equal the first 12 chars of the UUID across all three producers.
+        """
+        import re
+        from cozempic.reload_lock import _slug_for as rl_slug
+        from cozempic.spawn_lock import _slug_for as sl_slug
+
+        uuid = "f641174c-d784-4aab-8f29-3a1c2b456def"
+        expected = "f641174c-d78"  # first 12 chars, all lowercase already
+
+        guard_slug = re.sub(r"[^a-z0-9_-]", "_", uuid.lower())[:12]
+
+        self.assertEqual(rl_slug(uuid), expected)
+        self.assertEqual(sl_slug(uuid), expected)
+        self.assertEqual(guard_slug, expected)
+
 
 class TestReloadLockSymlinkDefense(unittest.TestCase):
     """Defense against symlink attacks via /tmp: if a malicious local user
