@@ -105,6 +105,24 @@ class TeamState:
             active.append(task)
         return active, completed, blank
 
+    @staticmethod
+    def _san(text) -> str:
+        """Sanitize untrusted team-derived text before it lands in a Claude-readable
+        checkpoint/recovery surface — the sibling of the digest _sanitize_for_injection
+        fix (result_summary/lead_summary/subject/description/name come from tool
+        results and team messages and were embedded verbatim, so a multi-line /
+        markdown-structured value could inject into CC memory). Lazy import avoids
+        any import-order coupling with digest."""
+        if not text:
+            return ""
+        try:
+            from .digest import _sanitize_for_injection
+            return _sanitize_for_injection(str(text))
+        except Exception:
+            # Fail safe: at minimum collapse newlines so injection can't add lines.
+            import re as _re
+            return _re.sub(r"\s+", " ", str(text)).strip()
+
     def to_markdown(self) -> str:
         """Render team state as markdown for checkpoint file."""
         lines = []
@@ -122,10 +140,10 @@ class TeamState:
             lines.append("## Teammates")
             for t in self.teammates:
                 status = f" ({t.status})" if t.status != "unknown" else ""
-                role = f" — {t.role}" if t.role else ""
-                model = f" [{t.model}]" if t.model else ""
-                cwd = f" cwd: {t.cwd}" if t.cwd else ""
-                lines.append(f"- **{t.name}** (`{t.agent_id}`){role}{model}{status}")
+                role = f" — {self._san(t.role)}" if t.role else ""
+                model = f" [{self._san(t.model)}]" if t.model else ""
+                cwd = f" cwd: {self._san(t.cwd)}" if t.cwd else ""
+                lines.append(f"- **{self._san(t.name)}** (`{self._san(t.agent_id)}`){role}{model}{status}")
                 if cwd:
                     lines.append(f"  {cwd}")
             lines.append("")
@@ -133,11 +151,11 @@ class TeamState:
         if self.subagents:
             lines.append("## Subagents")
             for s in self.subagents:
-                agent_type = f" [{s.subagent_type}]" if s.subagent_type else ""
-                desc = f" — {s.description}" if s.description else ""
-                lines.append(f"- `{s.agent_id}`{agent_type}{desc} ({s.status})")
+                agent_type = f" [{self._san(s.subagent_type)}]" if s.subagent_type else ""
+                desc = f" — {self._san(s.description)}" if s.description else ""
+                lines.append(f"- `{self._san(s.agent_id)}`{agent_type}{desc} ({s.status})")
                 if s.result_summary:
-                    lines.append(f"  Result: {s.result_summary[:200]}")
+                    lines.append(f"  Result: {self._san(s.result_summary)[:200]}")
             lines.append("")
 
         if self.tasks:
@@ -147,10 +165,10 @@ class TeamState:
             if active_tasks:
                 for t in active_tasks:
                     icon = status_icons.get(t.status, " ")
-                    owner = f" @{t.owner}" if t.owner else ""
-                    lines.append(f"- [{icon}] {t.subject}{owner}")
+                    owner = f" @{self._san(t.owner)}" if t.owner else ""
+                    lines.append(f"- [{icon}] {self._san(t.subject)}{owner}")
                     if t.description:
-                        lines.append(f"  {t.description[:200]}")
+                        lines.append(f"  {self._san(t.description)[:200]}")
             else:
                 lines.append("- No active tasks.")
             omitted = completed_count + blank_count
@@ -165,7 +183,7 @@ class TeamState:
 
         if self.lead_summary:
             lines.append("## Lead Context")
-            lines.append(self.lead_summary)
+            lines.append(self._san(self.lead_summary))
             lines.append("")
 
         total = self.message_count
@@ -182,18 +200,18 @@ class TeamState:
         if self.teammates:
             parts.append("\nTeammates:")
             for t in self.teammates:
-                role = f" — {t.role}" if t.role else ""
-                model = f" [{t.model}]" if t.model else ""
-                parts.append(f"  - {t.name} (agent_id: {t.agent_id}){role}{model} [{t.status}]")
+                role = f" — {self._san(t.role)}" if t.role else ""
+                model = f" [{self._san(t.model)}]" if t.model else ""
+                parts.append(f"  - {self._san(t.name)} (agent_id: {self._san(t.agent_id)}){role}{model} [{t.status}]")
 
         if self.subagents:
             parts.append(f"\nSubagents ({len(self.subagents)}):")
             for s in self.subagents:
-                agent_type = f" [{s.subagent_type}]" if s.subagent_type else ""
-                desc = f" — {s.description}" if s.description else ""
-                parts.append(f"  - {s.agent_id}{agent_type}{desc} [{s.status}]")
+                agent_type = f" [{self._san(s.subagent_type)}]" if s.subagent_type else ""
+                desc = f" — {self._san(s.description)}" if s.description else ""
+                parts.append(f"  - {self._san(s.agent_id)}{agent_type}{desc} [{s.status}]")
                 if s.result_summary:
-                    parts.append(f"    Result: {s.result_summary[:150]}")
+                    parts.append(f"    Result: {self._san(s.result_summary)[:150]}")
 
         if self.tasks:
             active_tasks, completed_count, blank_count = self._task_groups()
@@ -201,8 +219,8 @@ class TeamState:
                 parts.append("\nShared active tasks:")
                 shown_tasks = active_tasks[:10]
                 for t in shown_tasks:
-                    owner = f" (owner: {t.owner})" if t.owner else ""
-                    parts.append(f"  - [{t.status.upper()}] {t.subject}{owner}")
+                    owner = f" (owner: {self._san(t.owner)})" if t.owner else ""
+                    parts.append(f"  - [{t.status.upper()}] {self._san(t.subject)}{owner}")
                 if len(active_tasks) > len(shown_tasks):
                     parts.append(f"  - ... {len(active_tasks) - len(shown_tasks)} more active task(s) omitted")
             else:
@@ -217,7 +235,7 @@ class TeamState:
                 parts.append(f"Completed/empty tasks omitted from recovery context: {', '.join(detail)}.")
 
         if self.lead_summary:
-            parts.append(f"\nCoordination context: {self.lead_summary}")
+            parts.append(f"\nCoordination context: {self._san(self.lead_summary)}")
 
         return "\n".join(parts)
 
