@@ -701,9 +701,11 @@ def start_guard(
         )
         watcher_thread.start()
 
-    # Graceful shutdown on SIGTERM (GC-1: extracted + hardened — also cleans PID/armed)
+    # Graceful shutdown on SIGTERM (GC-1: extracted + hardened — also cleans PID/armed).
+    # Use sess["session_id"] (the discovered ID), not the bare session_id arg which
+    # is None when the guard is launched without --session (auto-detect path).
     signal.signal(signal.SIGTERM, _make_sigterm_handler(
-        session_id=session_id, session_path=session_path, overflow_watcher=overflow_watcher,
+        session_id=sess["session_id"], session_path=session_path, overflow_watcher=overflow_watcher,
     ))
 
     # Resolve Claude before daemonization or other reparenting can obscure it.
