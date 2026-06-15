@@ -526,13 +526,22 @@ def _minify_tool_content(content: str) -> str:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Collapse diff context lines — validate it's a real unified diff first
-    if (content.startswith("diff ") or "\n@@" in content[:500]) and "\0" not in content:
+    # Collapse diff context lines — but ONLY for a GENUINE unified diff. The old
+    # gate (startswith "diff " OR a bare "\n@@" substring) over-triggered on any
+    # content that merely contained "\n@@" (logs, code, prose discussing diffs);
+    # _collapse_diff_context then collapsed every space-prefixed line into
+    # "[...unchanged...]", silently destroying real (indented) content. Require an
+    # actual hunk header `@@ -a,b +c,d @@` so non-diff content is never collapsed.
+    if "\0" not in content and _UNIFIED_HUNK_RE.search(content):
         collapsed = _collapse_diff_context(content)
         if collapsed != content:
             return collapsed
 
     return content
+
+
+# A real unified-diff hunk header, anchored at line start: "@@ -12,7 +12,9 @@".
+_UNIFIED_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M)
 
 
 def _collapse_diff_context(diff_text: str) -> str:
