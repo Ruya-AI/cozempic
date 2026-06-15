@@ -2264,16 +2264,43 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
             f"else echo 'No terminal emulator found' >> /tmp/cozempic_guard.log; fi"
         )
     elif system == "Windows":
-        # Escape cmd.exe metacharacters in project_dir so they cannot execute.
-        # ^ is the cmd.exe escape character; prefix each metachar with ^ to
-        # prevent them from being interpreted as shell operators.
+        # Windows has no bash, and the POSIX watcher below uses kill -0 / pgrep /
+        # date +%s / /tmp — so the old code (which built a cmd.exe resume_cmd and
+        # then ran it via Popen(["bash", ...])) was DEAD on Windows: auto-resume
+        # never fired. Build a PowerShell-native watcher instead and spawn it via
+        # powershell (the dedicated Windows branch at the spawn site below).
+        # Escape cmd.exe metacharacters in project_dir so they cannot execute when
+        # cmd.exe runs the `cd /d <dir> && claude` line.
         _cmd_metachars = set('&|<>^"')
         escaped_dir = "".join(f"^{c}" if c in _cmd_metachars else c for c in project_dir)
-        resume_cmd = (
-            f"start cmd /c \"cd /d {escaped_dir} && claude {resume_flag}\""
+        _win_resume_inner = f"cd /d {escaped_dir} && claude {resume_flag}"
+        _win_status = status_path
+        if status_path == "/dev/null" or status_path.startswith("/tmp"):
+            # /tmp / /dev/null don't exist on Windows — use the Windows temp dir.
+            _win_status = str(Path(tempfile.gettempdir()) / (f"cozempic_reload_{sid12}.status" if sid12 else "cozempic_reload.status"))
+        _win_sentinel = sentinel_path
+        if sentinel_path.startswith("/tmp"):
+            _win_sentinel = str(Path(tempfile.gettempdir()) / f"cozempic_reload_{sid12}.in-flight")
+        _win_log = str(Path(tempfile.gettempdir()) / "cozempic_guard.log")
+
+        def _ps_q(s: str) -> str:  # PowerShell single-quote literal (double internal ')
+            return "'" + s.replace("'", "''") + "'"
+
+        windows_ps_script = (
+            "$ErrorActionPreference='SilentlyContinue'; "
+            # Phase 1: wait for the old Claude to exit.
+            f"while (Get-Process -Id {int(claude_pid)} -ErrorAction SilentlyContinue) {{ Start-Sleep -Seconds 1 }}; "
+            "Start-Sleep -Seconds 1; "
+            # Phase 2: open a new window and resume (cmd.exe runs the cd && claude).
+            f"Start-Process -FilePath 'cmd.exe' -ArgumentList '/c',{_ps_q(_win_resume_inner)}; "
+            # Phase 3: drop the in-flight sentinel so the new session's guard can spawn.
+            + (f"Remove-Item -Force -ErrorAction SilentlyContinue {_ps_q(_win_sentinel)}; " if _win_sentinel else "")
+            # Phase 4: poll for the new claude; log on success, write status on timeout.
+            + f"$deadline=(Get-Date).AddSeconds({RELOAD_WATCHER_POLL_TIMEOUT_SECONDS}); $new=$null; "
+            f"while ((Get-Date) -lt $deadline) {{ $new=Get-Process -Name claude -ErrorAction SilentlyContinue | Select-Object -First 1; if ($new) {{ break }}; Start-Sleep -Seconds {RELOAD_WATCHER_POLL_INTERVAL_SECONDS} }}; "
+            f"if ($new) {{ Add-Content -Path {_ps_q(_win_log)} -Value \"$(Get-Date): Cozempic guard resumed Claude (new PID $($new.Id))\" }} "
+            f"else {{ Set-Content -Path {_ps_q(_win_status)} -Value \"failed`n$(Get-Date -Format o)`nnew Claude did not start within {RELOAD_WATCHER_POLL_TIMEOUT_SECONDS}s`ninvestigate: claude on PATH / auth / JSONL path\" }}"
         )
-        # Use escaped form in log line too so the watcher_script has no raw metachars
-        log_dir = escaped_dir
     else:
         print(f"  WARNING: Auto-resume not supported on {system}.")
         # MED-3 fold: upstream wrote sentinel for plain path before calling us.
@@ -2285,10 +2312,14 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
                 pass
         return
 
-    # Compose the sentinel unlink fragment (empty string when no session_id)
-    _sentinel_unlink = f"rm -f '{sentinel_path}'; " if sentinel_path else ""
-
-    watcher_script = (
+    # Compose the sentinel unlink fragment (empty string when no session_id).
+    # The bash watcher_script below is POSIX-only; Windows uses windows_ps_script
+    # (built in the Windows branch above) — guard the assembly so we don't
+    # reference the now-Windows-undefined `resume_cmd`/`log_dir` on Windows.
+    watcher_script = None
+    if system != "Windows":
+      _sentinel_unlink = f"rm -f '{sentinel_path}'; " if sentinel_path else ""
+      watcher_script = (
         # Phase 1: wait for old Claude to exit
         f"while kill -0 {int(claude_pid)} 2>/dev/null; do sleep 1; done; "
         f"sleep 1; "
@@ -2320,13 +2351,28 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
         f"fi"
     )
 
-    subprocess.Popen(
-        ["bash", "-c", watcher_script],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    if system == "Windows":
+        # PowerShell-native watcher (the bash watcher_script above is POSIX-only
+        # and would never run on Windows). DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP
+        # so it outlives this process; no start_new_session (POSIX-only kwarg).
+        _flags = 0
+        _flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        _flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", windows_ps_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=_flags,
+        )
+    else:
+        subprocess.Popen(
+            ["bash", "-c", watcher_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 # Session-id validation for pidfile path composition.

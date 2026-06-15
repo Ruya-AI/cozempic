@@ -483,5 +483,54 @@ class TestPollPatternDoesNotMatchUnrelatedClaude(unittest.TestCase):
             fake_process.wait(timeout=3)
 
 
+class TestReloadWatcherPlatformDispatch(unittest.TestCase):
+    """The watcher must spawn a PowerShell-native script on Windows and a bash
+    script on POSIX. Regression for the audit P1: the Windows path used to embed
+    a cmd.exe command inside a POSIX bash script run via Popen(["bash", ...]),
+    which is dead on Windows (no bash) — auto-resume never fired.
+
+    Verified by EMULATION (mock platform.system + capture Popen argv); a true
+    end-to-end Windows check needs a Windows runner (no CI runner here)."""
+
+    def _capture_popen_argv(self, system):
+        captured = {}
+        def _fake_popen(args, *a, **k):
+            captured["argv"] = args
+            captured["kwargs"] = k
+            return MagicMock(pid=4321)
+        with patch("cozempic.guard.subprocess.Popen", side_effect=_fake_popen), \
+             patch("cozempic.guard.platform.system", return_value=system), \
+             patch("cozempic.guard.is_ssh_session", return_value=False), \
+             patch("cozempic.guard._detect_claude_flags", return_value=""):
+            from cozempic.guard import _spawn_reload_watcher
+            _spawn_reload_watcher(claude_pid=4321,
+                                  project_dir=r"C:\Users\me\proj" if system == "Windows" else "/tmp/proj",
+                                  session_id="abcdef12-0000-0000-0000-000000000000")
+        return captured
+
+    def test_windows_uses_powershell_not_bash(self):
+        cap = self._capture_popen_argv("Windows")
+        argv = cap["argv"]
+        self.assertEqual(argv[0], "powershell",
+                         "Windows watcher must launch via powershell, not bash")
+        script = argv[-1]
+        # PowerShell-native phases, no POSIX-isms.
+        self.assertIn("Get-Process -Id", script, "must wait on the old pid via Get-Process")
+        self.assertIn("Start-Process", script, "must resume via Start-Process")
+        self.assertIn("cmd.exe", script)
+        self.assertIn("claude", script)
+        self.assertNotIn("kill -0", script, "no POSIX kill in the Windows watcher")
+        self.assertNotIn("pgrep", script, "no POSIX pgrep in the Windows watcher")
+        # Detached, no POSIX-only start_new_session kwarg.
+        self.assertNotIn("start_new_session", cap["kwargs"])
+
+    def test_posix_still_uses_bash(self):
+        for system in ("Darwin", "Linux"):
+            cap = self._capture_popen_argv(system)
+            self.assertEqual(cap["argv"][0], "bash",
+                             f"{system} watcher must still use bash")
+            self.assertIn("kill -0", cap["argv"][-1])
+
+
 if __name__ == "__main__":
     unittest.main()
