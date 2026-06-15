@@ -24,8 +24,17 @@ def _pid_is_alive(pid: int) -> bool:
     This is the canonical implementation shared by guard.py, session.py, and
     watchdog.py (GC-3). The guard.py ``_pid_is_alive`` is an alias; session.py
     and watchdog.py ``_pid_alive`` now import this.
+
+    Coercion contract: numeric strings (e.g. JSON dict keys from the active-
+    sessions store) are coerced to int before the liveness probe.  Non-numeric
+    strings and other non-int types return False immediately.
     """
-    if not isinstance(pid, int) or pid <= 0:
+    if not isinstance(pid, int):
+        try:
+            pid = int(pid)
+        except (ValueError, TypeError):
+            return False
+    if pid <= 0:
         return False
     try:
         os.kill(pid, 0)

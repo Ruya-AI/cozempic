@@ -501,11 +501,16 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
     """
     def _graceful_shutdown(signum, frame):
         print(f"\n  [{_now()}] Signal {signum} received — final checkpoint...")
-        checkpoint_team(session_path=session_path, quiet=False)
-        if overflow_watcher:
-            overflow_watcher.stop()
-        _safe_unlink_session_pidfile(session_id)
-        clear_armed(session_id, session_path)
+        try:
+            checkpoint_team(session_path=session_path, quiet=False)
+        finally:
+            # Cleanup must run even if checkpoint_team raises (e.g. corrupt
+            # TeamState) — a leaked pidfile or armed sentinel causes a false
+            # SIGTERM on the next session or an unwarned reload.
+            if overflow_watcher:
+                overflow_watcher.stop()
+            _safe_unlink_session_pidfile(session_id)
+            clear_armed(session_id, session_path)
         sys.exit(0)
     return _graceful_shutdown
 
