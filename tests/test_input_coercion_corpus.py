@@ -74,6 +74,20 @@ def _env(name, value):
             os.environ[name] = old
 
 
+_TOKEN_ENV_KEYS = ("COZEMPIC_CONTEXT_WINDOW", "COZEMPIC_SYSTEM_OVERHEAD_TOKENS")
+
+
+def _token_env_clean() -> dict:
+    """Return current environ with both token override keys removed.
+
+    Used with ``mock.patch.dict(..., clear=True)`` to give each test a known-clean
+    token env without affecting unrelated env vars.  Shared by tests that exercise
+    either _apply_token_env_overrides (both keys) or _prescan_argv (one key), so
+    both classes exclude the full pair and test isolation is consistent.
+    """
+    return {k: v for k, v in os.environ.items() if k not in _TOKEN_ENV_KEYS}
+
+
 def _assert_finite(tc, r):
     tc.assertIsInstance(r, (int, float))
     if isinstance(r, float):
@@ -266,15 +280,10 @@ class TestApplyTokenEnvOverrides(unittest.TestCase):
     """P-C: _apply_token_env_overrides must set env vars using `is not None`,
     so --system-overhead-tokens 0 (legitimate 'no overhead') is honored."""
 
-    def _clean_env(self):
-        """Return a dict with both target keys removed so we start clean."""
-        return {k: v for k, v in os.environ.items()
-                if k not in ("COZEMPIC_CONTEXT_WINDOW", "COZEMPIC_SYSTEM_OVERHEAD_TOKENS")}
-
     def test_zero_system_overhead_sets_env(self):
         """0 is a valid 'no overhead' value — must NOT be silently dropped."""
         args = types.SimpleNamespace(system_overhead_tokens=0, context_window=None)
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._apply_token_env_overrides(args)
             self.assertEqual(os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"), "0",
                              "system_overhead_tokens=0 was silently dropped (truthiness bug)")
@@ -284,7 +293,7 @@ class TestApplyTokenEnvOverrides(unittest.TestCase):
         """context_window=0: also set (downstream parse_env_positive_int will reject it,
         but the CLI layer must not silently drop it first)."""
         args = types.SimpleNamespace(system_overhead_tokens=None, context_window=0)
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._apply_token_env_overrides(args)
             self.assertEqual(os.environ.get("COZEMPIC_CONTEXT_WINDOW"), "0")
             self.assertNotIn("COZEMPIC_SYSTEM_OVERHEAD_TOKENS", os.environ)
@@ -292,7 +301,7 @@ class TestApplyTokenEnvOverrides(unittest.TestCase):
     def test_both_none_sets_neither(self):
         """When both attrs are None, neither env var is touched."""
         args = types.SimpleNamespace(system_overhead_tokens=None, context_window=None)
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._apply_token_env_overrides(args)
             self.assertNotIn("COZEMPIC_CONTEXT_WINDOW", os.environ)
             self.assertNotIn("COZEMPIC_SYSTEM_OVERHEAD_TOKENS", os.environ)
@@ -300,7 +309,7 @@ class TestApplyTokenEnvOverrides(unittest.TestCase):
     def test_positive_values_set_env(self):
         """Normal positive values are set as expected."""
         args = types.SimpleNamespace(system_overhead_tokens=30000, context_window=200000)
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._apply_token_env_overrides(args)
             self.assertEqual(os.environ["COZEMPIC_CONTEXT_WINDOW"], "200000")
             self.assertEqual(os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"], "30000")
@@ -314,17 +323,13 @@ class TestPrescanArgvZeroOverhead(unittest.TestCase):
     so the legitimate 'no overhead' value 0 reaches the env var and is not silently
     dropped with a spurious warning."""
 
-    def _clean_env(self):
-        return {k: v for k, v in os.environ.items()
-                if k != "COZEMPIC_SYSTEM_OVERHEAD_TOKENS"}
-
     def test_zero_overhead_reaches_env_via_prescan(self):
         """E2E: drive argv through _prescan_argv; assert env var is set to '0'.
 
         This test is RED at base (prescan rejects 0 with `<= 0` gate) and GREEN
         after the fix (gate changed to `< 0`).
         """
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cleaned = cli._prescan_argv(["guard", "--system-overhead-tokens", "0"])
             self.assertEqual(
                 os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"), "0",
@@ -337,7 +342,7 @@ class TestPrescanArgvZeroOverhead(unittest.TestCase):
 
     def test_zero_overhead_eq_form_reaches_env(self):
         """E2E: --system-overhead-tokens=0 (= form) also goes through prescan correctly."""
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._prescan_argv(["guard", "--system-overhead-tokens=0"])
             self.assertEqual(
                 os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"), "0",
@@ -346,7 +351,7 @@ class TestPrescanArgvZeroOverhead(unittest.TestCase):
 
     def test_negative_overhead_still_rejected(self):
         """Negatives must still be rejected; only 0 was wrongly excluded before."""
-        with mock.patch.dict(os.environ, self._clean_env(), clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._prescan_argv(["guard", "--system-overhead-tokens", "-1"])
             self.assertIsNone(
                 os.environ.get("COZEMPIC_SYSTEM_OVERHEAD_TOKENS"),
@@ -355,12 +360,10 @@ class TestPrescanArgvZeroOverhead(unittest.TestCase):
 
     def test_context_window_zero_still_rejected(self):
         """--context-window 0 must still be rejected (0 IS invalid for context window)."""
-        env_key = "COZEMPIC_CONTEXT_WINDOW"
-        clean = {k: v for k, v in os.environ.items() if k != env_key}
-        with mock.patch.dict(os.environ, clean, clear=True):
+        with mock.patch.dict(os.environ, _token_env_clean(), clear=True):
             cli._prescan_argv(["guard", "--context-window", "0"])
             self.assertIsNone(
-                os.environ.get(env_key),
+                os.environ.get("COZEMPIC_CONTEXT_WINDOW"),
                 "--context-window 0 must be rejected (0 is not a valid context window)"
             )
 
