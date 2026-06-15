@@ -137,6 +137,30 @@ class TestSnapshotAndAppend:
         reloaded = load_messages(jsonl)
         assert len(reloaded) == len(messages)
 
+    def test_equal_size_inplace_rewrite_is_conflict_not_clobbered(self, tmp_path):
+        """Same-SIZE different-CONTENT rewrite must classify as conflict, not
+        'unchanged' — otherwise save_messages silently os.replace()s over Claude's
+        live equal-length rewrite (data loss). Regression for the audit P1."""
+        from cozempic.session import snapshot_session
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl, n=5)
+        snap = snapshot_session(jsonl)
+        # Rewrite the file in place to the SAME byte length but different content.
+        original = jsonl.read_bytes()
+        mutated = bytearray(original)
+        # Flip the last content char (keeps length identical, same inode via in-place write).
+        for i in range(len(mutated) - 2, -1, -1):
+            if chr(mutated[i]).isalnum():
+                mutated[i] = ord("Z") if chr(mutated[i]) != "Z" else ord("Y")
+                break
+        with open(jsonl, "r+b") as f:
+            f.seek(0); f.write(bytes(mutated))
+        assert jsonl.stat().st_size == snap.size, "test must keep size equal"
+        assert snap.classify(jsonl) == "conflict", "equal-size content change must be a conflict"
+        # And the high-level save must refuse rather than clobber the live rewrite.
+        with pytest.raises(PruneConflictError):
+            save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+
     def test_appended_lines_preserved(self, tmp_path):
         """Lines Claude appends mid-prune survive in the output."""
         jsonl = tmp_path / "sess.jsonl"

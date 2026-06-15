@@ -64,7 +64,17 @@ class _FileSnapshot:
         if st.st_ino != self.inode:
             return "conflict"
         if st.st_size == self.size:
-            return "unchanged"
+            # Equal SIZE is not equal CONTENT: Claude Code can rewrite a line in
+            # place to an equal-length value (e.g. an edited JSONL field, an
+            # injected equal-size marker). Re-hash before declaring "unchanged" —
+            # otherwise save_messages() would os.replace() over a live rewrite and
+            # silently lose it (data loss). A same-size content change is a conflict.
+            try:
+                if hashlib.md5(path.read_bytes()).hexdigest() == self.content_hash:
+                    return "unchanged"
+            except OSError:
+                return "conflict"
+            return "conflict"
         if st.st_size > self.size:
             data = path.read_bytes()
             if hashlib.md5(data[: self.size]).hexdigest() == self.content_hash:
