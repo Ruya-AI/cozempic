@@ -448,7 +448,7 @@ class TestIdleNotificationTransition(unittest.TestCase):
         self.assertNotIn(s, _TEAMMATE_BENIGN,
                          "User-typed idle (no teamName) must NOT transition — H-1 gate "
                          f"skips it. Status must not be benign, got {s!r}")
-        safe, reason = safe_to_reload(state, msgs, Path("/tmp/fake_session.jsonl"))
+        safe, _ = safe_to_reload(state, msgs, Path("/tmp/fake_session.jsonl"))
         self.assertFalse(safe, "Teammate with H-1-skipped idle must still block reload")
 
     def test_prose_teammate_message_does_not_transition(self):
