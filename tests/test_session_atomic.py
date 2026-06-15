@@ -177,6 +177,29 @@ class TestSnapshotAndAppend:
         assert not any(m.get("_parse_error") for _, m, _ in reloaded), "appended U+2028 line torn into fragments"
         assert reloaded[-1][1]["message"]["content"] == "x y", "appended separator line corrupted on merge"
 
+    def test_non_dict_lines_wrapped_not_crash(self, tmp_path):
+        """Mission-critical C4 root: a valid-JSON-but-non-dict line (bare string /
+        number / array / null) OR a dict line with a non-dict inner 'message' must
+        be wrapped as a _parse_error (preserved via _raw on save), so no downstream
+        consumer ever receives a non-dict message and crashes."""
+        jsonl = tmp_path / "poison.jsonl"
+        good = '{"type":"user","message":{"role":"user","content":"keep"}}'
+        poison = ['"bare string"', "null", "42", "[1,2,3]",
+                  '{"type":"assistant","message":"inner is a string"}']
+        jsonl.write_text(good + "\n" + "\n".join(poison) + "\n" + good + "\n", encoding="utf-8")
+        msgs = load_messages(jsonl)
+        # every message element is a dict
+        assert all(isinstance(m, dict) for _, m, _ in msgs)
+        # the poison lines are flagged _parse_error and preserved verbatim via _raw
+        errs = [m for _, m, _ in msgs if m.get("_parse_error")]
+        assert len(errs) == len(poison), (len(errs), len(poison))
+        # round-trips losslessly (save writes _raw)
+        m2, snap = load_messages_and_snapshot(jsonl)
+        save_messages(jsonl, m2, create_backup=False, snapshot=snap)
+        raw = jsonl.read_text(encoding="utf-8")
+        for p in poison:
+            assert p in raw, f"poison line not preserved on save: {p}"
+
     def test_invalid_utf8_aborts_not_corrupts(self, tmp_path):
         """Mission-critical: a non-UTF-8 byte on the WRITE path must raise (safe
         abort, file untouched) — NOT be silently rewritten to U+FFFD and saved.

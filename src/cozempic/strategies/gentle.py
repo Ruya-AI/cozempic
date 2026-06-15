@@ -263,6 +263,9 @@ def strategy_metadata_strip(messages: list[Message], config: dict) -> StrategyRe
     for pos, (idx, msg, size) in enumerate(messages):
         if is_protected(msg):
             continue
+        # The loader guarantees a normal message's inner "message" is a dict (or
+        # absent); a non-dict inner is wrapped as a _parse_error upstream. So the
+        # absent-key default {} is safe here.
         new_msg = {**msg, "message": {**msg.get("message", {})}}  # Shallow copy outer + inner
         changed = False
 

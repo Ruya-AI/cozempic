@@ -737,9 +737,25 @@ def _parse_one_line(raw: str, idx: int) -> Message | None:
         return None
     byte_len = len(stripped.encode("utf-8"))
     try:
-        return (idx, json.loads(stripped), byte_len)
+        obj = json.loads(stripped)
     except json.JSONDecodeError:
         return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
+    # ROOT GUARD (mission-critical C4): a line can be VALID JSON yet not an object
+    # — a bare "string", number, true/null, or [array]. Every downstream consumer
+    # (get_msg_type, get_content_blocks, the prune strategies, safety.enforce_floor,
+    # the token estimators) assumes the message element is a dict and would crash
+    # on a non-dict. Wrap it as a _parse_error so it round-trips losslessly on save
+    # (save_messages writes _raw) but no consumer ever sees a non-dict message.
+    if not isinstance(obj, dict):
+        return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
+    # Also wrap a dict line whose inner "message" is PRESENT but NON-dict (a bare
+    # string/number/array) — many consumers do msg["message"].get(...) / {**inner}
+    # and would crash. Treat it as opaque (preserve verbatim via _raw on save,
+    # never pruned). A line with NO "message" key (summary, file-history-snapshot,
+    # etc.) is normal and left as-is.
+    if "message" in obj and not isinstance(obj["message"], dict):
+        return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
+    return (idx, obj, byte_len)
 
 
 def _split_physical_lines(text: str) -> list[str]:

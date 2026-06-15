@@ -240,18 +240,39 @@ def msg_bytes(msg: dict) -> int:
 
 
 def get_msg_type(msg: dict) -> str:
-    """Get the type field from a message."""
+    """Get the type field from a message. Non-dict-safe (defense-in-depth: the
+    loader now wraps non-dict lines, but this is called widely)."""
+    if not isinstance(msg, dict):
+        return "unknown"
     return msg.get("type", "unknown")
 
 
 def get_content_blocks(msg: dict) -> list[dict]:
-    """Extract content blocks from a message's inner message object."""
-    m = msg.get("message", {})
+    """Extract content blocks from a message's inner message object.
+
+    Non-dict-safe at BOTH levels: a non-dict msg / non-dict inner "message", AND
+    non-dict ELEMENTS inside a content list (a content array can legally contain a
+    bare string or number) — every consumer iterating blocks does block.get(...),
+    which would crash on a non-dict element."""
+    if not isinstance(msg, dict):
+        return []
+    m = msg.get("message")
+    if not isinstance(m, dict):
+        return []
     content = m.get("content", [])
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     if isinstance(content, list):
-        return content
+        # Coerce non-dict elements (bare string/number) to text blocks so callers
+        # that do block.get("type")/block.get("text") never crash.
+        out = []
+        for b in content:
+            if isinstance(b, dict):
+                out.append(b)
+            elif isinstance(b, str):
+                out.append({"type": "text", "text": b})
+            # silently drop non-dict/non-str elements (numbers/None) — not renderable
+        return out
     return []
 
 
