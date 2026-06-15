@@ -498,6 +498,66 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
     save_messages site flagged by the architecture review. It exposes the
     same data-loss race to users invoking /cozempic:treat via Claude Code."""
 
+    def test_mcp_treat_session_aborts_on_conflict_behavioral(self):
+        """BEHAVIORAL (not a static scan): the MCP treat_session(execute=True) guard
+        must ABORT (PruneConflictError) and NOT clobber when the session is rewritten
+        mid-prune. Loads the plugin with a fastmcp stub and drives the real function."""
+        import importlib.util
+        import json
+        import sys
+        import types
+        from pathlib import Path
+        from unittest import mock
+        from cozempic import session as S
+
+        # Stub fastmcp so @mcp.tool() returns the function unchanged + import is cheap.
+        fake = types.ModuleType("fastmcp")
+        class _FakeMCP:
+            def __init__(self, *a, **k): pass
+            def tool(self, *a, **k):
+                def deco(fn): return fn
+                return deco
+        fake.FastMCP = _FakeMCP
+        plugin_path = Path(__file__).parent.parent / "plugin" / "servers" / "cozempic_mcp.py"
+        with mock.patch.dict(sys.modules, {"fastmcp": fake}):
+            spec = importlib.util.spec_from_file_location("cozempic_mcp_behav", plugin_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+        # A real session under the isolated projects dir (conftest sets CLAUDE_CONFIG_DIR).
+        proj = S.get_projects_dir() / "-mcp"
+        proj.mkdir(parents=True, exist_ok=True)
+        sess_path = proj / "mcpbehav1.jsonl"
+        body = "".join(json.dumps({"type": "user", "message": {"role": "user",
+                "content": "ORIGINAL_LINE_%d" % i}}) + "\n" for i in range(20))
+        sess_path.write_text(body, encoding="utf-8")
+        sess = {"path": sess_path, "session_id": "mcpbehav1", "project": "-mcp",
+                "size": sess_path.stat().st_size, "mtime": 0, "lines": 20}
+
+        # Snapshot wrapper that injects a same-prefix rewrite (→ classify=="conflict").
+        real_factory = S.snapshot_session
+        class _Conflicting:
+            def __init__(self, real, path): self._r, self._p, self._done = real, path, False
+            @property
+            def size(self): return self._r.size
+            def read_delta(self, p): return self._r.read_delta(p)
+            def classify(self, p):
+                if not self._done:
+                    with open(self._p, "r+b") as f:  # mutate the prefix in place
+                        f.seek(0); f.write(b'{"type":"user","message":{"role":"user","content":"REWRITTEN"}}')
+                    self._done = True
+                return self._r.classify(p)
+
+        with mock.patch.object(S, "find_current_session", lambda *a, **k: sess), \
+             mock.patch.object(S, "snapshot_session", lambda p: _Conflicting(real_factory(p), p)):
+            out = mod.treat_session(prescription="standard", execute=True)
+
+        self.assertIn("Aborted: session changed mid-prune", out,
+                      "treat_session must abort on a concurrent rewrite, not clobber")
+        # The original content must NOT have been replaced by the pruned buffer.
+        self.assertIn("ORIGINAL_LINE_19", sess_path.read_text(encoding="utf-8"),
+                      "conflict abort must leave the live session intact (no data loss)")
+
     def test_mcp_treat_session_uses_prune_lock_and_snapshot(self):
         import inspect
         # The plugin lives outside the src/ tree; load it via path

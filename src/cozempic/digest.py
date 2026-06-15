@@ -649,37 +649,17 @@ def admit_rule(rule: DigestRule, store: DigestStore) -> str:
 
 
 def _atomic_write_text(target: Path, data: str, encoding: str = "utf-8") -> None:
-    """Write `data` to `target` atomically with `fsync`.
+    """Atomic, fsync'd, collision-safe write — delegates to the ONE hardened
+    implementation in helpers.atomic_write_text so the temp-naming policy lives
+    in a single place and can't drift.
 
-    `fsync` before `os.replace` guarantees the new bytes are on disk before
-    the rename, so a power-loss or OOM-kill leaves `target` either fully-old
-    or fully-new — never zeroed or partially truncated. `mkstemp` provides
-    collision-safe temp paths for concurrent hook processes.
-
-    The tmp filename keeps `target.name` as its SUFFIX so the tests' `endswith`
-    filesystem patches cover the temp write too (crash-safety is test-verified).
+    Consolidation (Batch-4): this used to be a byte-identical third copy of the
+    atomic-write primitive, still on the OLD ``prefix='.tmp.', suffix=target.name``
+    pattern that #127 hardened elsewhere to ``.tmp.<name>.<rand>.partial`` — a
+    leftover divergent copy of exactly the temp-orphan class #127 set out to kill.
     """
-    import tempfile
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=".tmp.", suffix=target.name, dir=str(target.parent)
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(data)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp_path, target)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    from .helpers import atomic_write_text as _hardened_atomic_write_text
+    _hardened_atomic_write_text(target, data, encoding=encoding)
 
 
 def load_digest_store(project_dir: str = "") -> DigestStore:
