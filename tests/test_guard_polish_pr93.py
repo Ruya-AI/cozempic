@@ -313,23 +313,32 @@ class TestPolishPR93_K10DeferWhenAgentsActive(unittest.TestCase):
         # Default is 50 per architect spec.
         self.assertEqual(guard.HARD_LOOP_HARD_EXIT_THRESHOLD, 50)
 
-    def _run_loop(self, agents_active=True, max_cycles=80):
+    def _run_loop(self, agents_active=True, max_cycles=80, teammate_status=None):
         """Run start_guard with prune=0 forever and the given agents_active
-        state. Returns (exited, cycle_count)."""
+        state. Returns (exited, cycle_count).
+
+        teammate_status: if not None, adds a single teammate with that status
+        string and EMPTY subagents list, so the test exercises the teammate
+        path exclusively.
+        """
         from cozempic import guard as guard_mod
 
         class _FakeState:
-            def __init__(self, has_agents):
+            def __init__(self, has_agents, tm_status):
                 self.has_agents = has_agents
                 sub = type("S", (), {"status": "running"})()
                 self.subagents = [sub] if has_agents else []
+                # Inline teammate stub — matches the subset of TeammateInfo that
+                # _compute_agents_active reads (only .status).
+                tm = type("T", (), {"status": tm_status})() if tm_status else None
+                self.teammates = [tm] if tm else []
                 self.tasks = []
                 self.message_count = 0
 
             def is_empty(self):
-                return not self.has_agents
+                return not self.has_agents and not self.teammates
 
-        fake_state = _FakeState(agents_active)
+        fake_state = _FakeState(agents_active, teammate_status)
 
         def fake_prune_cycle(**kwargs):
             return {
@@ -406,6 +415,33 @@ class TestPolishPR93_K10DeferWhenAgentsActive(unittest.TestCase):
             exited,
             f"K=10 must NOT exit when agents_active=True (deferred). "
             f"Got exited=True after {n} cycles.",
+        )
+
+    def test_k10_defers_when_teammate_running(self):
+        """REGRESSION GUARD (PR-8 Sub-PR A) — K-exit wiring: a running teammate
+        must cause the daemon to DEFER at K=10, exactly like a running subagent.
+
+        This test exercises the FULL wiring path:
+          state.teammates[0].status="running"
+          → _compute_agents_active(state) → True
+          → guard main loop defers sys.exit at K=10
+
+        Behavioural RED at base: reverting guard.py:988 to inline
+        `agents_active = any(s.status in ("running","unknown") for s in state.subagents)`
+        causes the daemon to EXIT at K=10 (subagents=[], teammate ignored) —
+        verified by commenting the teammate branch in _compute_agents_active.
+        The existing subagent tests remain GREEN because they don't set teammates.
+        """
+        # agents_active=False disables the _FakeState subagent; teammate_status
+        # "running" adds one running teammate so ONLY the teammate path is exercised.
+        exited, n = self._run_loop(
+            agents_active=False, teammate_status="running", max_cycles=40
+        )
+        self.assertFalse(
+            exited,
+            f"K=10 must NOT exit when a teammate is running (status='running'). "
+            f"Got exited=True after {n} cycles — daemon ignored the teammate. "
+            f"Check _compute_agents_active covers state.teammates.",
         )
 
     def test_hard_cap_exits_with_agents_active(self):
