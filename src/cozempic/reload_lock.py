@@ -356,8 +356,8 @@ def _reload_sentinel_path_for(session_id: str) -> Path:
     Validates that the slug contains no path separators to prevent traversal.
     """
     slug = _slug_for(session_id)[:12]
-    # The slug comes from _slug_for which substitutes [^a-zA-Z0-9_-] with _,
-    # so it cannot contain path separators. Belt-and-suspenders check:
+    # The slug comes from _slug_for which lowercases then substitutes
+    # [^a-z0-9_-] with _, so it cannot contain path separators. Belt-and-suspenders check:
     if "/" in slug or "\\" in slug:
         raise ValueError(
             f"sentinel slug contains path separator (session_id type "
