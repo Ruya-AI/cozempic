@@ -770,20 +770,32 @@ def start_guard(
                 ):
                     # Defer: stay alive, keep cycling at backoff cap.
                     if not deferred_exit_announced:
-                        running_count = sum(
-                            1 for s in state.subagents
+                        running_subagents = sum(
+                            1 for s in (state.subagents or [])
                             if s.status in ("running", "unknown")
                         )
+                        running_teammates = sum(
+                            1 for t in (state.teammates or [])
+                            if (t.status or "").strip().lower()
+                            not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+                        )
+                        running_count = running_subagents + running_teammates
                         worst_case_min = (
                             HARD_LOOP_HARD_EXIT_THRESHOLD
                             * HARD_LOOP_BACKOFF_CAP_SECONDS
                             // 60
                         )
+                        parts = []
+                        if running_subagents:
+                            parts.append(f"{running_subagents} subagent(s)")
+                        if running_teammates:
+                            parts.append(f"{running_teammates} teammate(s)")
+                        active_desc = " + ".join(parts) if parts else f"{running_count} agent(s)"
                         print(
                             f"  [{_now()}] K={consecutive_empty_hard_prunes} "
                             f"reached normal exit threshold "
                             f"({HARD_LOOP_EXIT_THRESHOLD}) but "
-                            f"{running_count} subagent(s) still active. "
+                            f"{active_desc} still active. "
                             f"Deferring daemon exit until agents quiesce "
                             f"or K reaches hard cap "
                             f"({HARD_LOOP_HARD_EXIT_THRESHOLD}, "
@@ -970,13 +982,10 @@ def start_guard(
             if threshold_tokens is not None or soft_threshold_tokens is not None:
                 current_tokens = quick_token_estimate(session_path)
 
-            # Detect if agents are actively running (reload would kill them)
-            agents_active = False
-            if state and not state.is_empty():
-                agents_active = any(
-                    s.status in ("running", "unknown")
-                    for s in state.subagents
-                )
+            # Detect if agents are actively running (reload would kill them).
+            # Covers both subagents (Agent-tool spawns) and teammates (Agent-tool
+            # spawned team members tracked in state.teammates).
+            agents_active = _compute_agents_active(state)
 
             # ── E: interactive reload gating ──────────────────────────
             # Interactive sessions never reload mid-turn — they wait for an idle
@@ -2425,6 +2434,35 @@ _STATUS_TERMINAL = {"completed", "complete", "done", "failed", "cancelled",
 # wedge the gate (a teammate legitimately sits in these between tasks). Kept
 # minimal/conservative — anything not here AND not terminal blocks.
 _TEAMMATE_BENIGN = {"", "config", "idle", "unknown"}
+
+
+def _compute_agents_active(state) -> bool:
+    """Return True when any subagent OR teammate is actively running.
+
+    Mirrors the canonical predicate used in safe_to_reload for teammate visibility
+    (guard.py:2725-2728) and extends it to subagents so both populations are covered
+    by a single, testable function.
+
+    A subagent is active when its status is "running" or "unknown".
+    A teammate is active when its (stripped, lower-cased) status is NOT in
+    _STATUS_TERMINAL and NOT in _TEAMMATE_BENIGN — the same fail-safe DENYLIST
+    logic used by safe_to_reload.
+
+    Called from the daemon loop (guard.py:973-979) and from tests.
+    """
+    if state is None or state.is_empty():
+        return False
+    subagent_active = any(
+        s.status in ("running", "unknown")
+        for s in (state.subagents or [])
+    )
+    if subagent_active:
+        return True
+    teammate_active = any(
+        (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+        for t in (state.teammates or [])
+    )
+    return teammate_active
 
 
 def _msg_dict(item) -> dict:
