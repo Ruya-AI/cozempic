@@ -421,6 +421,30 @@ class TestDoctorRespectsPruneLock(unittest.TestCase):
         self.assertIn("Skipped", src,
             "fix_corrupted_tool_use must report skipped sessions")
 
+    def test_fix_corrupted_repairs_line_with_unicode_separator(self):
+        """A corrupt tool_use on a line that ALSO carries a raw U+2028 must still be
+        repaired — str.splitlines() would tear it into unparseable fragments and
+        silently skip the repair (4th sibling of the splitlines class)."""
+        import json
+        from cozempic import session as S
+        from cozempic import doctor as D
+        proj = S.get_projects_dir() / "-unic"
+        proj.mkdir(parents=True, exist_ok=True)
+        sess = proj / "unicrep1.jsonl"
+        corrupt_name = 'Bash" command="' + ("y" * 250) + '"'
+        # One assistant line: a corrupt tool_use AND a text block with a raw U+2028.
+        line = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "before after"},
+            {"type": "tool_use", "id": "t1", "name": corrupt_name, "input": {}},
+        ]}}, ensure_ascii=False)
+        sess.write_text(line + "\n", encoding="utf-8")
+        D.fix_corrupted_tool_use()
+        # Read back splitting on "\n" only (NOT splitlines — the line carries U+2028).
+        objs = [json.loads(ln) for ln in sess.read_text(encoding="utf-8").split("\n") if ln.strip()]
+        tu = next(b for o in objs for b in (o.get("message", {}).get("content") or [])
+                  if isinstance(o.get("message", {}).get("content"), list) and b.get("type") == "tool_use")
+        self.assertEqual(tu["name"], "Bash", "corrupt block on a U+2028 line must still be repaired")
+
     def test_fix_corrupted_preserves_concurrent_append_behavioral(self):
         """BEHAVIORAL (not static): fix_corrupted_tool_use must NOT drop a line
         Claude appends between our read and our write. Regression for the audit
@@ -454,12 +478,17 @@ class TestDoctorRespectsPruneLock(unittest.TestCase):
                 return self._real.size
             def read_delta(self, p):
                 return self._real.read_delta(p)
-            def classify(self, p):
+            def _inject(self):
                 if not self._done:  # inject append between the function's read and classify
                     with open(self._path, "a", encoding="utf-8") as f:
                         f.write(appended_line)
                     self._done = True
+            def classify(self, p):
+                self._inject()
                 return self._real.classify(p)
+            def classify_and_delta(self, p):
+                self._inject()
+                return self._real.classify_and_delta(p)
 
         # doctor now reads once via _FileSnapshot.from_bytes(path, raw); wrap that
         # so the append is injected between the read and classify.
@@ -544,12 +573,17 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
             @property
             def size(self): return self._r.size
             def read_delta(self, p): return self._r.read_delta(p)
-            def classify(self, p):
+            def _inject(self):
                 if not self._done:
                     with open(self._p, "r+b") as f:  # mutate the prefix in place
                         f.seek(0); f.write(b'{"type":"user","message":{"role":"user","content":"REWRITTEN"}}')
                     self._done = True
+            def classify(self, p):
+                self._inject()
                 return self._r.classify(p)
+            def classify_and_delta(self, p):
+                self._inject()
+                return self._r.classify_and_delta(p)
 
         real_from_bytes = S._FileSnapshot.from_bytes.__func__
         def injecting_from_bytes(cls, path, raw):

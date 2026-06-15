@@ -523,7 +523,7 @@ def fix_corrupted_tool_use() -> str:
     import re
     import shutil
 
-    from .session import _PruneLock, PruneLockError, _FileSnapshot, _parse_delta_lines
+    from .session import _PruneLock, PruneLockError, _FileSnapshot, _parse_delta_lines, _split_physical_lines
 
     sessions = find_sessions()
     total_fixed = 0
@@ -562,7 +562,11 @@ def fix_corrupted_tool_use() -> str:
         # this function previously read_text→atomic_write with no snapshot at all.
         _raw = path.read_bytes()
         snapshot = _FileSnapshot.from_bytes(path, _raw)
-        lines = _raw.decode("utf-8", errors="replace").splitlines(keepends=True)
+        # _split_physical_lines (not str.splitlines) so a corrupt tool_use on a
+        # line that ALSO carries a raw U+2028/U+2029/U+0085 isn't torn into
+        # unparseable fragments and silently skipped (4th sibling of the class).
+        # Re-append "\n" to keep the keepends "".join(lines) reconstruction.
+        lines = [ln + "\n" for ln in _split_physical_lines(_raw.decode("utf-8", errors="replace"))]
         fixed_in_session = 0
 
         for idx, line in enumerate(lines):
@@ -611,8 +615,9 @@ def fix_corrupted_tool_use() -> str:
 
         try:
             if fixed_in_session > 0:
-                # Before clobbering, check what happened to the file while we worked.
-                kind = snapshot.classify(path)
+                # Single read for both the prefix-check and the delta (no TOCTOU
+                # window between classify() and read_delta()).
+                kind, _delta_bytes = snapshot.classify_and_delta(path)
                 if kind == "conflict":
                     # Claude rewrote/truncated the prefix — our repaired buffer is
                     # stale. Refuse to write (the .bak preserves the pre-fix state);
@@ -623,7 +628,7 @@ def fix_corrupted_tool_use() -> str:
                     # repair never drops live turns. Validate the delta (raises if
                     # Claude is mid-write / corrupt → treat as conflict, skip).
                     try:
-                        delta = [ln + "\n" for ln in _parse_delta_lines(snapshot.read_delta(path))]
+                        delta = [ln + "\n" for ln in _parse_delta_lines(_delta_bytes)]
                     except Exception:
                         # mid-write (no newline boundary) or corrupt delta — don't risk it
                         skipped_sessions.append(sess["session_id"])

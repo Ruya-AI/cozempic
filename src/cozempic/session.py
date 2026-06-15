@@ -101,6 +101,32 @@ class _FileSnapshot:
         """Return bytes appended since snapshot. Caller must verify 'appended' first."""
         return path.read_bytes()[self.size :]
 
+    def classify_and_delta(self, path: Path) -> tuple[Literal["unchanged", "appended", "conflict"], bytes]:
+        """Classify AND return the append-delta from a SINGLE read of the file.
+
+        classify() + read_delta() are two separate reads, so a concurrent rewrite
+        landing between them could merge a tail the prefix-check never validated
+        (TOCTOU; Claude Code is not under our _PruneLock). Reading once and deriving
+        both the prefix-hash decision and the delta from the same bytes closes that
+        window. Returns (state, delta_bytes); delta is non-empty only for "appended".
+        """
+        try:
+            st = path.stat()
+            if st.st_ino != self.inode:
+                return "conflict", b""
+            data = path.read_bytes()
+        except OSError:
+            return "conflict", b""
+        cur = len(data)
+        if cur == self.size:
+            return ("unchanged" if hashlib.md5(data).hexdigest() == self.content_hash
+                    else "conflict"), b""
+        if cur > self.size:
+            if hashlib.md5(data[: self.size]).hexdigest() == self.content_hash:
+                return "appended", data[self.size:]
+            return "conflict", b""
+        return "conflict", b""
+
 
 def snapshot_session(path: Path) -> _FileSnapshot:
     """Snapshot a session file's identity before loading, for append-safe writes."""
@@ -947,14 +973,15 @@ def save_messages(
 
         # ── Append-aware conflict detection ──────────────────────────────────
         if snapshot is not None:
-            state = snapshot.classify(path)
+            # Single read for BOTH the prefix-hash check and the delta — classify()
+            # then read_delta() was two reads with a TOCTOU window between them.
+            state, delta = snapshot.classify_and_delta(path)
             if state == "conflict":
                 tmp_path.unlink(missing_ok=True)
                 raise PruneConflictError(
                     f"Session file was modified (prefix changed) while pruning: {path}"
                 )
             if state == "appended":
-                delta = snapshot.read_delta(path)
                 try:
                     extra_lines = _parse_delta_lines(delta)
                 except (ValueError, json.JSONDecodeError) as exc:
