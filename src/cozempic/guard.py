@@ -2452,17 +2452,12 @@ def _compute_agents_active(state) -> bool:
     """
     if state is None or state.is_empty():
         return False
-    subagent_active = any(
-        s.status in ("running", "unknown")
-        for s in (state.subagents or [])
-    )
-    if subagent_active:
+    if any(s.status in ("running", "unknown") for s in (state.subagents or [])):
         return True
-    teammate_active = any(
+    return any(
         (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
         for t in (getattr(state, "teammates", None) or [])
     )
-    return teammate_active
 
 
 def _msg_dict(item) -> dict:

@@ -997,8 +997,8 @@ class TestAgentsActiveTeammateBlind(unittest.TestCase):
     """
 
     def _compute_agents_active(self, state):
-        """Mirror the exact guard.py:974-979 computation so tests target the real logic."""
-        from cozempic.guard import _compute_agents_active  # doesn't exist yet → ImportError at base
+        """Delegate to the guard helper so tests exercise the real production logic."""
+        from cozempic.guard import _compute_agents_active
         return _compute_agents_active(state)
 
     def test_running_teammate_empty_subagents_agents_active_false_at_base(self):
