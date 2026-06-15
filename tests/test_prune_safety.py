@@ -864,6 +864,87 @@ class TestFloorCompactedSession:
             f"root uuids: {[m.get('uuid') for m in roots]}"
         )
 
+    def test_floor_step3_does_not_re_add_pre_boundary_pair_partner(self):
+        """REGRESSION GUARD (review M-1) — RED without 8dce0b7: step-3 pair-closure re-adds
+        the pre-boundary tool_result partner when the post-boundary tool_use is preserved,
+        introducing a second DAG root (2-root fork).
+
+        Scenario (compacted session with tool pair straddling the boundary):
+          idx=0  pre-result  (user, parentUuid=None)  ← PRE-boundary root; tool_result(tid-1)
+          idx=1  cb-1        (compact_boundary, parentUuid=pre-result)
+          idx=2  cs-1        (compact_summary, parentUuid=cb-1)
+          idx=3  post-use    (asst, parentUuid=cs-1)  ← tool_use(tid-1), post-boundary
+          idx=4  pt-final    (user, parentUuid=post-use)  ← last user turn
+
+        After compact-summary-collapse removes pre-result (idx=0), cb-1 is relinked to
+        parentUuid=None (becomes the session root). preserve_last_k_turns=1 preserves
+        post-use (idx=3). Step-3 pair-closure then inspects post-use:
+          tool_use(id="tid-1") → tool_use_id_to_results["tid-1"] = {pre-result.uuid}
+
+        WITHOUT 8dce0b7 gate: pre-result added to must_preserve → re-added to result
+          → result has TWO roots: cb-1 (parentUuid=None) + pre-result (parentUuid=None).
+        WITH 8dce0b7 gate: pre-result is _is_pre_boundary(idx=0) → skipped.
+          → result has exactly ONE root: cb-1.
+
+        Asserts:
+          - exactly 1 root in enforce_floor result (cb-1)
+          - pre-result uuid is NOT in the result
+        """
+        import cozempic.strategies  # noqa: F401 — registers strategy names
+        from cozempic.executor import execute_actions
+        from cozempic.strategies.gentle import strategy_compact_summary_collapse
+        from cozempic.safety import enforce_floor
+        from cozempic.config import FloorConfig
+
+        # pre-result: parentUuid=None → it IS the pre-boundary root
+        pre_result_msg = (0, {
+            "type": "user",
+            "uuid": "pre-result",
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "tid-1", "content": "ok"}],
+                "role": "user",
+            },
+        }, 80)
+        cb1_msg = _cb(1, "cb-1", parent="pre-result")
+        cs1_msg = _cs(2, "cs-1", parent="cb-1")
+        # post-use: post-boundary asst with matching tool_use
+        post_use_msg = (3, {
+            "type": "assistant",
+            "uuid": "post-use",
+            "parentUuid": "cs-1",
+            "message": {
+                "content": [{"type": "tool_use", "id": "tid-1", "name": "Bash", "input": {}}],
+                "role": "assistant",
+            },
+        }, 100)
+        pt_final_msg = _user(4, "pt-final", parent="post-use")
+
+        msgs_before = [pre_result_msg, cb1_msg, cs1_msg, post_use_msg, pt_final_msg]
+
+        # Run compact-summary-collapse (removes pre-boundary turns, relinks cb-1 to root)
+        strategy_result = strategy_compact_summary_collapse(msgs_before, {})
+        msgs_after_collapse = execute_actions(msgs_before, strategy_result.actions)
+
+        # preserve_last_k_turns=1 puts post-use into must_preserve → step-3 fires
+        cfg = FloorConfig(preserve_first_message=False, preserve_last_k_turns=1,
+                          max_user_assistant_drop_pct=0.0)
+        result = enforce_floor(msgs_before, msgs_after_collapse, cfg=cfg)
+
+        result_uuids = {m.get("uuid") for _, m, _ in result}
+        roots = [m for _, m, _ in result if not m.get("parentUuid") and m.get("uuid")]
+
+        assert "pre-result" not in result_uuids, (
+            "pre-result (pre-boundary tool_result root) must NOT be re-added by step-3 "
+            "pair-closure — the _is_pre_boundary gate in 8dce0b7 should suppress it. "
+            f"result uuids: {sorted(result_uuids)}"
+        )
+        assert len(roots) == 1, (
+            f"enforce_floor produced {len(roots)} DAG roots — expected 1 (cb-1 only). "
+            f"root uuids: {[m.get('uuid') for m in roots]}. "
+            "Step-3 pair-closure re-introduced the pre-boundary tool_result as a second root "
+            "(2-root fork — M-1 regression guard missing until this test)"
+        )
+
 
 # ── Class 9: PruneValidationError in guard_prune_cycle abort path ─────────────
 # Rewritten (H-1): see test_prune_safety_r2.py::TestGuardAbortContractRewritten
