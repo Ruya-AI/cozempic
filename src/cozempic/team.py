@@ -867,8 +867,14 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     #     teammate stays "running" → gate over-defers (recoverable), never under-blocks.
     for line_idx, msg, byte_size in messages:
         if msg.get("type") == "queue-operation":
-            _task_notif_content = msg.get("content", "")
-            _idle_notif_content = _task_notif_content
+            _raw_content = msg.get("content", "")
+            # B: guard against JSON null (content=None) — coerce to "" so the
+            # finditer call below never sees a NoneType (TypeError).
+            _task_notif_content = _raw_content if isinstance(_raw_content, str) else ""
+            # D: queue-ops never carry teamName → H-1 gate will always skip the
+            # idle-notif scan for them.  Set "" explicitly rather than aliasing
+            # _task_notif_content to avoid a latent hazard if the gate is ever relaxed.
+            _idle_notif_content = ""
         else:
             inner = msg.get("message", {})
             raw = inner.get("content", "")
@@ -881,7 +887,10 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         # Parse each notification block, then its fields INDEPENDENTLY (order- and
         # extra-tag tolerant) so the REAL format (<tool-use-id>/<output-file> between
         # <task-id> and <status>) still clears a completed teammate/subagent.
-        for _blk in _TASK_NOTIF_BLOCK_RE.finditer(_task_notif_content[:_RELOAD_GATE_SCAN_CAP]):
+        # Efficiency: _task_notif_content="" for every non-queue-op message (the
+        # common case) — skip the regex entirely rather than matching against "".
+        for _blk in (_TASK_NOTIF_BLOCK_RE.finditer(_task_notif_content[:_RELOAD_GATE_SCAN_CAP])
+                     if _task_notif_content else ()):
             _body = _blk.group(1)
             _id_m = _TASK_NOTIF_ID_RE.search(_body)
             _st_m = _TASK_NOTIF_STATUS_RE.search(_body)
@@ -921,7 +930,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                     seen_teammates[candidate].status = status
                     break
 
-            state.message_count += 1
+        state.message_count += 1
 
         # ── idle-notifications (P0-D) ────────────────────────────────────
         # <teammate-message teammate_id="X">{"type":"idle_notification",...}</teammate-message>
