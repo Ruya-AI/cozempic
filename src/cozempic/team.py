@@ -126,14 +126,14 @@ class TeamState:
     def to_markdown(self) -> str:
         """Render team state as markdown for checkpoint file."""
         lines = []
-        lines.append(f"# Agent Team Checkpoint: {self.team_name or 'unnamed'}")
+        lines.append(f"# Agent Team Checkpoint: {self._san(self.team_name) or 'unnamed'}")
         lines.append(f"_Generated: {datetime.now().isoformat()}_")
         if self.config_source:
             lines.append(f"_Source: {self.config_source}_")
         lines.append("")
 
         if self.lead_agent_id or self.lead_session_id:
-            lines.append(f"**Lead:** `{self.lead_agent_id}` (session: `{self.lead_session_id[:12]}...`)")
+            lines.append(f"**Lead:** `{self._san(self.lead_agent_id)}` (session: `{self._san(self.lead_session_id)[:12]}...`)")
             lines.append("")
 
         if self.teammates:
@@ -193,9 +193,9 @@ class TeamState:
     def to_recovery_text(self) -> str:
         """Render team state as text for injection into conversation."""
         parts = []
-        parts.append(f"Active agent team: {self.team_name or 'unnamed'}")
+        parts.append(f"Active agent team: {self._san(self.team_name) or 'unnamed'}")
         if self.lead_agent_id:
-            parts.append(f"Lead: {self.lead_agent_id} (session: {self.lead_session_id})")
+            parts.append(f"Lead: {self._san(self.lead_agent_id)} (session: {self._san(self.lead_session_id)})")
 
         if self.teammates:
             parts.append("\nTeammates:")
@@ -1227,7 +1227,7 @@ def inject_team_recovery(messages: list[Message], state: TeamState) -> list[Mess
     # Terse confirmation summary — avoid echoing the full team state back.
     summary_bits = []
     if state.team_name:
-        summary_bits.append(f"team={state.team_name}")
+        summary_bits.append(f"team={TeamState._san(state.team_name)}")
     if state.teammates:
         summary_bits.append(f"{len(state.teammates)} teammate(s)")
     if state.subagents:

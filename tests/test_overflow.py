@@ -133,10 +133,12 @@ class TestOverflowDetection(unittest.TestCase):
             json.dumps({"type": "user", "message": "hello"}),
             json.dumps({"type": "assistant", "message": "hi"}),
         ] * 10
-        # Add the overflow marker
+        # Add the overflow marker as a genuine API-error entry (the structural
+        # contract: only real error entries trigger, not any line quoting the phrase).
         lines.append(json.dumps({
-            "type": "system",
-            "message": f"Error: {OVERFLOW_PATTERN} for this model",
+            "type": "assistant",
+            "isApiErrorMessage": True,
+            "message": {"role": "assistant", "content": f"Error: {OVERFLOW_PATTERN} for this model"},
         }))
         self._write_lines(lines)
 
@@ -158,7 +160,8 @@ class TestOverflowDetection(unittest.TestCase):
         for marker in ("Prompt is too long", "context_length_exceeded", "maximum context length"):
             self.assertIn(marker, OVERFLOW_MARKERS)
             lines = [json.dumps({"type": "user", "message": "x"})] * 5
-            lines.append(json.dumps({"type": "assistant", "message": f"API error: {marker}"}))
+            lines.append(json.dumps({"type": "assistant", "isApiErrorMessage": True,
+                                     "message": {"role": "assistant", "content": f"API error: {marker}"}}))
             self._write_lines(lines)
             breaker = CircuitBreaker(session_id="t-mark", max_recoveries=3)
             breaker.reset()

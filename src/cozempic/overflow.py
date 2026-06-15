@@ -176,16 +176,15 @@ class OverflowRecovery:
                 return True
             if not isinstance(obj, dict):
                 continue
+            # ONLY a genuine API-ERROR entry counts. Requiring isApiErrorMessage (or
+            # an explicit error type/level) — NOT merely "any non-user line" — is
+            # what stops the false-kill: the assistant, a `type:summary`
+            # auto-compaction line, or a system meta line routinely DISCUSS overflow
+            # phrasing ("maximum context length", "prompt is too long") without it
+            # being a real overflow. Those must never trigger a kill+resume (C6).
             if obj.get("isApiErrorMessage") is True:
                 return True
-            # A user turn is the human typing — never an overflow signal.
-            mtype = obj.get("type")
-            role = obj.get("message", {}).get("role") if isinstance(obj.get("message"), dict) else None
-            if mtype == "user" or role == "user":
-                continue
-            # Non-user line (assistant/system/error) carrying the marker in its
-            # content => genuine overflow.
-            if any(m in _json.dumps(obj.get("message", obj)) for m in OVERFLOW_MARKERS):
+            if obj.get("type") == "error" or obj.get("level") == "error" or obj.get("isError") is True:
                 return True
         return False
 
