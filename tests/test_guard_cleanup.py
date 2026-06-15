@@ -189,7 +189,171 @@ class TestPidIsAliveCanonicalBehavior(unittest.TestCase):
         self.assertFalse(_canonical_pid_is_alive(-1))
 
     def test_non_int_pid_returns_false(self):
+        """Garbage (non-parseable) string → False.  Only numeric strings must be coerced."""
         self.assertFalse(_canonical_pid_is_alive("notanint"))  # type: ignore[arg-type]
+
+    def test_numeric_string_pid_coerced_and_probed(self):
+        """session.py:581 passes string dict-keys to _pid_is_alive.
+
+        Pre-fix: isinstance("1234", int) is False → instant False → live entries
+        pruned as dead (bug: record_active_transcript wipes existing live PIDs).
+        Post-fix: numeric strings are coerced via int() before the liveness probe.
+
+        Use os.getpid() (this process, guaranteed alive) as the numeric string.
+
+        RED at base: _pid_is_alive(str(os.getpid())) returns False (isinstance guard
+        rejects strings before os.kill is reached).
+        GREEN after fix: coercion to int → os.kill succeeds → True.
+        """
+        import os
+        result = _canonical_pid_is_alive(str(os.getpid()))  # type: ignore[arg-type]
+        self.assertTrue(result,
+                        f"_pid_is_alive('{os.getpid()}') returned False — "
+                        f"numeric string pid must be coerced to int and probed, "
+                        f"not rejected as non-int")
+
+
+# ─────────── C-1: record_active_transcript retains live pids ──────────────────
+
+class TestRecordActiveTranscriptRetainsLivePids(unittest.TestCase):
+    """record_active_transcript must NOT prune entries whose pid is alive.
+
+    Root cause of bug: _pid_is_alive now receives string keys (JSON dict keys
+    are always strings) but the isinstance(pid, int) guard in the old helpers.py
+    rejects ALL strings → live entries vanish on every write (wipes #124).
+
+    This test is UNMOCKED with respect to _pid_is_alive — it calls real process
+    liveness probes so the string-vs-int mismatch is visible end-to-end.
+    """
+
+    def setUp(self):
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        self._tmpdir = tempfile.mkdtemp(prefix="cozempic_rat_")
+        self._claude_dir = Path(self._tmpdir) / ".claude"
+        self._claude_dir.mkdir()
+        self._sessions_file = self._claude_dir / "cozempic-active-sessions.json"
+
+        # Pre-seed with two live PIDs (current process + parent).  Both are
+        # guaranteed alive throughout the test.
+        self._live_pid1 = os.getpid()
+        self._live_pid2 = os.getppid()
+        data = {
+            str(self._live_pid1): {
+                "transcript_path": str(self._claude_dir / "session1.jsonl"),
+                "session_id": "session1",
+                "recorded_at": "2026-06-15T00:00:00",
+            },
+            str(self._live_pid2): {
+                "transcript_path": str(self._claude_dir / "session2.jsonl"),
+                "session_id": "session2",
+                "recorded_at": "2026-06-15T00:00:01",
+            },
+        }
+        self._sessions_file.write_text(json.dumps(data), encoding="utf-8")
+
+        # Also create a real transcript file for the call below to accept.
+        self._new_transcript = self._claude_dir / "session3.jsonl"
+        self._new_transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_live_pid_entries_retained_after_write(self):
+        """record_active_transcript with a new PID must NOT prune live pre-existing entries.
+
+        RED at #136 HEAD: both live-pid entries are wiped because
+        _pid_is_alive(str(pid)) returns False (isinstance guard rejects strings).
+        GREEN after fix: string keys are coerced to int → live probes pass →
+        both entries survive.
+        """
+        import json
+        import os
+        from cozempic.session import record_active_transcript
+
+        # Use a fresh pid that is distinct from the two pre-seeded ones.
+        # We use pid=1 as the "current caller" (well-known alive on Unix).
+        # To avoid messing up the actual sentinel, pass a new fake transcript
+        # and a new caller pid that is alive (os.getpid() but as a different slot).
+        # Actually: pass claude_pid as a third alive pid (just re-use getpid for
+        # the caller; the dict key will be str(getpid()) which is already present
+        # so it gets replaced, that's fine — we care about live_pid2 surviving).
+        new_pid = self._live_pid1  # caller slot — will be overwritten (same pid)
+
+        with (
+            patch("cozempic.session.get_claude_dir", return_value=self._claude_dir),
+        ):
+            record_active_transcript(
+                transcript_path=str(self._new_transcript),
+                claude_pid=new_pid,
+            )
+
+        data = json.loads(self._sessions_file.read_text(encoding="utf-8"))
+        # live_pid2 must survive (it was in the file, its pid is alive, and it
+        # is NOT the caller pid, so it should only be pruned if _pid_is_alive
+        # says it's dead — which is the bug).
+        self.assertIn(
+            str(self._live_pid2),
+            data,
+            f"live pid {self._live_pid2} was pruned by record_active_transcript "
+            f"even though it is alive — numeric-string coercion missing in "
+            f"_pid_is_alive (C-1 regression)",
+        )
+
+
+# ─────────── GC-1 MED: checkpoint_team raising must not block cleanup ─────────
+
+class TestSigtermHandlerCleanupSurvivesCheckpointRaise(unittest.TestCase):
+    """If checkpoint_team raises, _safe_unlink and clear_armed must still run.
+
+    GC-1 MED: the handler calls checkpoint_team THEN cleanup. If checkpoint_team
+    raises (e.g. serialization error on a corrupt TeamState), the cleanup is
+    skipped — pidfile and armed-sentinel leak.
+
+    Fix: wrap checkpoint_team in try/finally so cleanup always runs.
+    """
+
+    def test_cleanup_runs_even_if_checkpoint_raises(self):
+        """_safe_unlink_session_pidfile and clear_armed must be called even when
+        checkpoint_team raises.
+
+        RED at base: the handler is a straight sequence — checkpoint_team()
+        raises → execution stops → unlink/clear never reached.
+        GREEN after fix: checkpoint_team in try/finally block.
+        """
+        from cozempic import guard
+
+        unlinked = []
+        cleared = []
+        sid = "deadbeef-0000-0000-0000-000000000000"
+
+        with (
+            patch.object(guard, "checkpoint_team", side_effect=RuntimeError("boom")),
+            patch.object(guard, "_safe_unlink_session_pidfile",
+                         side_effect=lambda s: unlinked.append(s)),
+            patch.object(guard, "clear_armed",
+                         side_effect=lambda s, p: cleared.append(s)),
+        ):
+            handler = guard._make_sigterm_handler(
+                session_id=sid,
+                session_path=Path("/tmp"),
+                overflow_watcher=None,
+            )
+            try:
+                handler(signal.SIGTERM, None)
+            except SystemExit:
+                pass
+            except RuntimeError:
+                # If the fix isn't in place, RuntimeError propagates out of the handler.
+                pass
+
+        self.assertIn(sid, unlinked,
+                      "_safe_unlink_session_pidfile not called when checkpoint_team raised")
+        self.assertIn(sid, cleared,
+                      "clear_armed not called when checkpoint_team raised")
 
 
 if __name__ == "__main__":
