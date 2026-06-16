@@ -311,18 +311,60 @@ class TestReloadWarnGraceBounds(unittest.TestCase):
 
 
 class TestReloadLedgerAtomicWrite(unittest.TestCase):
-    """Invariant tests for the atomic ledger write in _reload_rate_exceeded.
+    """Regression tests for the atomic ledger write in _reload_rate_exceeded.
 
-    The SIGKILL-mid-write failure mode cannot be tested deterministically in
-    a unit test.  These tests verify the two observable post-write properties:
-      1. No .tmp orphan is left after a clean write path.
-      2. The ledger contains valid JSON after one or more calls.
+    Three properties are guarded:
 
-    RED proof is by code inspection: the pre-fix `ledger_path.write_text(…)`
-    is non-atomic; the post-fix tmp+os.replace+finally-cleanup pattern matches
-    _write_armed_atomic (guard.py:2780), which is the sister-module pattern for
-    this class of write.
+      1. Crash-safety: a failed os.replace (simulating SIGKILL-mid-rename)
+         leaves the OLD ledger byte-intact and cleans the .tmp orphan.
+         RED at base ae85bcc: the old bare `ledger_path.write_text(...)` never
+         calls os.replace, so the patch is inert, the write succeeds, and the
+         pre-existing ledger is overwritten → assertion fails.  GREEN at HEAD:
+         the atomic tmp+os.replace+finally path sees the raised OSError, the
+         live file is untouched, and the finally block unlinks the .tmp.
+
+      2. No .tmp orphan is left after a clean (successful) write path.
+
+      3. The ledger contains valid JSON after one or more calls.
     """
+
+    def test_crash_safety_old_ledger_preserved_on_failed_replace(self):
+        """A simulated crash mid-rename must leave the pre-existing ledger intact.
+
+        RED at base ae85bcc: the non-atomic `ledger_path.write_text(...)` never
+        calls `os.replace`, so `patch('cozempic.guard.os.replace', side_effect=OSError)`
+        is inert — the write succeeds, overwriting the old ledger.
+        GREEN at HEAD: the atomic write calls `os.replace`; the patch raises OSError;
+        the live file is untouched; the `finally` block unlinks the .tmp orphan.
+        """
+        import json
+        import pathlib
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            ledger = pathlib.Path(d) / "test_ledger.history"
+            old_content = json.dumps([100.0, 200.0])
+            ledger.write_text(old_content)
+
+            from cozempic.guard import _reload_rate_exceeded
+
+            with patch("cozempic.guard.os.replace", side_effect=OSError("simulated mid-rename crash")):
+                _reload_rate_exceeded(ledger, now=time.time())
+
+            # (a) old ledger must survive byte-intact
+            self.assertEqual(
+                ledger.read_text(),
+                old_content,
+                "Pre-existing ledger was overwritten — atomicity guarantee violated",
+            )
+            # (b) no .tmp orphan left in the directory
+            orphans = list(pathlib.Path(d).glob("*.tmp*"))
+            self.assertEqual(
+                orphans,
+                [],
+                f".tmp orphan not cleaned after failed replace: {orphans}",
+            )
 
     def test_no_tmp_orphan_on_clean_write(self):
         """A successful write must leave no .tmp* file in the ledger directory."""
