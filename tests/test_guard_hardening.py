@@ -2353,14 +2353,14 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
 
     The write-side of the cross-project contamination chain:
       1. PreCompact hook calls cmd_checkpoint → checkpoint_team(cwd=cwd_a)
-      2. Old code: non-strict find_current_session → Strategy 4 → returns newer project B's session
+      2. Old code: non-strict find_current_session → Strategy 5 → returns newer project B's session
       3. Checkpoint extracted from B's JSONL → WRITTEN into project A's project dir
       4. PostCompact reads A's dir → finds B's team state → contamination
 
-    After fix (strict=True): checkpoint_team returns None when Strategy 3 can't match,
+    After fix (strict=True): checkpoint_team returns None when Strategy 4 can't match,
     and project B's checkpoint file is not created or modified.
 
-    RED-at-base proof (815485d): non-strict → Strategy 4 returns B's session →
+    RED-at-base proof (815485d, pre-renumber): non-strict → Strategy 5 returns B's session →
     extract_team_state([]) returns empty TeamState → checkpoint_team returns the empty
     state (not None) → `assertIsNone` FAILS.
     """
@@ -2372,14 +2372,14 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
                project B (newer, no underscore) has a session.
                _session_id_from_process → None (no process detection).
 
-        At base (broken slug + non-strict):
-          Strategy 3 computes broken slug '-Users-x-topstep_automation' ≠ any dir
-          → 0 matches → Strategy 4 picks B's session (newer)
+        At base (broken slug + non-strict, pre-renumber):
+          Strategy 4 computes broken slug '-Users-x-topstep_automation' ≠ any dir
+          → 0 matches → Strategy 5 picks B's session (newer)
           → extract_team_state returns empty TeamState → checkpoint_team returns it
           → result is not None → assertIsNone FAILS → RED.
 
         After fix (P0-A + P0-E):
-          Project A has no session file → Strategy 3 matches A's dir but finds
+          Project A has no session file → Strategy 4 matches A's dir but finds
           no JSONL → sessions list empty → strict returns None → checkpoint_team
           returns None → GREEN.
           OR: strict=True on broken slug → None → GREEN.
@@ -2434,7 +2434,7 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
                 result,
                 f"checkpoint_team(cwd=topstep_automation) returned {result!r} instead of None. "
                 "The cross-project session fallback is not being blocked. "
-                "At base: Strategy 4 returns B's session → empty TeamState returned (not None)."
+                "At base (pre-renumber): Strategy 5 returns B's session → empty TeamState returned (not None)."
             )
             # Belt-and-suspenders: B's checkpoint must be untouched.
             # Both assertions are inside the `with tempfile.TemporaryDirectory()` block
@@ -2450,12 +2450,13 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
         Setup: project A (underscore, correct dir name) with a JSONL containing a
         Task spawn (non-empty team state). Project B newer with DIFFERENT team state.
 
-        Contract: checkpoint_team(cwd=A) resolves A via Strategy 3, extracts A's
+        Contract: checkpoint_team(cwd=A) resolves A via Strategy 4, extracts A's
         state, writes A's checkpoint to A's dir. B's checkpoint is NOT written.
 
-        RED-at-base (815485d): broken slug → Strategy 3 misses A → Strategy 4 picks
-        B's session (newer) → extracts B's state → writes to B's project dir (NOT A's)
-        → A's checkpoint file never created → assertIsNotNone FAILS.
+        RED-at-base (815485d, pre-renumber): broken slug → Strategy 4 misses A →
+        Strategy 5 picks B's session (newer) → extracts B's state → writes to B's
+        project dir (NOT A's) → A's checkpoint file never created →
+        assertIsNotNone FAILS.
         """
         import json
         import re as _re

@@ -47,11 +47,11 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
         return captured.getvalue()
 
     def test_does_not_return_other_projects_checkpoint_when_other_is_newer(self, tmp_path=None):
-        """Core bug: Strategy 4 picks a newer OTHER project's session → wrong checkpoint.
+        """Core bug: Strategy 5 picks a newer OTHER project's session → wrong checkpoint.
 
         Fixture uses the CORRECT dir names (as Claude Code actually creates them, with dashes
-        for underscores). Old code computes broken slug with '_', so Strategy 3 misses project A
-        and Strategy 4 returns project B's (newer) session → contamination.
+        for underscores). Old code computes broken slug with '_', so Strategy 4 misses project A
+        and Strategy 5 returns project B's (newer) session → contamination.
         """
         import tempfile
         import re as _re
@@ -74,7 +74,7 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
         # Small sleep ensures project B mtime is strictly newer
         time.sleep(0.01)
 
-        # Project B: fanugugc (no underscore → still returned by Strategy 4 when A is missed)
+        # Project B: fanugugc (no underscore → still returned by Strategy 5 when A is missed)
         cwd_b = "/Users/x/fanugugc"
         slug_b_correct = _correct_slug(cwd_b)   # "-Users-x-fanugugc"
         proj_b = tmp_path / "projects" / slug_b_correct

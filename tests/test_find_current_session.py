@@ -25,7 +25,7 @@ def _isolated_session_home(projects_dir: Path, process_session_id: str | None = 
     """Isolate find_current_session from the developer's real ~/.claude state.
 
     Patches three seams that would otherwise let a live Claude session bleed in:
-    - get_projects_dir  → tmp projects dir (isolates Strategy 4/5)
+    - get_projects_dir  → tmp projects dir (isolates Strategy 2/4/5)
     - _session_id_from_process → controllable (isolates Strategy 2)
     - find_claude_pid   → None (isolates Strategy 1: lookup_active_transcript)
     """
@@ -149,10 +149,10 @@ class TestStrictMode:
 
 
 # ---------------------------------------------------------------------------
-# TestStrategy3ExactMatch — Bug B: substring → exact-match in Strategy 4
+# TestStrategy4ExactMatch — Bug B: substring → exact-match in Strategy 4
 # ---------------------------------------------------------------------------
 
-class TestStrategy3ExactMatch:
+class TestStrategy4ExactMatch:
     """Strategy 4 (CWD slug) must use exact-match on slug, not substring."""
 
     def test_underscore_project_found_after_slug_fix(self, tmp_path):
