@@ -250,10 +250,14 @@ def get_msg_type(msg: dict) -> str:
 def get_content_blocks(msg: dict) -> list[dict]:
     """Extract content blocks from a message's inner message object.
 
-    Non-dict-safe at BOTH levels: a non-dict msg / non-dict inner "message", AND
-    non-dict ELEMENTS inside a content list (a content array can legally contain a
-    bare string or number) — every consumer iterating blocks does block.get(...),
-    which would crash on a non-dict element."""
+    Non-dict-safe at the message / inner-message level (returns [] for a non-dict
+    msg or non-dict inner "message"). Returns the content list VERBATIM — it does
+    NOT coerce or drop non-dict ELEMENTS: an earlier coercion lost those elements on
+    the prune-WRITE path (a strategy that read coerced blocks then wrote them back
+    dropped the originals = silent data loss). Consumers that iterate blocks must
+    isinstance-guard each element themselves; strategy crashes are contained by the
+    executor's per-strategy isolation, and read-only helpers (text_of, the token
+    estimator) skip non-dict/non-string elements without writing."""
     if not isinstance(msg, dict):
         return []
     m = msg.get("message")
@@ -263,16 +267,7 @@ def get_content_blocks(msg: dict) -> list[dict]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     if isinstance(content, list):
-        # Coerce non-dict elements (bare string/number) to text blocks so callers
-        # that do block.get("type")/block.get("text") never crash.
-        out = []
-        for b in content:
-            if isinstance(b, dict):
-                out.append(b)
-            elif isinstance(b, str):
-                out.append({"type": "text", "text": b})
-            # silently drop non-dict/non-str elements (numbers/None) — not renderable
-        return out
+        return content
     return []
 
 
@@ -637,11 +632,19 @@ def find_active_background_tasks(messages: list) -> list[dict]:
 
 
 def text_of(block: dict) -> str:
-    """Get the text content of a content block, handling all block types."""
+    """Get the text content of a content block, handling all block types.
+
+    Non-string-safe: a block's text/thinking/content field — or a nested sub-block's
+    text — can legally be a non-string in untrusted JSONL. Used by the token
+    estimator (doctor / `current` / nudge), which is OUTSIDE the executor's
+    per-strategy isolation, so it must never raise."""
+    if not isinstance(block, dict):
+        return ""
     result = block.get("text", "") or block.get("thinking", "") or block.get("content", "")
     if isinstance(result, list):
         return " ".join(
-            sub.get("text", "") for sub in result if isinstance(sub, dict)
+            sub["text"] for sub in result
+            if isinstance(sub, dict) and isinstance(sub.get("text"), str)
         )
     if not isinstance(result, str):
         return ""

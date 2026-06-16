@@ -336,6 +336,11 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
 
 def _estimate_block_chars(block: dict) -> int:
     """Estimate character count for a content block, excluding thinking."""
+    # A content array can legally hold a bare string/number (get_content_blocks now
+    # returns elements verbatim to avoid write-path data loss). This read-only path
+    # is OUTSIDE the executor's per-strategy isolation, so coerce here.
+    if not isinstance(block, dict):
+        return len(block) if isinstance(block, str) else len(json.dumps(block, separators=(",", ":")))
     btype = block.get("type", "")
 
     # Thinking blocks are not counted (they're ephemeral)

@@ -70,6 +70,8 @@ def execute_actions(
         if idx in removals:
             continue
         for block in get_content_blocks(msg):
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "tool_result":
                 use_id = block.get("tool_use_id", "")
                 if use_id:
@@ -79,6 +81,8 @@ def execute_actions(
         if idx not in removals:
             continue
         for block in get_content_blocks(msg):
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "tool_use" and block.get("id", "") in tool_result_refs:
                 removals.discard(idx)
                 break
@@ -176,6 +180,8 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
     tool_use_ids: set[str] = set()
     for _, msg, _ in messages:
         for block in get_content_blocks(msg):
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "tool_use":
                 use_id = block.get("id", "")
                 if use_id:
@@ -193,7 +199,7 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
 
         has_orphan = False
         for block in blocks:
-            if block.get("type") == "tool_result":
+            if isinstance(block, dict) and block.get("type") == "tool_result":
                 use_id = block.get("tool_use_id", "")
                 if use_id and use_id not in tool_use_ids:
                     has_orphan = True
@@ -206,7 +212,10 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
         # Filter out orphaned tool_result blocks, keep everything else
         new_blocks = []
         for block in blocks:
-            if block.get("type") == "tool_result":
+            # Non-dict elements are PRESERVED (append unchanged) — never dropped
+            # (that would be data loss); only a genuine orphaned tool_result dict
+            # is filtered.
+            if isinstance(block, dict) and block.get("type") == "tool_result":
                 use_id = block.get("tool_use_id", "")
                 if use_id and use_id not in tool_use_ids:
                     orphans_fixed += 1
@@ -265,11 +274,26 @@ def run_prescription(
     # __cozempic_metadata_singleton__ flag, which would leak to disk on the next
     # successful save_messages call (REVIEW-max A.3).
     try:
-        # Step 1: run strategies
+        # Step 1: run strategies. Each strategy is ISOLATED — a crash on a
+        # malformed/poisoned message (an unexpected non-dict/non-string field deep
+        # in untrusted JSONL) skips THAT strategy and continues with the rest,
+        # rather than aborting the whole prune. This is the systemic defense for the
+        # large untrusted-field surface: one bad message can no longer (a) abort
+        # `treat`/`reload`, or (b) crash the guard cycle into a respawn storm.
+        # KeyboardInterrupt/SystemExit (and the structural PruneValidationError from
+        # later steps) still propagate; only a strategy-internal error is contained.
         for sname in strategy_names:
             if sname not in STRATEGIES:
                 continue
-            sr = STRATEGIES[sname].func(current, config)
+            try:
+                sr = STRATEGIES[sname].func(current, config)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _strat_exc:
+                import sys as _sys
+                print(f"  Cozempic: strategy '{sname}' skipped after an unexpected error "
+                      f"(malformed message?): {_strat_exc!r}", file=_sys.stderr)
+                continue
             results.append(sr)
             if sr.actions:
                 old_current = current

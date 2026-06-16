@@ -566,8 +566,13 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     # are also scanned; _is_team_message itself still uses TEAM_TOOL_NAMES only.
     pending_task_ids: set[str] = set()
     for _, msg, _ in messages:
-        inner = msg.get("message", {})
-        for block in (inner.get("content", []) if isinstance(inner.get("content"), list) else []):
+        inner = msg.get("message")
+        if not isinstance(inner, dict):
+            continue
+        content = inner.get("content")
+        for block in (content if isinstance(content, list) else []):
+            if not isinstance(block, dict):  # a content array can hold a bare string/number
+                continue
             if block.get("type") == "tool_use" and block.get("name") in _TEAM_EXTRACT_TOOL_NAMES:
                 uid = block.get("id", "")
                 if uid:
@@ -606,7 +611,9 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         state.message_count += 1
         state.last_coordination_index = line_idx
 
-        inner = msg.get("message", {})
+        inner = msg.get("message")
+        if not isinstance(inner, dict):
+            continue
         content = inner.get("content", [])
         if not isinstance(content, list):
             continue
@@ -621,6 +628,8 @@ def extract_team_state(messages: list[Message]) -> TeamState:
             if block_type == "tool_use":
                 name = block.get("name", "")
                 inp = block.get("input", {})
+                if not isinstance(inp, dict):  # tool 'input' can be a non-dict in malformed JSONL
+                    inp = {}
                 tool_use_id = block.get("id", "")
 
                 if tool_use_id and name:
@@ -671,7 +680,10 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                     # so a transcript carrying BOTH (rollout overlap) uses the
                     # authoritative "team_name", not the stale legacy "name".
                     state.team_name = inp.get("team_name") or inp.get("name") or state.team_name
-                    for tm in inp.get("teammates", []):
+                    _tms = inp.get("teammates", [])
+                    for tm in (_tms if isinstance(_tms, list) else []):
+                        if not isinstance(tm, dict):  # teammates array can hold a non-dict
+                            continue
                         agent_id = tm.get("agentId", tm.get("agent_id", ""))
                         tm_name = tm.get("name", agent_id)
                         role = tm.get("role", tm.get("description", ""))
