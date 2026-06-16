@@ -561,38 +561,43 @@ class TestRound2ReviewerFindings(unittest.TestCase):
     # ── M-1 — watcher slug must equal _reload_sentinel_path_for slug ─────────
 
     def test_watcher_slug_matches_sentinel_path_under_widened_slug_for(self):
-        """M-1 (RED at HEAD): guard.py:2235 still applies [:12] to _slug_for().
+        """M-1 (RED at bc7ba80 / pre-fix): guard.py:2235 still applies [:12]
+        to _slug_for(), while _reload_sentinel_path_for (after P0-C) does not.
 
-        When _slug_for is mocked to return a 15-char slug, the watcher path
-        expression (_slug_for(sid)[:12]) truncates to 12 chars while
-        _reload_sentinel_path_for returns the full 15-char slug — divergence
-        that P0-C was filed to eliminate (same class, different site).
+        This test inspects the source of _spawn_reload_watcher to confirm that
+        the [:12] truncation has been removed.  It is RED at bc7ba80 (the commit
+        that introduced the RED-test suite) because guard.py still contained
+        _rl_slug_for(session_id)[:12] at that point, and GREEN after M-1 drops
+        the [:12].
 
-        We simulate this by calling the watcher expression (_rl_slug_for(sid)[:12])
-        and comparing it to _reload_sentinel_path_for's slug extraction.  At HEAD
-        the two diverge when _slug_for returns >12 chars; after the fix they agree.
+        Secondary behavioural check: mock _slug_for to return a 15-char slug and
+        verify that the sentinel path produced by _reload_sentinel_path_for is
+        NOT truncated (proving the parity contract holds with a widened _slug_for).
         """
+        import inspect
+        from cozempic import guard
         from cozempic.reload_lock import _reload_sentinel_path_for
 
-        session_id = "my-test-session-99"
-        wide_slug = "abcdefghijklmno"  # 15 chars — wider than current 12-char cap
+        # --- structural check ---
+        source = inspect.getsource(guard._spawn_reload_watcher)
+        self.assertNotIn(
+            "_rl_slug_for(session_id)[:12]",
+            source,
+            "guard._spawn_reload_watcher still applies [:12] to _rl_slug_for — "
+            "M-1 fold gap: drops identical double-truncation that P0-C removed "
+            "from _reload_sentinel_path_for."
+        )
 
-        with patch('cozempic.guard._rl_slug_for', return_value=wide_slug, create=True), \
-             patch('cozempic.reload_lock._slug_for', return_value=wide_slug):
-
-            # Sentinel reader (after P0-C): uses _slug_for directly — no [:12]
-            sentinel_slug = _reload_sentinel_path_for(session_id).name[
+        # --- behavioural parity under widened _slug_for ---
+        wide_slug = "abcdefghijklmno"  # 15 chars
+        with patch('cozempic.reload_lock._slug_for', return_value=wide_slug):
+            sentinel_slug = _reload_sentinel_path_for("my-test-session-99").name[
                 len("cozempic_reload_"):-len(".in-flight")
             ]
-            # Watcher writer (before M-1 fix): uses _rl_slug_for(sid)[:12]
-            from cozempic.guard import _rl_slug_for as _watcher_slug_fn  # noqa
-            watcher_slug = _watcher_slug_fn(session_id)[:12]
-
         self.assertEqual(
-            watcher_slug, sentinel_slug,
-            f"Watcher slug {watcher_slug!r} != sentinel slug {sentinel_slug!r}: "
-            "guard.py:2235 still truncates to 12 while _reload_sentinel_path_for "
-            "does not — split-brain risk if _slug_for is ever widened."
+            sentinel_slug, wide_slug,
+            f"_reload_sentinel_path_for slug {sentinel_slug!r} != {wide_slug!r}: "
+            "P0-C should have removed all [:12] truncation from the sentinel reader."
         )
 
     # ── M-2 — non-str session_id must not raise TypeError ────────────────────

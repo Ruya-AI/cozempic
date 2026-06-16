@@ -2232,7 +2232,7 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     # The slug uses reload_lock._slug_for so it matches _reload_sentinel_path_for.
     from .reload_lock import _slug_for as _rl_slug_for
     if session_id:
-        sid12 = _rl_slug_for(session_id)[:12]
+        sid12 = _rl_slug_for(session_id)
         sentinel_path = f"/tmp/cozempic_reload_{sid12}.in-flight"
         status_path = f"/tmp/cozempic_reload_{sid12}.status"
         pgrep_pattern = f"claude.*{sid12}"
