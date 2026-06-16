@@ -142,6 +142,24 @@ def _read_min_prune_ratio() -> float:
 _MIN_PRUNE_RATIO = _read_min_prune_ratio()
 
 
+def _persisted_tokens_saved(pre_total: int, post_total: int) -> int:
+    """Return the number of tokens freed by a prune cycle.
+
+    Gate on *pre_total* only — a maximal prune to post_total==0 is FULL progress
+    (pre − 0), not zero.  The old inline expression ``pre - post if pre and post``
+    was falsy-trapped: ``and post_total`` evaluates to 0 when post==0, so the
+    entire ternary returned 0 and the largest possible savings event was never
+    recorded in the lifetime tracker.
+
+    NB: the sibling ``_tokens_saved_now`` expression at the futile-reload gate
+    already uses the correct single-gate form (``if pre_te.total``); this helper
+    makes both sites share the same semantics.
+    """
+    if not pre_total:
+        return 0
+    return pre_total - post_total
+
+
 def _hard_prune_counts_as_futile(result: dict) -> bool:
     """Whether a HARD-tier prune cycle counts toward the futile-loop K-exit counter.
 
@@ -1684,7 +1702,7 @@ def guard_prune_cycle(
     # counters on every deferred or looping cycle that never actually wrote — the
     # in-the-wild prune-spike signature: a stuck guard re-pruning every interval
     # bumps the counter each time despite persisting nothing.
-    tokens_saved = pre_te.total - post_te.total if pre_te.total and post_te.total else 0
+    tokens_saved = _persisted_tokens_saved(pre_te.total, post_te.total)
 
     def _record_persisted_savings():
         """Record savings to the lifetime tracker / global counter. Call ONLY
