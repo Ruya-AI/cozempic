@@ -2369,7 +2369,11 @@ def _guard_tmp_root() -> Path:
 # respawn: if a session reloads too many times within a window, the guard stops
 # auto-reloading it (and accounts it to the breaker so the daemon exits) rather
 # than churning kill→resume→re-bloat forever. Window/cap are env-overridable.
-_RELOAD_LEDGER_HIST_CAP = 50  # write-cap for hist slice AND ceiling for RELOAD_MAX
+# INVARIANT: RELOAD_MAX ceiling MUST equal the hist write-cap.
+# A ceiling ABOVE the write-cap silently disables the storm-guard for the
+# (write-cap, ceiling] range: hist[-cap:] bounds len(hist) to write-cap, so
+# len(hist) >= max is always False for any max > write-cap. Tune both together.
+_RELOAD_LEDGER_HIST_CAP = 50
 
 
 def _reload_ledger_window_s() -> int:

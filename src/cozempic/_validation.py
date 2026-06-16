@@ -267,8 +267,13 @@ def parse_env_bool(name: str, default: bool = False, warn: bool = True) -> bool:
     returns `default`.  Empty / absent / whitespace-only: returns `default`
     silently.
 
-    Follows the warn+fallback contract of parse_env_positive_int:
-    env vars are ambient config; an unrecognized value must not crash.
+    Follows the warn+fallback contract of parse_env_positive_int for
+    unrecognized non-empty values: emits a warning and returns `default`.
+    Deliberate divergence: whitespace-only input is treated as absent and
+    returns `default` silently (no warning), unlike parse_env_positive_int
+    which warns on whitespace-only.  Bool knobs have no numeric parse step
+    where whitespace ambiguity is meaningful, so the silent-absent treatment
+    is more appropriate.
 
     The `warn` parameter suppresses the warning when set to False — useful
     for in-body re-reads that run on every call (e.g. _debug()) where a
