@@ -1164,5 +1164,163 @@ class TestAgentsActiveTeammateBlind(unittest.TestCase):
         )
 
 
+class TestComputeAgentsActiveAllowlistFix(unittest.TestCase):
+    """_compute_agents_active must use DENYLIST (not ALLOWLIST) for subagents.
+
+    Current (ALLOWLIST): `s.status in ("running", "unknown")` — misses null and any
+    off-vocabulary working status like "busy", "in-progress", or "executing".
+
+    Fixed (DENYLIST): `(s.status or "").strip().lower() not in _STATUS_TERMINAL` —
+    mirrors safe_to_reload and fails safe on any non-terminal status.
+
+    REGRESSION GUARD tests are proven at base (e65636e before P0-A fix):
+    - test_subagent_null_status / test_subagent_busy_status: False at base (bug) →
+      True after fix (correct).
+    - test_is_active_subagent_helper_exists: ERROR at base (ImportError, helper
+      doesn't exist) → GREEN after fix.
+    """
+
+    def test_subagent_null_status_counts_as_active(self):
+        """REGRESSION GUARD: subagent with status=None must block K-exit deferral.
+
+        At base (ALLOWLIST): None not in ('running','unknown') -> False -> K-exit proceeds.
+        After fix (DENYLIST): '' not in _STATUS_TERMINAL -> True -> K-exit deferred.
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, SubagentInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            subagents=[SubagentInfo(agent_id="a1", status=None)],
+            teammates=[],
+        )
+        self.assertTrue(
+            _compute_agents_active(state),
+            "subagent with status=None must be treated as active (DENYLIST fail-safe); "
+            "at base (ALLOWLIST), None is not in ('running','unknown') -> False (bug).",
+        )
+
+    def test_subagent_busy_status_counts_as_active(self):
+        """REGRESSION GUARD: off-vocabulary working status 'busy' must block K-exit.
+
+        At base (ALLOWLIST): 'busy' not in ('running','unknown') -> False -> K-exit proceeds.
+        After fix (DENYLIST): 'busy' not in _STATUS_TERMINAL -> True -> K-exit deferred.
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, SubagentInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            subagents=[SubagentInfo(agent_id="a1", status="busy")],
+            teammates=[],
+        )
+        self.assertTrue(
+            _compute_agents_active(state),
+            "subagent with off-vocabulary status='busy' must be treated as active "
+            "(DENYLIST: 'busy' not in _STATUS_TERMINAL); got False at base (ALLOWLIST).",
+        )
+
+    def test_subagent_empty_string_status_counts_as_active(self):
+        """REGRESSION GUARD: subagent with status='' must block K-exit (not in _STATUS_TERMINAL).
+
+        At base (ALLOWLIST): '' not in ('running','unknown') -> False -> K-exit proceeds.
+        After fix (DENYLIST): '' not in _STATUS_TERMINAL -> True -> K-exit deferred.
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, SubagentInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            subagents=[SubagentInfo(agent_id="a1", status="")],
+            teammates=[],
+        )
+        self.assertTrue(
+            _compute_agents_active(state),
+            "subagent with status='' must be treated as active (DENYLIST fail-safe). "
+            "At base (ALLOWLIST): '' not in ('running','unknown') -> False (bug).",
+        )
+
+    def test_is_active_subagent_helper_exists(self):
+        """After fix: _is_active_subagent must be importable from cozempic.guard.
+
+        ERROR at base (function doesn't exist yet).
+        GREEN after fix.
+        """
+        from cozempic.guard import _is_active_subagent
+        self.assertTrue(callable(_is_active_subagent))
+
+    def test_running_subagent_still_active_after_denylist_fix(self):
+        """Positive control (GREEN at base and after fix): 'running' subagent is active.
+
+        The DENYLIST must not regress the existing behavior for 'running' status.
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, SubagentInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            subagents=[SubagentInfo(agent_id="a1", status="running")],
+            teammates=[],
+        )
+        self.assertTrue(
+            _compute_agents_active(state),
+            "subagent with status='running' must still be active after DENYLIST fix.",
+        )
+
+    def test_completed_subagent_not_active(self):
+        """Positive control (GREEN at base and after fix): 'completed' subagent is not active.
+
+        At base (ALLOWLIST): 'completed' not in ('running','unknown') -> False (correct).
+        After fix (DENYLIST): 'completed' in _STATUS_TERMINAL -> False (correct).
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, SubagentInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            subagents=[SubagentInfo(agent_id="a1", status="completed")],
+            teammates=[],
+        )
+        self.assertFalse(
+            _compute_agents_active(state),
+            "subagent with status='completed' must not be active (in _STATUS_TERMINAL).",
+        )
+
+    def test_hard_cap_exit_desc_helper_exists(self):
+        """After fix: _hard_cap_exit_desc must be importable from cozempic.guard.
+
+        ERROR at base (function doesn't exist yet per Q-B answer: extract helper).
+        """
+        from cozempic.guard import _hard_cap_exit_desc
+        self.assertTrue(callable(_hard_cap_exit_desc))
+
+    def test_hard_cap_exit_desc_teammate_only_no_subagents_label(self):
+        """_hard_cap_exit_desc must not say 'subagent(s)' for a teammate-only session.
+
+        The old hard-cap message said 'Subagents are still active' unconditionally.
+        After fix, for state with a running teammate and no subagents, the description
+        must contain 'teammate(s)' and must NOT contain 'subagent(s)'.
+        """
+        from cozempic.guard import _hard_cap_exit_desc
+        from cozempic.team import TeamState, TeammateInfo
+        state = TeamState(
+            team_name="t", lead_agent_id="l@t", lead_session_id="s",
+            config_source="jsonl",
+            teammates=[TeammateInfo(agent_id="w@t", name="w", status="running")],
+            subagents=[],
+        )
+        desc = _hard_cap_exit_desc(state)
+        self.assertIn(
+            "teammate(s)",
+            desc,
+            f"hard-cap desc for teammate-only session must contain 'teammate(s)'; got {desc!r}",
+        )
+        self.assertNotIn(
+            "subagent(s)",
+            desc,
+            f"hard-cap desc for teammate-only session must NOT contain 'subagent(s)'; got {desc!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
