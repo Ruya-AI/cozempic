@@ -2875,7 +2875,19 @@ def _reload_rate_exceeded(ledger_path: Path, now: float | None = None) -> tuple[
         return True, len(hist)
     hist.append(now)
     try:
-        ledger_path.write_text(_json.dumps(hist[-_RELOAD_LEDGER_HIST_CAP:]))
+        # Atomic write (tmp + os.replace): a SIGKILL mid-write leaves a stale
+        # .tmp rather than a partial ledger, preventing the `except Exception:
+        # hist = []` silent reset that would clear the storm-guard count.
+        # Mirrors _write_armed_atomic (guard.py:2780) — same pattern, string payload.
+        _tmp = ledger_path.with_suffix(ledger_path.suffix + f".tmp{os.getpid()}")
+        try:
+            _tmp.write_text(_json.dumps(hist[-_RELOAD_LEDGER_HIST_CAP:]))
+            os.replace(_tmp, ledger_path)
+        finally:
+            try:
+                _tmp.unlink(missing_ok=True)  # no-op after a successful replace
+            except Exception:
+                pass
     except Exception:
         pass
     return False, len(hist)

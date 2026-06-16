@@ -308,3 +308,52 @@ class TestReloadWarnGraceBounds(unittest.TestCase):
     def test_ceiling_value_exact(self):
         """3600 exactly is at the boundary — must be accepted (not rejected)."""
         self.assertAlmostEqual(self._call("3600"), 3600.0)
+
+
+class TestReloadLedgerAtomicWrite(unittest.TestCase):
+    """Invariant tests for the atomic ledger write in _reload_rate_exceeded.
+
+    The SIGKILL-mid-write failure mode cannot be tested deterministically in
+    a unit test.  These tests verify the two observable post-write properties:
+      1. No .tmp orphan is left after a clean write path.
+      2. The ledger contains valid JSON after one or more calls.
+
+    RED proof is by code inspection: the pre-fix `ledger_path.write_text(…)`
+    is non-atomic; the post-fix tmp+os.replace+finally-cleanup pattern matches
+    _write_armed_atomic (guard.py:2780), which is the sister-module pattern for
+    this class of write.
+    """
+
+    def test_no_tmp_orphan_on_clean_write(self):
+        """A successful write must leave no .tmp* file in the ledger directory."""
+        import tempfile
+        import pathlib
+
+        with tempfile.TemporaryDirectory() as d:
+            ledger = pathlib.Path(d) / "test_ledger.history"
+            from cozempic.guard import _reload_rate_exceeded
+
+            _reload_rate_exceeded(ledger)
+            orphans = list(pathlib.Path(d).glob("*.tmp*"))
+            self.assertEqual(
+                orphans,
+                [],
+                f".tmp orphan left after clean write: {orphans}",
+            )
+
+    def test_ledger_valid_json_after_write(self):
+        """After two calls the ledger file must be parseable JSON."""
+        import json
+        import tempfile
+        import pathlib
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            ledger = pathlib.Path(d) / "test_ledger.history"
+            from cozempic.guard import _reload_rate_exceeded
+
+            _reload_rate_exceeded(ledger)
+            _reload_rate_exceeded(ledger, now=time.time() + 1)
+            data = json.loads(ledger.read_text())
+            self.assertIsInstance(data, list)
+            self.assertGreater(len(data), 0)
