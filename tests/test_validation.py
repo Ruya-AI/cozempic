@@ -185,6 +185,36 @@ class TestParseEnvPositiveInt(unittest.TestCase):
                 parse_env_positive_int("TEST_ENV_POSINT")
         self.assertEqual(buf.getvalue(), "")
 
+    def test_warns_on_whitespace_only(self):
+        """Whitespace-only env var must warn — the user set the var but it
+        carries no integer.  Regression check: ae85bcc silently returned None
+        for whitespace-only values; origin/main raised ValueError on int(raw)
+        which produced 'must be an integer' via _env_warn.
+
+        RED at ae85bcc: raw.strip()=="" triggers silent early return (no warn).
+        GREEN after fix: whitespace-only → _env_warn('must be an integer').
+        """
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"TEST_ENV_POSINT": "   "}):
+            with contextlib.redirect_stderr(buf):
+                result = parse_env_positive_int("TEST_ENV_POSINT")
+        self.assertIsNone(result)
+        self.assertIn("TEST_ENV_POSINT", buf.getvalue(), "warning must name the env var")
+        self.assertIn("integer", buf.getvalue(), "warning must say 'must be an integer'")
+
+    def test_silent_when_empty_string(self):
+        """Genuine empty string (unset-equivalent) must NOT warn — the env
+        key exists but carries no value (e.g. ``export VAR=`` in shell)."""
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"TEST_ENV_POSINT": ""}):
+            with contextlib.redirect_stderr(buf):
+                parse_env_positive_int("TEST_ENV_POSINT")
+        self.assertEqual(buf.getvalue(), "")
+
 
 class TestParseEnvNonNegativeInt(unittest.TestCase):
     """Like positive-int but accepts 0 (valid for system_overhead_tokens —
@@ -205,6 +235,22 @@ class TestParseEnvNonNegativeInt(unittest.TestCase):
     def test_rejects_non_numeric(self):
         with patch.dict(os.environ, {"TEST_ENV_NNINT": "xyz"}):
             self.assertIsNone(parse_env_non_negative_int("TEST_ENV_NNINT"))
+
+    def test_warns_on_whitespace_only(self):
+        """Whitespace-only must warn — same regression class as parse_env_positive_int.
+
+        RED at ae85bcc: silent early return.
+        GREEN after fix: _env_warn fires ('must be an integer').
+        """
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"TEST_ENV_NNINT": "   "}):
+            with contextlib.redirect_stderr(buf):
+                result = parse_env_non_negative_int("TEST_ENV_NNINT")
+        self.assertIsNone(result)
+        self.assertIn("TEST_ENV_NNINT", buf.getvalue())
+        self.assertIn("integer", buf.getvalue())
 
 
 # ── Backwards compat: re-exports from strategies/_config still work ────────

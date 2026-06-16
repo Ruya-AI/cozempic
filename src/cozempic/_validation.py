@@ -188,10 +188,20 @@ def parse_env_positive_int(name: str, *, maximum: int | None = None) -> int | No
     ``pct = total / window`` rounds toward 0 when window is huge).
     """
     raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if stripped == "":
+        # Whitespace-only (raw non-empty) is set but carries no integer — warn
+        # so the user knows their override was ignored.  Genuine empty string
+        # (export VAR=) is unset-equivalent; silently ignore it.
+        # (Regression fix: ae85bcc dropped whitespace-only silently; origin/main
+        # let int(raw) raise ValueError → same "must be an integer" warn path.)
+        if raw:  # whitespace-only; raw=="" is the silent empty-string case
+            _env_warn(name, raw, "must be an integer")
         return None
     try:
-        value = int(raw.strip())
+        value = int(stripped)
     except ValueError:
         _env_warn(name, raw, "must be an integer")
         return None
@@ -217,10 +227,15 @@ def parse_env_non_negative_int(name: str, *, maximum: int | None = None) -> int 
     context window would zero out usable context — cap at the default window.
     """
     raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if stripped == "":
+        if raw:  # whitespace-only; raw=="" is the silent empty-string case
+            _env_warn(name, raw, "must be an integer")
         return None
     try:
-        value = int(raw.strip())
+        value = int(stripped)
     except ValueError:
         _env_warn(name, raw, "must be an integer")
         return None
