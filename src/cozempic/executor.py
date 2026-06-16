@@ -5,6 +5,7 @@ from __future__ import annotations
 from .helpers import (
     _METADATA_SINGLETON_KEY,
     get_content_blocks,
+    hashable_str,
     msg_bytes,
     set_content_blocks,
 )
@@ -73,7 +74,7 @@ def execute_actions(
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_result":
-                use_id = block.get("tool_use_id", "")
+                use_id = hashable_str(block.get("tool_use_id"))  # unhashable -> "" (R6)
                 if use_id:
                     tool_result_refs.add(use_id)
 
@@ -83,7 +84,7 @@ def execute_actions(
         for block in get_content_blocks(msg):
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use" and block.get("id", "") in tool_result_refs:
+            if block.get("type") == "tool_use" and hashable_str(block.get("id")) in tool_result_refs:
                 removals.discard(idx)
                 break
 
@@ -119,12 +120,15 @@ def _relink_parent_chain(
     removed_uuids: set[str] = set()
 
     for idx, msg, _ in messages_before:
-        u = msg.get("uuid", "")
+        # hashable_str: uuid/parentUuid are top-level fields used as dict keys / set
+        # members; an unhashable value (poisoned JSONL) would crash the parent-relink
+        # (which runs on EVERY prune, OUTSIDE per-strategy isolation) (R6 crash class).
+        u = hashable_str(msg.get("uuid"))
         if u:
             if "parentUuid" in msg:
-                uuid_to_parent[u] = msg.get("parentUuid") or ""
+                uuid_to_parent[u] = hashable_str(msg.get("parentUuid"))
             if "logicalParentUuid" in msg:
-                uuid_to_logical[u] = msg.get("logicalParentUuid") or ""
+                uuid_to_logical[u] = hashable_str(msg.get("logicalParentUuid"))
         if idx in removals and u:
             removed_uuids.add(u)
 
@@ -147,15 +151,15 @@ def _relink_parent_chain(
         changed = False
         new_msg = msg
 
-        if msg.get("parentUuid") in removed_uuids:
+        if hashable_str(msg.get("parentUuid")) in removed_uuids:
             new_msg = dict(new_msg)
-            new_msg["parentUuid"] = resolve(msg["parentUuid"], uuid_to_parent)
+            new_msg["parentUuid"] = resolve(hashable_str(msg.get("parentUuid")), uuid_to_parent)
             changed = True
 
-        if msg.get("logicalParentUuid") in removed_uuids:
+        if hashable_str(msg.get("logicalParentUuid")) in removed_uuids:
             if new_msg is msg:
                 new_msg = dict(msg)
-            new_msg["logicalParentUuid"] = resolve(msg["logicalParentUuid"], uuid_to_logical)
+            new_msg["logicalParentUuid"] = resolve(hashable_str(msg.get("logicalParentUuid")), uuid_to_logical)
             changed = True
 
         if changed:
@@ -183,7 +187,7 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use":
-                use_id = block.get("id", "")
+                use_id = hashable_str(block.get("id"))  # unhashable -> "" (R6 crash class)
                 if use_id:
                     tool_use_ids.add(use_id)
 
@@ -200,7 +204,7 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
         has_orphan = False
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":
-                use_id = block.get("tool_use_id", "")
+                use_id = hashable_str(block.get("tool_use_id"))
                 if use_id and use_id not in tool_use_ids:
                     has_orphan = True
                     break
@@ -216,7 +220,7 @@ def fix_orphaned_tool_results(messages: list[Message]) -> tuple[list[Message], i
             # (that would be data loss); only a genuine orphaned tool_result dict
             # is filtered.
             if isinstance(block, dict) and block.get("type") == "tool_result":
-                use_id = block.get("tool_use_id", "")
+                use_id = hashable_str(block.get("tool_use_id"))
                 if use_id and use_id not in tool_use_ids:
                     orphans_fixed += 1
                     continue

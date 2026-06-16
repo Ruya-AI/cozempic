@@ -50,13 +50,15 @@ def diagnose_session(messages: list[Message]) -> dict:
                 thinking_bytes += len(json.dumps(block.get("thinking", "")).encode("utf-8"))
                 sig = block.get("signature", "")
                 if isinstance(sig, str):
-                    signature_bytes += len(sig.encode("utf-8", "surrogateescape"))
+                    signature_bytes += len(sig.encode("utf-8", "surrogatepass"))
             elif btype == "tool_result":
                 content = block.get("content", "")
                 if isinstance(content, str):
-                    # surrogateescape: a content string may carry a surrogate from a
-                    # non-UTF-8 byte (R5) — strict encode would raise here.
-                    tool_result_bytes += len(content.encode("utf-8", "surrogateescape"))
+                    # surrogatepass (NOT surrogateescape): a content string may carry a
+                    # LONE HIGH surrogate (a JSON-escaped \ud83d CC emits) which
+                    # surrogateescape can't encode -> crash (R6). surrogatepass encodes
+                    # every surrogate; this is only a byte-count estimate so WTF-8 width is fine.
+                    tool_result_bytes += len(content.encode("utf-8", "surrogatepass"))
                 elif isinstance(content, list):
                     tool_result_bytes += len(json.dumps(content).encode("utf-8"))
 

@@ -760,11 +760,11 @@ def _count_orphaned_tool_results(path: Path) -> int:
                     continue
                 if block.get("type") == "tool_use":
                     use_id = block.get("id", "")
-                    if use_id:
+                    if isinstance(use_id, str) and use_id:  # unhashable id -> skip (R6 crash class)
                         tool_use_ids.add(use_id)
                 elif block.get("type") == "tool_result":
                     use_id = block.get("tool_use_id", "")
-                    if use_id:
+                    if isinstance(use_id, str) and use_id:  # kept str-only: `r not in <set>` below
                         all_results.append(use_id)
 
     return sum(1 for r in all_results if r not in tool_use_ids)

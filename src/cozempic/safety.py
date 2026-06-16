@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 
 from .config import FloorConfig
+from .helpers import hashable_str
 
 __all__ = [
     "PruneValidationError",
@@ -123,7 +124,7 @@ def _build_orphan_shells(
             continue
         for block in content:
             if isinstance(block, dict) and block.get("type") == "tool_use":
-                tid = block.get("id", "")
+                tid = hashable_str(block.get("id"))  # unhashable id -> "" (R6 crash class)
                 if tid:
                     before_tool_use_ids.add(tid)
 
@@ -140,7 +141,7 @@ def _build_orphan_shells(
         if all(
             isinstance(blk, dict)
             and blk.get("type") == "tool_result"
-            and blk.get("tool_use_id", "") not in before_tool_use_ids
+            and hashable_str(blk.get("tool_use_id")) not in before_tool_use_ids
             for blk in content
         ):
             orphan_shells.add(uuid)
@@ -261,14 +262,14 @@ def validate_post_prune(
     before_roots_count = sum(
         1 for _, msg, _ in msgs_before
         if not msg.get("parentUuid") and msg.get("uuid")
-        and msg.get("uuid") not in legit_removed_orphan_shells
+        and hashable_str(msg.get("uuid")) not in legit_removed_orphan_shells
     )
     after_roots: list[str] = [
-        msg.get("uuid", "")
+        hashable_str(msg.get("uuid"))
         for _, msg, _ in msgs_after
         if not msg.get("parentUuid")
         and msg.get("uuid")
-        and msg.get("uuid") not in legit_removed_orphan_shells
+        and hashable_str(msg.get("uuid")) not in legit_removed_orphan_shells
     ]
     if len(after_roots) > before_roots_count:
         raise PruneValidationError(
@@ -415,7 +416,7 @@ def validate_post_prune(
         if isinstance(content, list):
             for blk in content:
                 if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                    rid = blk.get("tool_use_id")
+                    rid = hashable_str(blk.get("tool_use_id"))  # unhashable -> "" (R6)
                     if rid:
                         before_result_ids.add(rid)
     after_result_ids: set[str] = set()
@@ -424,7 +425,7 @@ def validate_post_prune(
         if isinstance(content, list):
             for blk in content:
                 if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                    rid = blk.get("tool_use_id")
+                    rid = hashable_str(blk.get("tool_use_id"))
                     if rid:
                         after_result_ids.add(rid)
     for _, msg, _ in msgs_after:
@@ -434,7 +435,7 @@ def validate_post_prune(
         for blk in content:
             if not (isinstance(blk, dict) and blk.get("type") == "tool_use"):
                 continue
-            tid = blk.get("id")
+            tid = hashable_str(blk.get("id"))
             if not tid:
                 continue
             if tid not in after_result_ids and tid in before_result_ids:
@@ -606,11 +607,11 @@ def enforce_floor(
                 continue
             btype = block.get("type")
             if btype == "tool_use":
-                tid = block.get("id", "")
+                tid = hashable_str(block.get("id"))  # unhashable id -> "" (R6 crash class)
                 if tid:
                     tool_use_id_to_owner.setdefault(tid, set()).add(u)
             elif btype == "tool_result":
-                tid = block.get("tool_use_id", "")
+                tid = hashable_str(block.get("tool_use_id"))
                 if tid:
                     tool_use_id_to_results.setdefault(tid, set()).add(u)
 
@@ -629,7 +630,7 @@ def enforce_floor(
                     continue
                 btype = block.get("type")
                 if btype == "tool_use":
-                    tid = block.get("id", "")
+                    tid = hashable_str(block.get("id"))  # unhashable id -> "" (R6 crash class)
                     for p in tool_use_id_to_results.get(tid, set()):
                         # M-1 (review): don't re-add a PRE-boundary pair partner past an
                         # active compact_boundary — else step-3 pair-closure re-introduces a
@@ -639,7 +640,7 @@ def enforce_floor(
                         if p not in must_preserve and not (pe and _is_pre_boundary(pe[0])):
                             new_additions.add(p)
                 elif btype == "tool_result":
-                    tid = block.get("tool_use_id", "")
+                    tid = hashable_str(block.get("tool_use_id"))
                     for owner in tool_use_id_to_owner.get(tid, set()):
                         oe = before_by_uuid.get(owner)
                         if owner not in must_preserve and not (oe and _is_pre_boundary(oe[0])):

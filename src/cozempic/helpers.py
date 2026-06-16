@@ -271,6 +271,18 @@ def get_content_blocks(msg: dict) -> list[dict]:
     return []
 
 
+def hashable_str(v) -> str:
+    """An untrusted block field (tool_use `id` / `name` / `tool_use_id`) coerced to a
+    hashable str for SAFE use as a set member, dict key, or `in <set>` test. A non-str
+    value (an unhashable list/dict, or an int) becomes "" — the empty string is falsy,
+    so the ubiquitous `if tid: set.add(tid)` guard then skips it. This closes the
+    recurring TypeError-on-unhashable-key crash class (`cannot use 'list' as a set
+    element`) that appears at EVERY prune/guard/safety/executor/doctor site reading a
+    block field as a hashable on poisoned JSONL (R6 sibling-miss sweep). Coerce at the
+    `tid = ...` assignment so every downstream .add/[key]/.get/`in` is safe at once."""
+    return v if isinstance(v, str) else ""
+
+
 def get_dict_blocks(msg: dict) -> list[dict]:
     """Like get_content_blocks but yields ONLY dict elements — for READ-ONLY
     consumers (diagnosis, recap, token estimation) that never write the blocks
@@ -814,16 +826,20 @@ def find_active_background_tasks(messages: list) -> list[dict]:
 
     for _, msg, _ in messages:
         inner = msg.get("message", {})
-        content = inner.get("content", [])
+        content = inner.get("content", []) if isinstance(inner, dict) else []
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
                     if block.get("type") == "tool_use" and block.get("name") == "Task":
                         inp = block.get("input", {})
-                        if inp.get("run_in_background"):
-                            spawns[block.get("id", "")] = inp.get("description", "")
+                        if isinstance(inp, dict) and inp.get("run_in_background"):
+                            sid = hashable_str(block.get("id"))  # unhashable -> "" (R6)
+                            if sid:
+                                spawns[sid] = inp.get("description", "")
                     if block.get("type") == "tool_result":
-                        completions.add(block.get("tool_use_id", ""))
+                        cid = hashable_str(block.get("tool_use_id"))
+                        if cid:
+                            completions.add(cid)
 
         # Check queue-operation for completed tasks
         if msg.get("type") == "queue-operation":

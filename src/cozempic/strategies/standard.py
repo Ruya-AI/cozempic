@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 
-from ..helpers import get_content_blocks, get_msg_type, is_protected, msg_bytes, set_content_blocks, text_of
+from ..helpers import get_content_blocks, get_msg_type, hashable_str, is_protected, msg_bytes, set_content_blocks, text_of
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
 from ._config import coerce_choice, coerce_non_negative_int, coerce_ordered_pair
@@ -107,8 +107,10 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
     compacted_tool_ids: set[str] = set()
     for _, msg, _ in messages:
         if msg.get("type") == "system" and msg.get("subtype") == "microcompact_boundary":
-            for tid in msg.get("compactedToolIds", []):
-                compacted_tool_ids.add(tid)
+            _ctids = msg.get("compactedToolIds", [])
+            for tid in (_ctids if isinstance(_ctids, list) else []):
+                if isinstance(tid, str):  # unhashable/non-str element -> skip (R6 crash class)
+                    compacted_tool_ids.add(tid)
 
     for pos, (idx, msg, size) in enumerate(messages):
         if is_protected(msg):
@@ -120,9 +122,12 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
         new_blocks = []
         changed = False
         for block in blocks:
+            if not isinstance(block, dict):  # non-dict element preserved, never .get()'d (R6)
+                new_blocks.append(block)
+                continue
             if block.get("type") == "tool_result":
                 # Skip tool results already microcompacted
-                tool_use_id = block.get("tool_use_id", "")
+                tool_use_id = hashable_str(block.get("tool_use_id"))
                 if tool_use_id and tool_use_id in compacted_tool_ids:
                     new_blocks.append(block)
                     continue

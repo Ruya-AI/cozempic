@@ -177,7 +177,7 @@ def _hard_prune_counts_as_futile(result: dict) -> bool:
 
 from ._validation import ConfigError
 from .executor import run_prescription
-from .helpers import is_ssh_session, shell_quote, tag_pattern_matches, strip_pattern_tags
+from .helpers import hashable_str, is_ssh_session, shell_quote, tag_pattern_matches, strip_pattern_tags
 from .registry import PRESCRIPTIONS
 import cozempic.strategies  # noqa: F401 — register strategies so guard_prune_cycle can actually prune (#15)
 from .session import (
@@ -418,9 +418,16 @@ def prune_with_team_protect(
     pending_task_ids: set[str] = set()
     for _, msg_dict, _ in messages:
         inner = msg_dict.get("message", {})
+        if not isinstance(inner, dict):
+            continue
         for block in (inner.get("content", []) if isinstance(inner.get("content"), list) else []):
-            if block.get("type") == "tool_use" and block.get("name") in TEAM_TOOL_NAMES:
-                tool_use_id = block.get("id", "")
+            # isinstance/hashable_str guards: this is the prune_with_team_protect SIBLING
+            # of the team.py extraction loop — an unhashable name/id (poisoned JSONL) or a
+            # non-dict block crashed the prune EVERY cycle -> guard respawn storm (R6).
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and hashable_str(block.get("name")) in TEAM_TOOL_NAMES:
+                tool_use_id = hashable_str(block.get("id"))
                 if tool_use_id:
                     pending_task_ids.add(tool_use_id)
 
@@ -2625,24 +2632,25 @@ def detect_in_flight(messages) -> dict:
                     continue
                 t = b.get("type")
                 if t == "tool_use":
-                    if b.get("id"):
-                        use_ids.add(b["id"])
-                        use_name[b["id"]] = (b.get("name") or "")
+                    bid = hashable_str(b.get("id"))  # unhashable id -> "" (R6 crash class)
+                    if bid:
+                        use_ids.add(bid)
+                        use_name[bid] = hashable_str(b.get("name"))
                         # Only a Bash with run_in_background=true actually launches a
                         # bg task; a normal Bash whose OUTPUT merely contains the
                         # ack-marker text (a test/grep printing "running in background
                         # with ID: X") must NOT be credited as a launch (real-transcript
                         # pollution, 2026-06-09).
-                        if ((b.get("name") or "") == "Bash"
+                        if (hashable_str(b.get("name")) == "Bash"
                                 and isinstance(b.get("input"), dict)
                                 and b["input"].get("run_in_background")):
-                            bg_bash_ids.add(b["id"])
+                            bg_bash_ids.add(bid)
                     else:
                         # A tool_use with no id can never be paired to a result —
                         # fail toward "open" rather than silently treat it closed.
                         open_unkeyed = True
                 elif t == "tool_result":
-                    tid = b.get("tool_use_id")
+                    tid = hashable_str(b.get("tool_use_id"))
                     if tid:
                         res_ids.add(tid)
                     results.append((tid, _block_text(b)))
@@ -2752,12 +2760,13 @@ def _unresolved_team_coordination(messages, team_state) -> bool:
                     continue
                 t = b.get("type")
                 if t == "tool_use":
-                    if b.get("name") in _TEAM_COORD_TOOLS:
+                    if hashable_str(b.get("name")) in _TEAM_COORD_TOOLS:
                         return True
-                    if b.get("id"):
-                        use_name[b["id"]] = (b.get("name") or "")
+                    bid = hashable_str(b.get("id"))  # unhashable id -> "" (R6 crash class)
+                    if bid:
+                        use_name[bid] = hashable_str(b.get("name"))
                 elif t == "tool_result":
-                    results.append((b.get("tool_use_id"), _block_text(b)))
+                    results.append((hashable_str(b.get("tool_use_id")), _block_text(b)))
     # Spawn marker — credited ONLY when its paired tool_use is a spawn tool we can
     # SEE. A pruned/unknown tool_use is NOT credited here (that would re-open the
     # teamless-session over-block); the roster + detect_in_flight remain the primary

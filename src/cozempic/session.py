@@ -360,14 +360,18 @@ def _match_session_by_text(sessions: list[dict], match_text: str) -> dict | None
     """
     for sess in sorted(sessions, key=lambda s: s["mtime"], reverse=True):
         try:
-            with open(sess["path"], "r", encoding="utf-8") as f:
+            # errors="surrogateescape": a stray byte must not make a session with the
+            # marker INVISIBLE to text resolution (it would fall through to weaker
+            # cwd/mtime strategies and risk resolving the WRONG session). The old strict
+            # open + catch-and-skip silently dropped the whole session (R6).
+            with open(sess["path"], "r", encoding="utf-8", errors="surrogateescape") as f:
                 # Read last 50 lines efficiently
                 lines = f.readlines()
                 tail = lines[-50:] if len(lines) > 50 else lines
                 tail_text = "".join(tail)
                 if match_text in tail_text:
                     return sess
-        except (OSError, UnicodeDecodeError):
+        except OSError:
             continue
     return None
 
@@ -779,7 +783,42 @@ def _parse_one_line(raw: str, idx: int) -> Message | None:
     # only ever honor a wrapper the loader itself created.
     if "_raw" in obj or "_parse_error" in obj:
         obj = {k: v for k, v in obj.items() if k not in ("_raw", "_parse_error")}
+    # ROOT GUARD (R6 unhashable-uuid class): uuid / parentUuid / logicalParentUuid are
+    # STRUCTURAL DAG fields used as set members / dict keys at ~12 sites across
+    # safety.enforce_floor / validate_post_prune, executor._relink_parent_chain, and the
+    # guard — an unhashable (list/dict) value crashes the prune EVERY cycle (respawn
+    # storm). A real CC transcript ALWAYS writes these as a str (or null for a root
+    # parent); a present non-str is malformed. Wrap the whole line as opaque _parse_error
+    # (preserved verbatim via _raw on save, never DAG-linked or pruned) so NO consumer
+    # ever sees a non-str DAG field — the systemic fix, vs per-site coercion.
+    for _dag_key in ("uuid", "parentUuid", "logicalParentUuid"):
+        _dag_val = obj.get(_dag_key)
+        if _dag_val is not None and not isinstance(_dag_val, str):
+            return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
     return (idx, obj, byte_len)
+
+
+def _jsonl_line(msg: dict) -> str:
+    """Serialize a message dict to its JSONL line, encodable by the surrogateescape
+    save file in ALL cases.
+
+    ensure_ascii=False is preferred: a non-UTF-8 byte INSIDE a string value decoded
+    to a U+DC80..U+DCFF surrogate re-encodes to the EXACT original byte (byte-exact
+    round-trip), and normal Unicode is written as raw UTF-8 matching CC's own
+    JSON.stringify. BUT a LONE surrogate OUTSIDE U+DC80..U+DCFF — e.g. a JSON-escaped
+    high surrogate `\\ud83d` that CC emits for a sliced astral char — cannot be encoded
+    by the surrogateescape file handler and would raise UnicodeEncodeError mid-save. On
+    the guard path that crash lands AFTER Claude is SIGTERM'd but BEFORE resume = Claude
+    killed-but-not-resumed + daemon death (R6 P0). For such a line, fall back to
+    ensure_ascii=True so every surrogate becomes an ASCII `\\uXXXX` escape (always
+    encodable; still round-trips losslessly on reload). The scan is gated on isascii()
+    so the common path pays nothing."""
+    s = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+    if not s.isascii() and any(
+        0xD800 <= ord(c) <= 0xDFFF and not (0xDC80 <= ord(c) <= 0xDCFF) for c in s
+    ):
+        return json.dumps(msg, separators=(",", ":"))  # ensure_ascii=True
+    return s
 
 
 def _split_physical_lines(text: str) -> list[str]:
@@ -1041,16 +1080,12 @@ def save_messages(
                 # re-serialize, never KeyError/TypeError mid-save (which on the guard
                 # path aborts AFTER Claude is SIGTERM'd but BEFORE resume).
                 if msg.get("_parse_error") is True and isinstance(msg.get("_raw"), str):
+                    # _raw came from a surrogateescape decode of a structurally-invalid
+                    # line, so any surrogates it carries are in U+DC80..U+DCFF (real
+                    # bytes) — always encodable by the surrogateescape file. Write verbatim.
                     f.write(msg["_raw"] + "\n")
                 else:
-                    # ensure_ascii=False is REQUIRED for the surrogateescape round-trip
-                    # (R5 P0 fix): a non-UTF-8 byte INSIDE a string value decodes to a
-                    # surrogate; ensure_ascii=True would escape it to the LITERAL 6-char
-                    # text "\udcXX" (silent corruption — the byte is gone, the line grows).
-                    # ensure_ascii=False emits the raw surrogate char, which the
-                    # surrogateescape file handler re-encodes to the EXACT original byte.
-                    # It also matches CC's own JSON.stringify (raw UTF-8, not \u escapes).
-                    f.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
+                    f.write(_jsonl_line(msg) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
