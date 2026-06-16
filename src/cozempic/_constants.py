@@ -1,8 +1,8 @@
 """Shared compile-time constants for cozempic components.
 
 Extracted to break circular-import cycles: guard.py imports team.py at module
-level (guard.py:189), so team.py cannot import guard.py in return.  Any constant
-that BOTH modules must agree on lives here.
+level, so team.py cannot import guard.py in return.  Any constant that BOTH
+modules must agree on lives here.
 """
 
 # Maximum characters of text fed into the DOTALL lazy-star block-regex scanners
