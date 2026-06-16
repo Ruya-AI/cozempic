@@ -188,12 +188,9 @@ def _parse_pidfile_pid(pid_path: Path) -> int:
     return pid if pid > 0 else 0
 
 
-# Round-3 C2 (Option B) alignment: char class kept relaxed (mirrors
-# reload_lock._SAFE_CHARS_RE) but inputs are now lowercased before
-# substitution to align with guard._pid_file_for_session which
-# lowercases before applying its (also relaxed) _SESSION_ID_RE. Without
-# the lowercase, a mixed-case session_id would produce one slug here
-# and a different (lowercased) slug in guard.py.
+# XF-1 parity: lowercase-only char class, matching reload_lock._SAFE_CHARS_RE.
+# Lowercasing BEFORE substitution ensures uppercase session_id inputs map to
+# the same slug as their lowercase equivalents (XF-1 split-brain fix).
 _SAFE_CHARS_RE = re.compile(r"[^a-z0-9_-]")
 
 
