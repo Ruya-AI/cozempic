@@ -102,13 +102,16 @@ def _assert_finite_inrange(tc, r):
 # (validator, ENV var) — these return a default on bad input (never raise), so the
 # RETURN value must always be sane.
 _ENV_VALIDATORS = [
-    (g._reload_warn_grace, "COZEMPIC_RELOAD_WARN_GRACE"),
-    (g._force_reload_pct, "COZEMPIC_FORCE_RELOAD_PCT"),
-    (g._idle_reload_cycles, "COZEMPIC_IDLE_RELOAD_CYCLES"),
-    (g._idle_backoff_cycles, "COZEMPIC_IDLE_BACKOFF_CYCLES"),
-    (g._read_min_prune_ratio, "COZEMPIC_MIN_PRUNE_RATIO"),
+    (g._reload_warn_grace,        "COZEMPIC_RELOAD_WARN_GRACE"),
+    (g._force_reload_pct,         "COZEMPIC_FORCE_RELOAD_PCT"),
+    (g._idle_reload_cycles,       "COZEMPIC_IDLE_RELOAD_CYCLES"),
+    (g._idle_backoff_cycles,      "COZEMPIC_IDLE_BACKOFF_CYCLES"),
+    (g._read_min_prune_ratio,     "COZEMPIC_MIN_PRUNE_RATIO"),
     (g._read_hard_exit_threshold, "COZEMPIC_GUARD_HARD_EXIT_K"),
-    (t.get_chars_per_token, "COZEMPIC_CHARS_PER_TOKEN"),
+    (t.get_chars_per_token,       "COZEMPIC_CHARS_PER_TOKEN"),
+    # ── PR #137 additions — maintenance contract: one row per new knob ────────
+    (g._reload_ledger_window_s,   "COZEMPIC_RELOAD_WINDOW_S"),
+    (g._reload_ledger_max,        "COZEMPIC_RELOAD_MAX"),
 ]
 
 
