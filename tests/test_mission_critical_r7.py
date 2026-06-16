@@ -88,6 +88,19 @@ class TestRedosBoundedRangePolyMiss(unittest.TestCase):
         for p in [r".{1,50}.{1,50}", r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b"]:
             self.assertTrue(risky(p), f"adjacent variable ranges must stay flagged: {p}")
 
+    def test_r9_loosely_separated_variables_still_flagged(self):
+        # R9: the adjacency rule must NOT under-reject when variable atoms are separated
+        # by an OPTIONAL/zero-width atom (can match empty) or wrapped in GROUPS — those
+        # froze the no-budget daemon (the R8 adjacency rule regressed here). A required
+        # TOP-LEVEL literal between them is the ONLY thing that anchors / exempts.
+        from cozempic.helpers import _pattern_is_redos_risky as risky
+        for p in [r"(.{1,500})(.{1,500})(.{1,500})c", r"(a*)(a*)(a*)c",
+                  r".{1,500}x?.{1,500}x?.{1,500}c", r".*x?.*y?.*z?.*c",
+                  r"\w*\W?\w*\W?\w*Q", r".*(abc)?.*(def)?.*Q", r".*(?:x)?.*(?:y)?.*c"]:
+            self.assertTrue(risky(p), f"loosely-separated variable atoms must be flagged: {p}")
+        for p in [r"\d{1,5}-\d{1,5}", r".*foo.*", r"\w{1,20}@\w{1,20}"]:
+            self.assertFalse(risky(p), f"required-literal-separated must stay allowed: {p}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -490,81 +490,129 @@ def _have_sigalrm() -> bool:
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
 def _has_adjacent_variable_quantifiers(pattern: str) -> bool:
-    """True if PATTERN contains TWO consecutive variable-width quantified atoms with
-    NO required-matching atom between them — the necessary condition for super-linear
-    backtracking from ungrouped repetition (`.*.*`, `a+a+`, and crucially the bounded
-    `.{1,500}.{1,500}` that froze the no-budget path past the 512 cap, R7).
+    """True if PATTERN has TWO variable-width quantified atoms with NO required,
+    non-variable, TOP-LEVEL atom between them — the necessary condition for super-
+    linear backtracking from ungrouped/loosely-separated repetition (`.*.*`,
+    `.{1,500}.{1,500}`, `(.{1,500})(.{1,500})`, `.*x?.*x?.*`).
 
-    Why adjacency (R8 fix) rather than a raw count of variable quantifiers: two
-    variable-width quantifiers separated by a REQUIRED literal — `\\d{1,3}\\.\\d{1,3}`
-    (IPv4), `[A-Z]{2,4}-\\d{1,6}` (ticket), `.*foo.*` — are anchored by that literal
-    and match in linear time, so counting them as risky was a silent over-rejection
-    that dropped the user's --protect-pattern (R8). Only ADJACENT variable atoms can
-    consume the same input span ambiguously.
+    The separator rule (R9): two variable quantifiers separated by a REQUIRED literal
+    at the TOP level — `\\d{1,3}\\.\\d{1,3}` (IPv4), `[A-Z]{2,4}-\\d{1,6}`, `.*foo.*` —
+    are anchored and match in linear time, so they are NOT flagged (fixing the R8
+    over-rejection). Everything else stays flagged. Two deliberate safety choices keep
+    this from EVER under-rejecting (the R8 adjacency rule regressed by under-rejecting,
+    reopening the freeze — R9): (1) an OPTIONAL or zero-width atom (`x?`, `\\b`, `(?:)?`)
+    does NOT anchor — it can match empty, leaving the surrounding variables effectively
+    adjacent; (2) a required atom anchors ONLY at the TOP level (depth 0) — an atom
+    inside a group can be skipped when the group is optional/alternated, so a group is
+    NEVER treated as a separator. Variable-width = `*`, `+`, `{n,}`, or `{n,m}` (m!=n);
+    `?`, fixed `{n}`, and bare atoms are not. Quantified GROUPS with a quantified or
+    ambiguous body are caught separately by _body_has_inner_quantifier /
+    _ambiguous_alternation."""
 
-    Variable-width quantifier = `*`, `+`, open-ended `{n,}`, or a bounded range
-    `{n,m}` with m != n. `?` (0/1), a fixed `{n}`/`{n,n}`, and an un-quantified atom
-    are NOT variable-width. A group `(...)` is scanned as a single atom here; a
-    quantified group with a quantified/ambiguous body is caught separately by
-    _body_has_inner_quantifier / _ambiguous_alternation."""
-
-    def _is_var_brace(spec: str) -> bool:
-        if "," not in spec:
-            return False
-        lo, _, hi = spec.partition(",")
-        hi = hi.strip()
-        return hi == "" or hi != lo.strip()
+    def _quant(i):
+        """Parse a trailing quantifier at i. Returns (is_variable, is_optional, next_i)."""
+        if i >= n:
+            return (False, False, i)
+        ch = pattern[i]
+        if ch in "*+":
+            i2 = i + 1
+            if i2 < n and pattern[i2] in "?+":
+                i2 += 1
+            return (True, ch == "*", i2)  # * can match empty
+        if ch == "?":
+            i2 = i + 1
+            if i2 < n and pattern[i2] in "?+":
+                i2 += 1
+            return (False, True, i2)
+        if ch == "{":
+            j = pattern.find("}", i)
+            if j == -1:
+                return (False, False, i)
+            sp = pattern[i + 1:j]
+            var = optional = False
+            if "," in sp:
+                lo, _, hi = sp.partition(",")
+                hi = hi.strip()
+                var = hi == "" or hi != lo.strip()
+                optional = lo.strip() in ("", "0")
+            i2 = j + 1
+            if i2 < n and pattern[i2] in "?+":
+                i2 += 1
+            return (var, optional, i2)
+        return (False, False, i)
 
     i, n = 0, len(pattern)
-    prev_var = False  # previous atom carried a variable-width quantifier
+    depth = 0
+    pending = False  # an un-anchored variable quantifier is open
+
+    def _consume(var, optional, zero_width=False):
+        nonlocal pending
+        if var:
+            if pending:
+                return True
+            pending = True
+        elif depth == 0 and not optional and not zero_width:
+            pending = False  # a required, non-variable, top-level atom anchors
+        return False
+
     while i < n:
         c = pattern[i]
-        # ── consume ONE atom ──
         if c == "\\":
+            atom = pattern[i:i + 2]
             i += 2
-        elif c == "[":
+            var, optional, i = _quant(i)
+            if _consume(var, optional, zero_width=atom in (r"\b", r"\B", r"\A", r"\Z", r"\z")):
+                return True
+            continue
+        if c == "[":
             j = i + 1
             while j < n and pattern[j] != "]":
                 if pattern[j] == "\\":
                     j += 1
                 j += 1
             i = j + 1
-        elif c == "(":
-            depth, j = 1, i + 1
-            while j < n and depth:
-                if pattern[j] == "\\":
-                    j += 2
-                    continue
-                if pattern[j] == "(":
-                    depth += 1
-                elif pattern[j] == ")":
-                    depth -= 1
-                j += 1
-            i = j
-        elif c in ")|^$":
-            # not a consumable atom — resets adjacency (alternation/anchor boundary)
-            prev_var = False
+            var, optional, i = _quant(i)
+            if _consume(var, optional):
+                return True
+            continue
+        if c == "(":
+            depth += 1
+            i += 1
+            if i < n and pattern[i] == "?":  # skip (?: (?= (?! (?<= (?<! (?P<name> prefix
+                i += 1
+                if i < n and pattern[i] in ":=!":
+                    i += 1
+                elif i < n and pattern[i] == "<":
+                    if i + 1 < n and pattern[i + 1] in "=!":
+                        i += 2
+                    else:
+                        k = pattern.find(">", i)
+                        i = k + 1 if k != -1 else i + 1
+                elif i < n and pattern[i] == "P":
+                    k = pattern.find(">", i)
+                    i = k + 1 if k != -1 else i + 1
+            continue
+        if c == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            var, optional, i = _quant(i)  # the whole group may be repeated
+            if var and pending:
+                return True
+            if var:
+                pending = True
+            continue
+        if c == "|":
+            pending = False  # alternation branch boundary
             i += 1
             continue
-        else:
-            i += 1
-        # ── trailing quantifier on this atom? ──
-        var = False
-        if i < n and pattern[i] in "*+":
-            var = True
-            i += 1
-        elif i < n and pattern[i] == "?":
-            i += 1
-        elif i < n and pattern[i] == "{":
-            j = pattern.find("}", i)
-            if j != -1:
-                var = _is_var_brace(pattern[i + 1:j])
-                i = j + 1
-        if i < n and pattern[i] in "?+":  # lazy/possessive suffix
-            i += 1
-        if var and prev_var:
+        if c in "^$":
+            i += 1  # zero-width anchor: transparent
+            continue
+        # ordinary literal char (including '.')
+        i += 1
+        var, optional, i = _quant(i)
+        if _consume(var, optional):
             return True
-        prev_var = var
     return False
 
 
