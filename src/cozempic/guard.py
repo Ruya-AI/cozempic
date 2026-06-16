@@ -2415,7 +2415,11 @@ _TN_BLOCK_RE = re.compile(r"<task-notification(?:\s[^>]*)?>(.*?)</task-notificat
 # own DoS guard (text[:32768] and text[:8000]) introduced for system-reminder tags.
 # Single source of truth in _constants; team.py imports the same object.
 from ._constants import _RELOAD_GATE_SCAN_CAP  # noqa: E402 — after regex block
-_TN_ID_RE = re.compile(r"<task-id>([^<]+)</task-id>", re.IGNORECASE)
+# Attribute-tolerant: matches <task-id>X</task-id> and <task-id xmlns="ns">X</task-id>.
+# Parity with team.py _TASK_NOTIF_ID_RE (r"<task-id(?:\s[^>]*)?>…").
+# The strict form silently drops any notification whose <task-id> carries an XML
+# attribute → launch stays "in-flight" → gate over-defers indefinitely.
+_TN_ID_RE = re.compile(r"<task-id(?:\s[^>]*)?>([^<]+)</task-id>", re.IGNORECASE)
 _TN_STATUS_RE = re.compile(r"<status>([^<]+)</status>", re.IGNORECASE)
 # Terminal completion vocabulary — broadened so a harness phrasing skew (success/
 # done/finished vs completed) can't pin a finished task "in-flight" forever.
