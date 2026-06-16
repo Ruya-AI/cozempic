@@ -100,7 +100,6 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
         AssertionError because agent-xyz is registered but NOT cleared.
         """
         import cozempic.guard as _guard
-        from cozempic.guard import detect_in_flight
 
         # Full message sequence:
         #   1. Agent tool_use (adds tu-1 to use_ids)
@@ -132,7 +131,7 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
             # Harness delivers the task-notification as a user message content string.
             {"type": "user", "content": _REAL_NOTIF},
         ]
-        result = detect_in_flight(msgs)
+        result = _guard.detect_in_flight(msgs)
         self.assertFalse(
             result.get("agent"),
             "detect_in_flight must clear the Agent launch when a completed "
@@ -151,7 +150,6 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
         the agent stays stranded.
         """
         import cozempic.guard as _guard
-        from cozempic.guard import detect_in_flight
 
         msgs = [
             {
@@ -177,7 +175,7 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
             {"type": "user", "content": _REAL_NOTIF},
         ]
         with patch.object(_guard, "_RELOAD_GATE_SCAN_CAP", 1):
-            result = detect_in_flight(msgs)
+            result = _guard.detect_in_flight(msgs)
         self.assertTrue(
             result.get("agent"),
             "With cap=1 the notification is truncated before matching; "
@@ -217,6 +215,29 @@ def _uc(idx: int, text: str) -> tuple:
     """3-tuple for a user message with plain string content."""
     d = {"message": {"role": "user", "content": text}}
     return (idx, d, len(text))
+
+
+def _task_spawn_with_notif() -> list:
+    """Task tool spawn + completed task-notification for 'finder@myteam'.
+
+    Shared by test_extract_team_state_notification_transitions_existing_subagent
+    and test_extract_team_state_notification_beyond_cap_stays_running.
+
+    Uses tool_use_id='finder@myteam' so seen_subagents['finder@myteam'] is keyed
+    by the same string the notification's <task-id> carries — this routes through
+    the IF branch (task_id in seen_subagents) rather than the else-branch.
+    """
+    notif_text = (
+        "<task-notification>"
+        "<task-id>finder@myteam</task-id>"
+        "<status>completed</status>"
+        "<result>all done</result>"
+        "</task-notification>"
+    )
+    return [
+        _tu(0, "finder@myteam", "Task", {"description": "find bugs"}),
+        _uc(1, notif_text),
+    ]
 
 
 class TestExtractTeamStateReDoSCap(unittest.TestCase):
@@ -304,22 +325,10 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
         RED-at-base (cap=1): assertEqual(finder.status, 'completed') FAILS because the
         notification is truncated and the subagent stays 'running'.
         """
-        import cozempic.team as _team
-
-        notif_text = (
-            "<task-notification>"
-            "<task-id>finder@myteam</task-id>"
-            "<status>completed</status>"
-            "<result>all done</result>"
-            "</task-notification>"
-        )
         # Use tool_use_id="finder@myteam" so that seen_subagents["finder@myteam"]
         # is keyed by the same id the task-notification carries — this puts the
         # pre-registered entry on the IF branch path (task_id in seen_subagents).
-        msgs = [
-            _tu(0, "finder@myteam", "Task", {"description": "find bugs"}),
-            _uc(1, notif_text),
-        ]
+        msgs = _task_spawn_with_notif()
         state = self._extract(msgs)
         subagents = state.subagents if state else []
         finder = next((s for s in subagents if "finder" in s.agent_id), None)
@@ -345,17 +354,7 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
         """
         import cozempic.team as _team
 
-        notif_text = (
-            "<task-notification>"
-            "<task-id>finder@myteam</task-id>"
-            "<status>completed</status>"
-            "<result>all done</result>"
-            "</task-notification>"
-        )
-        msgs = [
-            _tu(0, "finder@myteam", "Task", {"description": "find bugs"}),
-            _uc(1, notif_text),
-        ]
+        msgs = _task_spawn_with_notif()
         with patch.object(_team, "_RELOAD_GATE_SCAN_CAP", 1):
             state = self._extract(msgs)
         subagents = state.subagents if state else []
