@@ -569,6 +569,44 @@ def _count_variable_quantifiers(pattern: str) -> int:
     return count
 
 
+def _has_alternation(pattern: str) -> bool:
+    """True if PATTERN contains an alternation `|` outside a character class / escape.
+
+    On the no-budget (no-SIGALRM) path we REFUSE all alternation categorically (R12).
+    Alternation is a super-linear backtracking source, and an AMBIGUOUS alternation
+    (nested `((a|a))+`, an unquantified chain `(a|a)(a|a)...`, an overlapping
+    `(aa|a)...`) cannot be reliably distinguished from a benign DISJOINT one
+    (`foo|bar`) without full regex analysis — rounds 8-12 proved every precise
+    heuristic (adjacency, top-level-anchor, recursive ambiguity, quantifier counting)
+    leaks and reopens the daemon freeze. Refusing ALL `|` closes the entire class
+    SOUNDLY. Verified empirically complete: with no `|` and < 2 quantifiers, no pattern
+    (incl backreferences) backtracks. The cost is over-rejecting benign alternations —
+    fail-OPEN (skip pattern protection this cycle + a stderr warning, content stays
+    prunable, no crash/freeze) and ONLY on the no-SIGALRM path (Windows / non-main
+    thread); the ~70k POSIX main-thread users use the SIGALRM timer and never consult
+    this detector. The zero-over-rejection alternative is a killable-subprocess hard
+    timeout (a larger change, out of scope for this PR)."""
+    i, n, in_class = 0, len(pattern), False
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            continue
+        if c == "|":
+            return True
+        i += 1
+    return False
+
+
 def _scan_quantified_group_bodies(pattern: str) -> list[str]:
     """Inner body of each group `(...)` immediately followed by an unbounded or
     braced quantifier (`+`, `*`, `{...}`). Honors escapes, char classes, and
@@ -722,16 +760,24 @@ def _pattern_is_redos_risky(pattern: str) -> bool:
     CLOSED where no wall-clock budget exists (Windows / non-main thread), where a
     pure-Python thread cannot interrupt a CPU-bound `re` match.
 
-    Three necessary-condition rules, all fail-CLOSED (never under-reject → never let a
-    freeze through), at the cost of some safe-direction over-rejection on this path:
+    Four CATEGORICAL fail-CLOSED rules (never under-reject → never let a freeze
+    through), at the cost of safe-direction over-rejection on this niche path. The
+    three backtracking sources — repetition interaction, quantifier-over-ambiguity,
+    and alternation — are each closed CATEGORICALLY rather than by precise detection
+    (rounds 8-12 proved precise heuristics leak); backreferences with < 2 quantifiers
+    and no alternation are empirically freeze-free:
       1. >= 2 variable-width quantifiers anywhere (`.*.*`, `a*a*`, `.{1,500}.{1,500}`,
-         and also `.*X.*X` / `.*(?:Z|).*` which DO freeze; this conservatively also
-         flags linear literal-separated ranges like `\\d{1,3}\\.\\d{1,3}` — accepted,
-         fail-open, see _count_variable_quantifiers for the rounds-7..10 rationale).
+         the optional chain `a?a?...`, `.*X.*X`, ...). Conservatively also flags linear
+         literal-separated ranges — accepted, fail-open (see _count_variable_quantifiers).
       2. a quantified group whose body is itself variable-width (`(a?)+`, `(.*X){8}`).
-      3. a quantified group with an AMBIGUOUS alternation (`(a|a)+`) — disjoint
-         alternations like `(TODO|FIXME)+` stay allowed."""
+      3. ANY alternation `|` (R12): closes nested `((a|a))+`, unquantified chains
+         `(a|a)(a|a)...`, overlapping `(aa|a)...` — and conservatively benign `foo|bar`
+         too (fail-open; see _has_alternation for why categorical, not precise).
+      4. (subsumed by 3, kept defensively) a quantified group with an ambiguous
+         alternation."""
     if _count_variable_quantifiers(pattern) >= 2:
+        return True
+    if _has_alternation(pattern):
         return True
     for body in _scan_quantified_group_bodies(pattern):
         if _body_has_inner_quantifier(body) or _ambiguous_alternation(body):

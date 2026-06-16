@@ -149,17 +149,18 @@ class TestHardening1828(unittest.TestCase):
         # detector MISSED and which froze the Windows daemon under the 512 cap.
         for p in [r"(a+)+$", r"(a*)*", r"(ab+c)*", r"(a|a)+", r"(x+){10}",
                   r"(x+){2,}", r"(a?)+", r"((a)|(a))+", r"(\S+\s+){5,}", r"(.*X){8}",
-                  r".*.*.*.*c", r"a*a*", r"(secret-\d+)+"]:
-            self.assertTrue(risky(p), f"catastrophic form not flagged: {p}")
+                  r".*.*.*.*c", r"a*a*", r"(secret-\d+)+",
+                  # R12: ANY alternation is categorically refused (nested / unquantified
+                  # ambiguous-alternation chains freeze and can't be told from benign ones).
+                  r"foo|bar|baz", r"(TODO|FIXME)+"]:
+            self.assertTrue(risky(p), f"catastrophic / alternation form not flagged: {p}")
         # Safe patterns stay usable (no false-positive freeze / silent protect drop).
-        # R4: benign SINGLE-quantifier groups must NOT be flagged — the prior
-        # detector rejected these, silently dropping --protect-pattern so the
-        # user's protected content got pruned (data loss).
-        # R5 P3: a FIXED-count inner brace ((\d{4})+, (\w{8})+) is unambiguous and
-        # linear — must NOT be flagged (was an over-rejection that dropped the
-        # user's bounded protect-pattern on the no-SIGALRM path).
-        for p in [r"GATE CONTRACT R\d+", r"foo|bar|baz", r"R\d{1,5}", r"\bword\b",
-                  r"[A-Za-z0-9_]+", r"(KEEP)+", r"(TODO|FIXME)+", r"(DO-NOT-PRUNE)+",
+        # R4: benign SINGLE-quantifier groups must NOT be flagged. R5 P3: a FIXED-count
+        # inner brace ((\d{4})+, (\w{8})+) is unambiguous/linear and must NOT be flagged.
+        # NOTE (R12): patterns with an alternation `|` are now conservatively flagged
+        # (categorical) — they are NOT in this safe list.
+        for p in [r"GATE CONTRACT R\d+", r"R\d{1,5}", r"\bword\b",
+                  r"[A-Za-z0-9_]+", r"(KEEP)+", r"(DO-NOT-PRUNE)+",
                   r"(important){1,3}", r".*", r"(a+)", r"(\d{4})+", r"(\w{8})+"]:
             self.assertFalse(risky(p), f"safe pattern wrongly flagged: {p}")
 

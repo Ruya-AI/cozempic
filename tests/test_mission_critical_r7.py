@@ -103,9 +103,24 @@ class TestRedosBoundedRangePolyMiss(unittest.TestCase):
         # common safe shapes). NOTE: literal-separated multi-range patterns
         # (\d{1,3}\.\d{1,3}) ARE conservatively flagged by the count rule — that is the
         # accepted fail-open over-rejection on the no-SIGALRM path, not tested as "safe".
+        # NOTE (R12): alternation patterns ((TODO|FIXME)+) are NOT here — they are now
+        # categorically flagged (fail-open) since ambiguous alternation can't be told
+        # from benign without full regex analysis.
         for p in [r"R\d{1,5}", r".{1,500}", r"\d{1,3}", r"(\d{4})+", r"(\w{8})+",
-                  r"(KEEP)+", r"(TODO|FIXME)+", r".*", r"\bword\b"]:
+                  r"(KEEP)+", r".*", r"\bword\b"]:
             self.assertFalse(risky(p), f"benign single-quantifier pattern wrongly flagged: {p}")
+
+    def test_r12_alternation_categorically_flagged(self):
+        # R12: the alternation backtracking class is closed categorically — nested,
+        # unquantified-chain, and overlapping ambiguous alternations all freeze and
+        # can't be distinguished from benign ones, so ANY `|` is refused.
+        from cozempic.helpers import _pattern_is_redos_risky as risky
+        for p in [r"((a|a))+c", "(a|a)" * 25 + "b", "(a|a|a)" * 16 + "x",
+                  "(aa|a)" * 20 + "X", r"foo|bar|baz", r"(TODO|FIXME)+"]:
+            self.assertTrue(risky(p), f"alternation must be categorically flagged: {p}")
+        # `|` inside a character class is NOT an alternation — must stay allowed.
+        for p in [r"[a|b]+", r"[|]"]:
+            self.assertFalse(risky(p), f"`|` in a char class is literal, not alternation: {p}")
 
 
 if __name__ == "__main__":
