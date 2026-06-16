@@ -330,7 +330,7 @@ class TestPolishPR93_K10DeferWhenAgentsActive(unittest.TestCase):
                 self.subagents = [sub] if has_agents else []
                 # Inline teammate stub — matches the subset of TeammateInfo that
                 # _compute_agents_active reads (only .status).
-                tm = type("T", (), {"status": tm_status})() if tm_status else None
+                tm = type("T", (), {"status": tm_status})() if tm_status is not None else None
                 self.teammates = [tm] if tm else []
                 self.tasks = []
                 self.message_count = 0
