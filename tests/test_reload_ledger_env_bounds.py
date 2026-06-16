@@ -97,9 +97,13 @@ class TestReloadLedgerWindowSEnvBounds(unittest.TestCase):
         self.assertEqual(self._call("1800"), 1800)
 
     def test_floor_clamp_at_60(self):
-        """Values below the floor 60 are raised to 60 (genuine clamp, not reject)."""
+        """Values below the floor 60 are clamped exactly to 60 (not reject).
+
+        Input "30" → max(60, 30) = 60 exactly. assertGreaterEqual would not
+        catch a future regression to max(90, v) = 90; assertEqual is precise.
+        """
         result = self._call("30")
-        self.assertGreaterEqual(result, 60)
+        self.assertEqual(result, 60)
 
     def test_ceiling_value_exact(self):
         """86400 exactly is at the boundary — must be accepted (not rejected)."""
@@ -147,17 +151,49 @@ class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
         )
 
     def test_max_above_ceiling_rejected_to_default(self):
-        """101 is just one above the 100 ceiling.
+        """51 is just one above the new 50 ceiling (was 100 at ae85bcc).
 
-        RED at base: max(1, 101) == 101 (passes through unchecked).
-        GREEN after fix: rejected → fallback default 3.
+        RED at base: max(1, 51) == 51 (passes through unchecked).
+        GREEN after fix: parse_env_positive_int with maximum=50 rejects → 3.
         """
-        result = self._call("101")
+        result = self._call("51")
         self.assertEqual(
             result,
             3,
-            f"_reload_ledger_max returned {result} for env=101 "
+            f"_reload_ledger_max returned {result} for env=51 "
             f"— expected rejection to safe default 3",
+        )
+
+    def test_max_above_write_cap_rejected_to_default(self):
+        """RELOAD_MAX=80 passes maximum=100 at base and returns 80.
+
+        The storm-guard fires when len(hist) >= max; hist is capped at 50 on
+        write, so len(hist) <= 50, making 50 >= 80 always False — guard never
+        trips for any value in [51, 100].
+
+        RED at base: max(1, 80) == 80 (accepted; storm-guard silently disabled).
+        GREEN after fix: 80 > 50 (new ceiling) → rejected → returns default 3.
+        """
+        result = self._call("80")
+        self.assertEqual(
+            result,
+            3,
+            f"_reload_ledger_max returned {result} for env=80 "
+            f"— expected rejection to safe default 3 (incoherent with hist[-50:] write-cap)",
+        )
+
+    def test_ceiling_100_rejected_after_fix(self):
+        """100 was the former ceiling; after fix it must be rejected.
+
+        RED at base: max(1, 100) == 100 (returned as ceiling).
+        GREEN after fix: 100 > 50 → rejected → 3.
+        """
+        result = self._call("100")
+        self.assertEqual(
+            result,
+            3,
+            f"_reload_ledger_max returned {result} for env=100 "
+            f"— expected rejection to 3 (old ceiling, no longer valid)",
         )
 
     # ── Regression guards (must pass at base AND after fix) ──────────────────
@@ -167,18 +203,24 @@ class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
         self.assertEqual(self._call(), 3)
 
     def test_valid_value_within_bounds(self):
-        """A value well within [1, 100] is returned as-is."""
+        """A value well within [1, 50] is returned as-is."""
         self.assertEqual(self._call("10"), 10)
 
-    def test_floor_clamp_at_1(self):
-        """Values below the floor 1 are raised to 1 (genuine clamp, not reject)."""
+    def test_zero_rejected_to_default(self):
+        """COZEMPIC_RELOAD_MAX=0 is rejected (not positive) → default 3.
+
+        parse_env_positive_int rejects 0 (not positive) → None → default 3.
+        This is rejection, not a clamp: max(1, v) was dead code, now removed.
+        The old test (test_floor_clamp_at_1) had a misleading docstring
+        asserting a "genuine clamp" that never happened.
+        """
         result = self._call("0")
-        self.assertGreaterEqual(result, 1)
+        self.assertEqual(result, 3, "0 must be rejected to default 3, not clamped to 1")
 
     def test_ceiling_value_exact(self):
-        """100 exactly is at the boundary — must be accepted (not rejected)."""
-        result = self._call("100")
-        self.assertEqual(result, 100)
+        """50 exactly is at the new boundary — must be accepted (not rejected)."""
+        result = self._call("50")
+        self.assertEqual(result, 50)
 
     def test_invalid_string_returns_fallback(self):
         """Non-numeric env var falls back to 3 (pre-existing behaviour)."""

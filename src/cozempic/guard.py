@@ -2369,6 +2369,9 @@ def _guard_tmp_root() -> Path:
 # respawn: if a session reloads too many times within a window, the guard stops
 # auto-reloading it (and accounts it to the breaker so the daemon exits) rather
 # than churning kill→resume→re-bloat forever. Window/cap are env-overridable.
+_RELOAD_LEDGER_HIST_CAP = 50  # write-cap for hist slice AND ceiling for RELOAD_MAX
+
+
 def _reload_ledger_window_s() -> int:
     from ._validation import parse_env_positive_int
     v = parse_env_positive_int("COZEMPIC_RELOAD_WINDOW_S", maximum=86400)
@@ -2377,8 +2380,12 @@ def _reload_ledger_window_s() -> int:
 
 def _reload_ledger_max() -> int:
     from ._validation import parse_env_positive_int
-    v = parse_env_positive_int("COZEMPIC_RELOAD_MAX", maximum=100)
-    return max(1, v) if v is not None else 3
+    # Ceiling = _RELOAD_LEDGER_HIST_CAP: values above the write-cap make
+    # len(hist) >= max always False (hist[-cap:] bounds the list on write),
+    # silently disabling the storm-guard for the entire [cap+1, old-100] range.
+    # max(1, v) removed: parse_env_positive_int guarantees v >= 1 when non-None.
+    v = parse_env_positive_int("COZEMPIC_RELOAD_MAX", maximum=_RELOAD_LEDGER_HIST_CAP)
+    return v if v is not None else 3
 
 
 # ── In-flight work detector (1.8.22 safe-point gate, component A) ─────────────
@@ -2868,7 +2875,7 @@ def _reload_rate_exceeded(ledger_path: Path, now: float | None = None) -> tuple[
         return True, len(hist)
     hist.append(now)
     try:
-        ledger_path.write_text(_json.dumps(hist[-50:]))
+        ledger_path.write_text(_json.dumps(hist[-_RELOAD_LEDGER_HIST_CAP:]))
     except Exception:
         pass
     return False, len(hist)
