@@ -553,6 +553,82 @@ class TestReloadLockSymlinkDefense(unittest.TestCase):
                 lock_path.unlink(missing_ok=True)
 
 
+# ─── Round-2 reviewer findings (M-1 / M-2) ───────────────────────────────────
+
+class TestRound2ReviewerFindings(unittest.TestCase):
+    """RED tests for M-1 (guard.py:2235 double-truncation) and M-2 (str coercion)."""
+
+    # ── M-1 — watcher slug must equal _reload_sentinel_path_for slug ─────────
+
+    def test_watcher_slug_matches_sentinel_path_under_widened_slug_for(self):
+        """M-1 (RED at HEAD): guard.py:2235 still applies [:12] to _slug_for().
+
+        When _slug_for is mocked to return a 15-char slug, the watcher path
+        expression (_slug_for(sid)[:12]) truncates to 12 chars while
+        _reload_sentinel_path_for returns the full 15-char slug — divergence
+        that P0-C was filed to eliminate (same class, different site).
+
+        We simulate this by calling the watcher expression (_rl_slug_for(sid)[:12])
+        and comparing it to _reload_sentinel_path_for's slug extraction.  At HEAD
+        the two diverge when _slug_for returns >12 chars; after the fix they agree.
+        """
+        from cozempic.reload_lock import _reload_sentinel_path_for
+
+        session_id = "my-test-session-99"
+        wide_slug = "abcdefghijklmno"  # 15 chars — wider than current 12-char cap
+
+        with patch('cozempic.guard._rl_slug_for', return_value=wide_slug, create=True), \
+             patch('cozempic.reload_lock._slug_for', return_value=wide_slug):
+
+            # Sentinel reader (after P0-C): uses _slug_for directly — no [:12]
+            sentinel_slug = _reload_sentinel_path_for(session_id).name[
+                len("cozempic_reload_"):-len(".in-flight")
+            ]
+            # Watcher writer (before M-1 fix): uses _rl_slug_for(sid)[:12]
+            from cozempic.guard import _rl_slug_for as _watcher_slug_fn  # noqa
+            watcher_slug = _watcher_slug_fn(session_id)[:12]
+
+        self.assertEqual(
+            watcher_slug, sentinel_slug,
+            f"Watcher slug {watcher_slug!r} != sentinel slug {sentinel_slug!r}: "
+            "guard.py:2235 still truncates to 12 while _reload_sentinel_path_for "
+            "does not — split-brain risk if _slug_for is ever widened."
+        )
+
+    # ── M-2 — non-str session_id must not raise TypeError ────────────────────
+
+    def test_reload_armed_path_non_str_session_id_does_not_raise(self):
+        """M-2 (RED at HEAD): _reload_armed_path(123, None) raises TypeError.
+
+        The old inline formula used str(raw) before re.sub, safely converting
+        any truthy non-str.  P0-A switched to _slug_for(raw) which executes
+        '/' in session_id — TypeError for int/Path.  Restore coercion at call site.
+        """
+        from cozempic.guard import _reload_armed_path
+        try:
+            result = _reload_armed_path(123, None)
+        except TypeError as exc:
+            self.fail(
+                f"_reload_armed_path(123, None) raised TypeError: {exc!r}. "
+                "Non-str session_id should be coerced to str at the call site."
+            )
+        # Ensure we got a real path back
+        self.assertIn("cozempic_reload_armed_", result.name)
+
+    def test_reload_ledger_path_non_str_session_id_does_not_raise(self):
+        """M-2 parity: _reload_ledger_path(123, ...) must not raise TypeError."""
+        from cozempic.guard import _reload_ledger_path
+        from pathlib import Path
+        try:
+            result = _reload_ledger_path(123, Path("/tmp/dummy.jsonl"))
+        except TypeError as exc:
+            self.fail(
+                f"_reload_ledger_path(123, ...) raised TypeError: {exc!r}. "
+                "Non-str session_id should be coerced to str at the call site."
+            )
+        self.assertIn("cozempic_reload_", result.name)
+
+
 # ─── CLI integration: --wait flag exists ─────────────────────────────────────
 
 class TestReloadCliWaitFlag(unittest.TestCase):
