@@ -167,22 +167,15 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
 
 
 class TestPostCompactStrategy1Isolation(unittest.TestCase):
-    """R-1: cmd_post_compact must be hermetic: find_claude_pid blocked → no cross-project leak.
+    """R-1: cmd_post_compact must be hermetic when find_claude_pid is blocked.
 
     Without an explicit find_claude_pid → None patch, a live Claude session on the
-    host can make Strategy 1 fire and return a wrong-project checkpoint.  This class
-    provides the behavioral regression guard:
+    host can make Strategy 1 fire and return a wrong-project checkpoint.
 
-    - RED at HEAD `ae7fe54`: find_claude_pid → None NOT in test_falls_back_safely /
-      test_global_checkpoint_not_read → proof that the tests were structurally
-      non-hermetic (demonstrated by the separate isolation-gap scenario below).
-    - GREEN after fix: find_claude_pid → None added to both tests; this guard test
-      also patches find_claude_pid → None and asserts the cross-project checkpoint
-      is blocked.
-
-    Isolation-gap proof (separate test): with find_claude_pid=99999 + mocked
-    lookup_active_transcript, B's checkpoint bleeds into project A's output — this
-    is the scenario the fix prevents in the production tests.
+    RED at HEAD `ae7fe54`: find_claude_pid → None was absent from test_falls_back_safely
+    and test_global_checkpoint_not_read → those tests were incidentally safe only because
+    their empty projects dir triggered an early return before Strategy 1 ran.
+    GREEN after fix: both tests gain find_claude_pid → None; this guard also patches it.
     """
 
     def test_strategy1_blocked_when_find_claude_pid_is_none(self):
@@ -230,52 +223,6 @@ class TestPostCompactStrategy1Isolation(unittest.TestCase):
             "a session and checkpoint in the projects dir. Strategy 1 must be blocked "
             "via find_claude_pid → None."
         )
-
-    def test_strategy1_isolation_gap_proof(self):
-        """Proof that the isolation gap exists: without find_claude_pid → None,
-        Strategy 1 fires and injects a wrong-project checkpoint.
-
-        This test is INTENTIONALLY ALWAYS RED — it demonstrates the scenario that
-        makes test_falls_back_safely / test_global_checkpoint_not_read non-hermetic
-        if run on a host with a live Claude session. It is NOT expected to flip GREEN
-        (it documents the vulnerability, not a regression guard).
-
-        setup: find_claude_pid=99999, lookup_active_transcript returns B's record →
-        cmd_post_compact outputs B's checkpoint for project A's cwd.
-
-        assertIn: confirms B's checkpoint bleeds in (the bad behavior).
-        """
-        tmp_path = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
-
-        proj_b = tmp_path / "projects" / "-proj-b"
-        sess_b = "bbbb2222-0000-0000-0000-000000000003"
-        sess_b_path = _write_session_file(proj_b, sess_b)
-        (proj_b / "team-checkpoint.md").write_text("PROJ_B_STATE", encoding="utf-8")
-
-        fake_active_record = {"transcript_path": str(sess_b_path), "pid": 99999}
-
-        cwd_a_path = tmp_path / "project_a"
-        cwd_a_path.mkdir(exist_ok=True)
-        cwd_a = str(cwd_a_path)
-
-        with (
-            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
-            patch("cozempic.session._session_id_from_process", return_value=None),
-            patch("cozempic.session.find_claude_pid", return_value=99999),
-            patch("cozempic.session.lookup_active_transcript", return_value=fake_active_record),
-        ):
-            output = _run_post_compact(cwd=cwd_a)
-
-        # Confirms the gap: B's checkpoint bleeds into project A's output.
-        # This test asserts the BAD behavior (assertIn) to document the vulnerability.
-        self.assertIn(
-            "PROJ_B_STATE", output,
-            "Expected B's checkpoint to bleed in when find_claude_pid is not blocked. "
-            "If this assertion fails, the isolation gap no longer exists — consider "
-            "removing or updating this proof test."
-        )
-
 
 class TestCorrectSlugUsesCwdToProjectSlug(unittest.TestCase):
     """P0-C: inline _correct_slug in test helpers must use cwd_to_project_slug.
