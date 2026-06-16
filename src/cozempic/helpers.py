@@ -489,57 +489,83 @@ def _have_sigalrm() -> bool:
 # across a group close. Conservative (may false-positive); used ONLY to fail
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
-def _count_unbounded_quantifiers(pattern: str) -> int:
-    """Count VARIABLE-WIDTH repetition operators in PATTERN, ignoring escaped
-    operators (`\\*`) and operators inside a character class `[...]` (literal there).
-    Variable-width = `*`, `+`, open-ended `{n,}`, AND a bounded RANGE `{n,m}` with
-    m != n (e.g. `{1,500}`). This is the necessary-condition heuristic for
-    super-linear backtracking: it requires AT LEAST TWO overlapping variable-width
-    repetitions (`.*.*`, `a+a+`, `(a+)+`, and crucially `.{1,500}.{1,500}` — adjacent
-    BOUNDED ranges still backtrack polynomially and froze the no-budget path past the
-    512 cap, R7). A SINGLE variable quantifier — even on a group, e.g. `(KEEP)+`,
-    `R\\d{1,5}` — is linear and NOT risky. A FIXED count `{n}` / `{n,n}` is one width,
-    never variable, so it is not counted (keeps `(\\d{4})+` allowed)."""
-    count = 0
-    i = 0
-    n = len(pattern)
-    in_class = False
+def _has_adjacent_variable_quantifiers(pattern: str) -> bool:
+    """True if PATTERN contains TWO consecutive variable-width quantified atoms with
+    NO required-matching atom between them — the necessary condition for super-linear
+    backtracking from ungrouped repetition (`.*.*`, `a+a+`, and crucially the bounded
+    `.{1,500}.{1,500}` that froze the no-budget path past the 512 cap, R7).
+
+    Why adjacency (R8 fix) rather than a raw count of variable quantifiers: two
+    variable-width quantifiers separated by a REQUIRED literal — `\\d{1,3}\\.\\d{1,3}`
+    (IPv4), `[A-Z]{2,4}-\\d{1,6}` (ticket), `.*foo.*` — are anchored by that literal
+    and match in linear time, so counting them as risky was a silent over-rejection
+    that dropped the user's --protect-pattern (R8). Only ADJACENT variable atoms can
+    consume the same input span ambiguously.
+
+    Variable-width quantifier = `*`, `+`, open-ended `{n,}`, or a bounded range
+    `{n,m}` with m != n. `?` (0/1), a fixed `{n}`/`{n,n}`, and an un-quantified atom
+    are NOT variable-width. A group `(...)` is scanned as a single atom here; a
+    quantified group with a quantified/ambiguous body is caught separately by
+    _body_has_inner_quantifier / _ambiguous_alternation."""
+
+    def _is_var_brace(spec: str) -> bool:
+        if "," not in spec:
+            return False
+        lo, _, hi = spec.partition(",")
+        hi = hi.strip()
+        return hi == "" or hi != lo.strip()
+
+    i, n = 0, len(pattern)
+    prev_var = False  # previous atom carried a variable-width quantifier
     while i < n:
         c = pattern[i]
+        # ── consume ONE atom ──
         if c == "\\":
-            i += 2  # escaped next char — never an operator
-            continue
-        if in_class:
-            if c == "]":
-                in_class = False
-            i += 1
-            continue
-        if c == "[":
-            in_class = True
-            i += 1
-            continue
-        if c in "*+":
-            count += 1
-            i += 1
-            continue
-        if c == "{":
-            j = pattern.find("}", i)
-            if j == -1:
-                i += 1
-                continue
-            spec = pattern[i + 1:j]
-            # Variable-width iff a comma is present AND the upper bound differs from
-            # the lower (open-ended `{n,}` counts; `{n,m}` with m>n counts; a fixed
-            # `{n}` or `{n,n}` does NOT — single width, linear).
-            if "," in spec:
-                lo, _, hi = spec.partition(",")
-                hi = hi.strip()
-                if hi == "" or hi != lo.strip():
-                    count += 1
+            i += 2
+        elif c == "[":
+            j = i + 1
+            while j < n and pattern[j] != "]":
+                if pattern[j] == "\\":
+                    j += 1
+                j += 1
             i = j + 1
+        elif c == "(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if pattern[j] == "\\":
+                    j += 2
+                    continue
+                if pattern[j] == "(":
+                    depth += 1
+                elif pattern[j] == ")":
+                    depth -= 1
+                j += 1
+            i = j
+        elif c in ")|^$":
+            # not a consumable atom — resets adjacency (alternation/anchor boundary)
+            prev_var = False
+            i += 1
             continue
-        i += 1
-    return count
+        else:
+            i += 1
+        # ── trailing quantifier on this atom? ──
+        var = False
+        if i < n and pattern[i] in "*+":
+            var = True
+            i += 1
+        elif i < n and pattern[i] == "?":
+            i += 1
+        elif i < n and pattern[i] == "{":
+            j = pattern.find("}", i)
+            if j != -1:
+                var = _is_var_brace(pattern[i + 1:j])
+                i = j + 1
+        if i < n and pattern[i] in "?+":  # lazy/possessive suffix
+            i += 1
+        if var and prev_var:
+            return True
+        prev_var = var
+    return False
 
 
 def _scan_quantified_group_bodies(pattern: str) -> list[str]:
@@ -701,11 +727,13 @@ def _pattern_is_redos_risky(pattern: str) -> bool:
     benign single-quantifier groups like `(KEEP)+`, `(TODO|FIXME)+`, silently
     dropping a user's --protect-pattern so protected content got pruned. Three
     necessary-condition rules together fix both directions:
-      1. >= 2 unbounded quantifiers anywhere (`.*.*`, `(a+)+`, `a*a*`).
+      1. two ADJACENT variable-width quantified atoms (`.*.*`, `a*a*`,
+         `.{1,500}.{1,500}`) — but NOT literal-separated ranges like
+         `\\d{1,3}\\.\\d{1,3}` which are linear (R8: stop over-rejecting those).
       2. a quantified group whose body is itself quantified (`(a?)+`, `(.*X){8}`).
       3. a quantified group with an AMBIGUOUS alternation (`(a|a)+`) — disjoint
          alternations like `(TODO|FIXME)+` stay allowed."""
-    if _count_unbounded_quantifiers(pattern) >= 2:
+    if _has_adjacent_variable_quantifiers(pattern):
         return True
     for body in _scan_quantified_group_bodies(pattern):
         if _body_has_inner_quantifier(body) or _ambiguous_alternation(body):

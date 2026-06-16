@@ -76,6 +76,18 @@ class TestRedosBoundedRangePolyMiss(unittest.TestCase):
         for p in [r"R\d{1,5}", r".{1,500}", r"\d{1,3}", r"(\d{4})+", r"(\w{8})+"]:
             self.assertFalse(risky(p), f"linear bounded pattern wrongly flagged: {p}")
 
+    def test_literal_separated_bounded_ranges_not_overrejected(self):
+        # R8: two bounded ranges separated by a REQUIRED literal are anchored and
+        # linear — they must NOT be flagged (R7 over-rejected these, silently dropping
+        # the user's --protect-pattern on the no-SIGALRM path). Adjacency, not count.
+        from cozempic.helpers import _pattern_is_redos_risky as risky
+        for p in [r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", r"[A-Z]{2,4}-\d{1,6}",
+                  r"v\d{1,2}\.\d{1,2}", r"\w{1,20}@\w{1,20}", r".*foo.*", r"ERROR-\d{1,4}: .{1,80}"]:
+            self.assertFalse(risky(p), f"benign literal-separated pattern wrongly flagged: {p}")
+        # ...but ADJACENT variable ranges (no separator) stay flagged.
+        for p in [r".{1,50}.{1,50}", r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b"]:
+            self.assertTrue(risky(p), f"adjacent variable ranges must stay flagged: {p}")
+
 
 if __name__ == "__main__":
     unittest.main()
