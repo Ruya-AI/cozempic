@@ -183,3 +183,86 @@ class TestReloadLedgerMaxEnvBounds(unittest.TestCase):
     def test_invalid_string_returns_fallback(self):
         """Non-numeric env var falls back to 3 (pre-existing behaviour)."""
         self.assertEqual(self._call("not-a-number"), 3)
+
+
+class TestReloadWarnGraceBounds(unittest.TestCase):
+    """_reload_warn_grace() rejects huge finite values → safe default 120.0.
+
+    Cap = 3600 (1h): a grace period above 1h is functionally infinite for any
+    interactive session. Values above 3600 must be rejected to default 120.0;
+    the <=0 disable-semantic must be preserved.
+    """
+
+    def _call(self, env_val=None):
+        from cozempic.guard import _reload_warn_grace
+
+        env = {}
+        if env_val is not None:
+            env["COZEMPIC_RELOAD_WARN_GRACE"] = env_val
+        with patch.dict(os.environ, env, clear=False):
+            if env_val is None:
+                os.environ.pop("COZEMPIC_RELOAD_WARN_GRACE", None)
+            return _reload_warn_grace()
+
+    # ── RED-at-base: huge finite values must be rejected to default ──────────
+
+    def test_huge_grace_rejected_to_default(self):
+        """99999999999s (~3170 years) makes elapsed >= grace permanently False.
+
+        RED at base: math.isfinite(99999999999.0) is True → returns 99999999999.0,
+        silently disabling the idle-reload fallback forever.
+        GREEN after fix: v > 3600 → returns 120.0.
+        """
+        result = self._call("99999999999")
+        self.assertEqual(
+            result,
+            120.0,
+            f"_reload_warn_grace returned {result} for '99999999999' "
+            f"— expected rejection to safe default 120.0 (large-finite gate-disable class)",
+        )
+
+    def test_above_ceiling_rejected(self):
+        """3601 is one second above the 3600 (1h) ceiling — must be rejected.
+
+        RED at base: isfinite(3601.0) True → 3601.0 returned.
+        GREEN after fix: > 3600 → 120.0.
+        """
+        result = self._call("3601")
+        self.assertEqual(
+            result,
+            120.0,
+            f"_reload_warn_grace returned {result} for '3601' "
+            f"— expected rejection to 120.0",
+        )
+
+    # ── Regression guards (must pass at base AND after fix) ──────────────────
+
+    def test_disable_semantic_preserved_negative(self):
+        """<= 0 DISABLES the grace wait (per docstring); negative still works."""
+        result = self._call("-1")
+        self.assertLessEqual(result, 0)
+
+    def test_disable_semantic_zero(self):
+        """Zero disables the grace wait."""
+        result = self._call("0")
+        self.assertLessEqual(result, 0)
+
+    def test_default_when_unset(self):
+        """Env absent → default 120.0 seconds."""
+        self.assertEqual(self._call(), 120.0)
+
+    def test_valid_value_passthrough(self):
+        """300s is well within the ceiling — returned as-is."""
+        self.assertAlmostEqual(self._call("300"), 300.0)
+
+    def test_nan_rejected(self):
+        """NaN already handled by isfinite; ensure it survives the refactor."""
+        self.assertEqual(self._call("nan"), 120.0)
+
+    def test_inf_rejected(self):
+        """Inf already handled by isfinite; ensure it survives the refactor."""
+        self.assertEqual(self._call("inf"), 120.0)
+
+    def test_ceiling_value_exact(self):
+        """3600 exactly is at the boundary — must be accepted (not rejected)."""
+        self.assertAlmostEqual(self._call("3600"), 3600.0)

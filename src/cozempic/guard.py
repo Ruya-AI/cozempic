@@ -1317,11 +1317,14 @@ def _reload_warn_grace() -> float:
     wait (reload as soon as idle)."""
     try:
         v = float(os.environ.get("COZEMPIC_RELOAD_WARN_GRACE", "120"))
-        # Reject NaN/inf: a non-finite grace makes `elapsed >= grace` always False,
-        # which permanently DISABLES this fallback (the exact gate-disable bug class
-        # as the CLI/config thresholds — IEEE-754: every NaN/inf comparison fails),
-        # silently wedging the interactive idle reload. Mirror _read_min_prune_ratio.
-        return v if math.isfinite(v) else 120.0
+        # Reject NaN/inf OR huge-finite (> 3600, 1h): both classes make
+        # `elapsed >= grace` permanently False, silently disabling the fallback.
+        # 1h is the meaningful ceiling for an interactive session grace period —
+        # same large-finite gate-disable class as COZEMPIC_RELOAD_WINDOW_S.
+        # (<=0 "disable" semantic is preserved — falls through to `return v`.)
+        if not math.isfinite(v) or v > 3600:
+            return 120.0
+        return v
     except (TypeError, ValueError):
         return 120.0
 
