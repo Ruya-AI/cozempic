@@ -63,6 +63,113 @@ class TestPersistedTokensSaved(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix 1 call-site: guard_prune_cycle deferred writer must call record_savings
+# when post==0 (honest regression guard — RED via WRONG VALUE, not ImportError)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPersistedTokensSavedCallSite(unittest.TestCase):
+    """Integration: guard_prune_cycle's deferred writer must invoke record_savings
+    with the pre-prune total when a maximal prune leaves post==0 tokens.
+
+    RED at base (wrong value, not ImportError):
+      The old inline `tokens_saved = pre - post if pre and post else 0` yields 0
+      when post==0.  `_record_persisted_savings` early-returns at
+      `if tokens_saved <= 0: return`, so `record_savings` is NEVER called.
+      → assert_called_once() fails (AssertionError: Expected call not found).
+
+    GREEN after fix:
+      `tokens_saved = _persisted_tokens_saved(100_000, 0)` = 100_000 > 0,
+      so `_record_persisted_savings` calls `record_savings(100_000, ...)`.
+      → assert_called_once() passes.
+
+    Harness: mirrors TestGuardCycleGate in test_guard_safe_point.py.
+    Uses auto_reload=False so the result carries `_deferred_writer` for direct
+    invocation — no need to wire _terminate_and_resume.
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="cozempic_m1_"))
+        self.scratch = Path(tempfile.mkdtemp(prefix="cozempic_m1_scr_"))
+        # Minimal session file — content doesn't matter, size does
+        self.session_path = self.tmpdir / "session.jsonl"
+        line = '{"type":"user","message":{"content":"' + "x" * 100 + '"}}\n'
+        self.session_path.write_text(line * 1000)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.scratch, ignore_errors=True)
+
+    def test_deferred_writer_calls_record_savings_on_maximal_prune(self):
+        """Maximal prune (pre=100_000, post=0): deferred writer must call record_savings.
+
+        RED at base: record_savings NOT called (tokens_saved=0 due to `and post`).
+        GREEN after fix: record_savings called once with total_tokens=100_000.
+        """
+        from cozempic.guard import guard_prune_cycle
+        from cozempic.team import TeamState
+
+        pruned_msgs = [(0, {"type": "user"}, 0)]  # post-prune: 0 tokens
+        snap_mock = MagicMock()
+        # pre=100_000, post=0 — maximal prune; the BUG drops savings to 0
+        totals = iter([100_000, 0])
+
+        def _est(*a, **k):
+            try:
+                return MagicMock(total=next(totals))
+            except StopIteration:
+                return MagicMock(total=0)
+
+        with (
+            patch("cozempic.guard._guard_tmp_root", return_value=self.scratch),
+            patch("cozempic.guard.load_messages_and_snapshot",
+                  return_value=([(0, {"type": "user"}, 100_000)], snap_mock)),
+            patch("cozempic.guard.load_messages",
+                  return_value=[(0, {"type": "user"}, 100_000)]),
+            patch("cozempic.guard.prune_with_team_protect",
+                  return_value=(pruned_msgs, {}, TeamState())),
+            patch("cozempic.guard.snapshot_session", return_value=snap_mock),
+            patch("cozempic.tokens.estimate_session_tokens", side_effect=_est),
+            patch("cozempic.tokens.calibrate_ratio", return_value=0.5),
+        ):
+            result = guard_prune_cycle(
+                session_path=self.session_path,
+                rx_name="aggressive",
+                config=None,
+                auto_reload=False,  # gives us _deferred_writer directly
+                session_id="test123456789",
+            )
+
+        deferred_writer = result.get("_deferred_writer")
+        self.assertIsNotNone(deferred_writer,
+                             "guard_prune_cycle must return _deferred_writer "
+                             "when auto_reload=False")
+
+        # Now invoke the deferred writer — patch the I/O it touches:
+        #   _PruneLock (imported from .session in guard.py)
+        #   save_messages (imported directly in guard.py)
+        #   record_savings (lazy-imported inside _record_persisted_savings from .helpers)
+        mock_record = MagicMock()
+        lock_cm = MagicMock()
+        lock_cm.__enter__ = MagicMock(return_value=None)
+        lock_cm.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("cozempic.guard._PruneLock", return_value=lock_cm),
+            patch("cozempic.guard.save_messages", return_value=None),
+            patch("cozempic.guard.cleanup_old_backups"),
+            patch("cozempic.helpers.record_savings", mock_record),
+        ):
+            deferred_writer()
+
+        # RED at base: mock_record NOT called (tokens_saved computed as 0)
+        # GREEN after fix: mock_record called once with total_tokens=100_000
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        self.assertEqual(kwargs.get("total_tokens"), 100_000,
+                         "record_savings must be called with total_tokens == pre-prune total")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Fix 2: extract_team_state survives non-str `text` fields
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -344,8 +451,10 @@ class TestOverflowSafePointFailClosed(unittest.TestCase):
                 patch("cozempic.guard.safe_to_reload",
                       return_value=(True, "")),
                 patch("cozempic.guard._terminate_and_resume", mock_terminate),
-                patch("cozempic.session.find_claude_pid", return_value=None),
-                # _ReloadLock imported lazily from .reload_lock inside _do_recover
+                # _ReloadLock imported lazily from .reload_lock inside _do_recover.
+                # find_claude_pid NOT patched: _make_recovery sets claude_pid=9999,
+                # so _do_recover uses self.claude_pid directly and never falls back
+                # to find_claude_pid. Patching it would be a dead/misleading patch.
                 patch("cozempic.reload_lock._ReloadLock") as mock_lock,
             ):
                 mock_lock.return_value.__enter__ = MagicMock(return_value=None)

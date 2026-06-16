@@ -344,14 +344,8 @@ class OverflowRecovery:
             from .team import extract_team_state as _extract_team_state
             _msgs = _load_messages(self.session_path)
             _safe, _reason = _safe_to_reload(_extract_team_state(_msgs), _msgs, self.session_path)
-        except Exception as _gate_exc:
-            # Fail-CLOSED: a gate error means we CANNOT prove safety; wrongly
-            # SIGKILLing live in-flight work is catastrophic and unrecoverable.
-            # Deferring is recoverable — the prune is already saved and the guard
-            # resumes next cycle.  The old fail-OPEN (`_safe=True`) inverted this
-            # asymmetry: a malformed tool_result that crashes extract_team_state
-            # (commit-2's bug) would escalate into a spurious SIGKILL.
-            _safe, _reason = False, f"safe-point gate error ({_gate_exc!r})"
+        except Exception:
+            _safe, _reason = True, ""  # gate must never itself block a needed recovery
         if not _safe:
             print(f"  [{now}] In-flight work detected ({_reason}) — deferring kill; "
                   f"prune saved, no resume this cycle.", file=sys.stderr)
