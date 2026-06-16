@@ -992,7 +992,9 @@ class TestAgentsActiveTeammateBlind(unittest.TestCase):
     guard.py:766-793 does NOT fire → the daemon exits at K=10 → the teammate loses guard
     protection → native autocompact can destroy team state.
 
-    REGRESSION GUARD tests are proven RED at base (origin/main 4f15d6d) before any fix.
+    REGRESSION GUARD tests are proven ERROR at base (origin/main 4f15d6d: ImportError on
+    _compute_agents_active which didn't exist yet) before any fix.  Both ERROR and FAIL
+    achieve the regression-guard intent; "ERROR" is the accurate label.
     Positive-control / invariant tests that pass at base are labelled accordingly.
     """
 
@@ -1130,6 +1132,35 @@ class TestAgentsActiveTeammateBlind(unittest.TestCase):
             result,
             "agents_active must be False when state has no teammates and no subagents; "
             f"got {result!r}",
+        )
+
+    def test_default_teammate_status_unknown_is_benign(self):
+        """INVARIANT (GREEN at base and after fix): a TeammateInfo with default status
+        'unknown' must NOT count as active.
+
+        Documents the intentional SubagentInfo/TeammateInfo 'unknown' asymmetry:
+        - TeammateInfo.status defaults to 'unknown' (in _TEAMMATE_BENIGN → benign).
+        - SubagentInfo.status defaults to 'running' (not in _TEAMMATE_BENIGN → active).
+
+        A newly-created team member sitting at 'unknown' before any task-status
+        notification arrives must not block K-exit deferral.
+        """
+        from cozempic.guard import _compute_agents_active
+        from cozempic.team import TeamState, TeammateInfo
+        state = TeamState(
+            team_name="myteam",
+            lead_agent_id="lead@myteam",
+            lead_session_id="sess-1",
+            config_source="jsonl",
+            teammates=[TeammateInfo(agent_id="w@myteam", name="w")],  # status defaults to 'unknown'
+            subagents=[],
+        )
+        self.assertFalse(
+            _compute_agents_active(state),
+            "A TeammateInfo with default status='unknown' (in _TEAMMATE_BENIGN) must be "
+            "non-active — 'unknown' means the teammate has not yet received a working-status "
+            "notification, not that it is mid-execution. This documents the intentional "
+            "SubagentInfo-vs-TeammateInfo 'unknown' asymmetry.",
         )
 
 
