@@ -91,8 +91,14 @@ class TestRedosBoundedRangePolyMiss(unittest.TestCase):
                   r"(.{1,500})(.{1,500})(.{1,500})c", r"(a*)(a*)(a*)c",
                   r".{1,500}x?.{1,500}x?.{1,500}c", r".*x?.*y?.*z?.*c",
                   r"\w*\W?\w*\W?\w*Q", r".{1,50}.{1,50}",
-                  r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b"]:
+                  r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b",
+                  # R11: a flat optional-quantifier chain backtracks 2^N — `?` MUST be
+                  # counted as a branch quantifier or the count rule under-rejects it.
+                  ("a?" * 30) + ("a" * 30), ("x?" * 12) + ("x" * 12), r"a?a?a?aaa"]:
             self.assertTrue(risky(p), f"freeze vector MUST be flagged (count rule): {p}")
+        # A SINGLE optional `?` is linear and must stay allowed (https?, colou?r).
+        for p in [r"https?", r"colou?r", r"(www\.)?x", r"a?", r".*?", r"a+?", r"(?:abc)"]:
+            self.assertFalse(risky(p), f"single/lazy/marker `?` wrongly flagged: {p}")
         # Single-quantifier / fixed-brace patterns stay allowed (no over-block of the
         # common safe shapes). NOTE: literal-separated multi-range patterns
         # (\d{1,3}\.\d{1,3}) ARE conservatively flagged by the count rule — that is the

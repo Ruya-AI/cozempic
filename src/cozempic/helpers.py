@@ -514,28 +514,46 @@ def _count_variable_quantifiers(pattern: str) -> int:
     the match under a real hard timeout (a killable subprocess), not a shape heuristic."""
     count = 0
     i, n, in_class = 0, len(pattern), False
+    prev = ""  # previous structural char, to classify a bare '?'
     while i < n:
         c = pattern[i]
         if c == "\\":
             i += 2
+            prev = "x"  # an escaped atom
             continue
         if in_class:
             if c == "]":
                 in_class = False
+                prev = "]"
             i += 1
             continue
         if c == "[":
             in_class = True
             i += 1
+            prev = "["
             continue
         if c in "*+":
             count += 1
             i += 1
+            prev = c
+            continue
+        if c == "?":
+            # A '?' is a BRANCH-introducing quantifier (count it) EXCEPT when it is a
+            # group-type marker `(?...` or a lazy/possessive modifier on a preceding
+            # quantifier (`*?`, `+?`, `??`, `}?`). R11: a flat chain of optional atoms
+            # `a?a?...aaa` backtracks EXPONENTIALLY in the number of `?`, so excluding
+            # `?` made the count rule UNDER-reject (freeze). Counting it restores the
+            # true necessary condition: >=2 branch quantifiers of ANY kind => risky.
+            if prev not in ("(", "*", "+", "?", "}"):
+                count += 1
+            i += 1
+            prev = "?"
             continue
         if c == "{":
             j = pattern.find("}", i)
             if j == -1:
                 i += 1
+                prev = "{"
                 continue
             sp = pattern[i + 1:j]
             if "," in sp:
@@ -544,8 +562,10 @@ def _count_variable_quantifiers(pattern: str) -> int:
                 if hi == "" or hi != lo.strip():
                     count += 1
             i = j + 1
+            prev = "}"
             continue
         i += 1
+        prev = c
     return count
 
 
