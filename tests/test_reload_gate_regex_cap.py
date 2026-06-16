@@ -87,34 +87,101 @@ class TestDetectInFlightReDoSCap(unittest.TestCase):
         )
 
     def test_detect_in_flight_real_notification_still_clears(self):
-        """Correctness guard (GREEN at base and after fix): a real notification within
-        the 64KB cap must still clear the corresponding agent launch.
+        """Correctness guard: a real notification within the 64KB cap clears the launch.
 
-        This verifies the cap does NOT break the happy path — a normal
-        <task-notification>completed</task-notification> is processed correctly.
+        Proves the cap does NOT break the happy path AND that the test is a real guard:
+        - tool_result spawn-ack populates launched_agent (without it agent is never
+          registered, making the assertFalse trivially vacuous).
+        - _REAL_NOTIF (within cap) → agent cleared → assertFalse passes.
+        - With cap=1 the notification is truncated before the regex can match →
+          agent stays in-flight → assertFalse FAILS — proving the cap matters.
+
+        RED-at-base (cap=1 patch): assertFalse(result.get("agent")) raises
+        AssertionError because agent-xyz is registered but NOT cleared.
         """
+        import cozempic.guard as _guard
         from cozempic.guard import detect_in_flight
-        # Message sequence: Agent tool_use launch, then task-notification complete.
+
+        # Full message sequence:
+        #   1. Agent tool_use (adds tu-1 to use_ids)
+        #   2. tool_result spawn-ack (populates launched_agent = {"agent-xyz"})
+        #   3. user message with task-notification (adds "agent-xyz" to completed)
+        # Without step 2 the test is vacuous: launched_agent stays empty → agent
+        # is never registered → assertFalse passes for the wrong reason.
         msgs = [
             {
                 "type": "assistant",
                 "message": {
+                    "role": "assistant",
                     "content": [
                         {"type": "tool_use", "id": "tu-1", "name": "Agent",
                          "input": {"name": "finder-p1"}}
                     ],
-                    "role": "assistant",
                 }
             },
-            # Harness delivers the task-notification as a user message content string
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu-1",
+                         "content": "Async agent launched successfully. agentId: agent-xyz"}
+                    ],
+                }
+            },
+            # Harness delivers the task-notification as a user message content string.
             {"type": "user", "content": _REAL_NOTIF},
         ]
         result = detect_in_flight(msgs)
-        # The notification cleared the Agent launch — agent must NOT be in-flight.
         self.assertFalse(
             result.get("agent"),
             "detect_in_flight must clear the Agent launch when a completed "
             "task-notification is present within the 64KB cap; "
+            f"got result={result}"
+        )
+
+    def test_detect_in_flight_notification_beyond_cap_stays_inflight(self):
+        """Cap-truncation guard: a notification beyond cap=1 is missed → agent in-flight.
+
+        Patches _RELOAD_GATE_SCAN_CAP=1 so the user message content is sliced to
+        1 character before the block-regex runs.  The <task-notification>…</task-notification>
+        block is never found → agent-xyz stays in launched_agent − completed → agent is
+        truthy.  This is the RED behaviour that proves the test above is a real guard
+        (not vacuous): with a real cap the notification clears the agent; without it
+        the agent stays stranded.
+        """
+        import cozempic.guard as _guard
+        from cozempic.guard import detect_in_flight
+
+        msgs = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu-2", "name": "Agent",
+                         "input": {"name": "finder-p1"}}
+                    ],
+                }
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu-2",
+                         "content": "Async agent launched successfully. agentId: agent-xyz"}
+                    ],
+                }
+            },
+            {"type": "user", "content": _REAL_NOTIF},
+        ]
+        with patch.object(_guard, "_RELOAD_GATE_SCAN_CAP", 1):
+            result = detect_in_flight(msgs)
+        self.assertTrue(
+            result.get("agent"),
+            "With cap=1 the notification is truncated before matching; "
+            "agent-xyz must stay in-flight (launched but not cleared). "
             f"got result={result}"
         )
 
@@ -194,12 +261,17 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
             "Without the cap, 10,000 openers trigger O(openers × len) backtracking."
         )
 
-    def test_extract_team_state_real_notification_still_clears(self):
-        """Correctness guard (GREEN at base and after fix): a real task-notification
-        within the 64KB cap must still transition the subagent to completed.
+    def test_extract_team_state_notification_creates_new_subagent(self):
+        """Else-branch guard: a task-notification for an UNKNOWN agent creates a new
+        SubagentInfo entry (the 'else' at team.py line 886).
 
-        Verifies the cap does not break the happy path — a normal notification is
-        parsed and clears the subagent's running status.
+        Agent tool spawns go to seen_teammates, NOT seen_subagents.  So when the
+        task-notification arrives, task_id is NOT in seen_subagents → else-branch fires
+        → a new SubagentInfo is implicitly created with the notified status.
+
+        The cap guard works here via assertIsNotNone(finder): if cap=1 truncates the
+        notification, the else-branch never fires → finder is None → test fails.  This
+        proves the test is not vacuous: the cap matters for else-branch creation too.
         """
         notif_text = (
             "<task-notification>"
@@ -212,11 +284,87 @@ class TestExtractTeamStateReDoSCap(unittest.TestCase):
         state = self._extract(msgs)
         subagents = state.subagents if state else []
         finder = next((s for s in subagents if "finder" in s.agent_id), None)
-        self.assertIsNotNone(finder, "finder subagent must be registered after spawn")
+        self.assertIsNotNone(finder, "finder subagent must be created by the notification (else-branch)")
         self.assertEqual(
             finder.status, "completed",
-            f"task-notification must clear the subagent to 'completed'; "
+            f"task-notification must set the new subagent status to 'completed'; "
             f"got status={finder.status!r}"
+        )
+
+    def test_extract_team_state_notification_transitions_existing_subagent(self):
+        """If-branch guard: a task-notification for a KNOWN running subagent transitions
+        it to completed (the 'if task_id in seen_subagents:' branch at team.py line 880).
+
+        Uses a Task tool spawn (not Agent) to pre-register 'finder@myteam' directly
+        in seen_subagents.  Without the cap the notification arrives and transitions
+        the pre-registered running subagent to completed.  With cap=1 the notification
+        is truncated → the if-branch never fires → subagent stays 'running' → test fails.
+
+        This test proves the cap matters for the if-branch (existing-entry update).
+        RED-at-base (cap=1): assertEqual(finder.status, 'completed') FAILS because the
+        notification is truncated and the subagent stays 'running'.
+        """
+        import cozempic.team as _team
+
+        notif_text = (
+            "<task-notification>"
+            "<task-id>finder@myteam</task-id>"
+            "<status>completed</status>"
+            "<result>all done</result>"
+            "</task-notification>"
+        )
+        # Use tool_use_id="finder@myteam" so that seen_subagents["finder@myteam"]
+        # is keyed by the same id the task-notification carries — this puts the
+        # pre-registered entry on the IF branch path (task_id in seen_subagents).
+        msgs = [
+            _tu(0, "finder@myteam", "Task", {"description": "find bugs"}),
+            _uc(1, notif_text),
+        ]
+        state = self._extract(msgs)
+        subagents = state.subagents if state else []
+        finder = next((s for s in subagents if "finder" in s.agent_id), None)
+        self.assertIsNotNone(finder, "Task spawn must pre-register finder@myteam in subagents")
+        self.assertEqual(
+            finder.status, "completed",
+            f"task-notification must transition the pre-registered running subagent "
+            f"to 'completed' (if-branch); got status={finder.status!r}"
+        )
+
+    def test_extract_team_state_notification_beyond_cap_stays_running(self):
+        """Cap-truncation guard: a notification beyond cap=1 is missed → existing
+        subagent stays 'running' (if-branch is never reached).
+
+        Patches _RELOAD_GATE_SCAN_CAP=1 so content[:1] = '<' which doesn't match
+        the block-regex → no notification processed → seen_subagents['finder@myteam']
+        keeps status='running'.  This is the RED behaviour that proves the
+        if-branch test above is a real guard: without truncation the subagent IS
+        transitioned; with truncation it stays stranded.
+
+        Fail-safe: missed notification → over-defers reload (recoverable), never
+        under-blocks (SIGKILL).
+        """
+        import cozempic.team as _team
+
+        notif_text = (
+            "<task-notification>"
+            "<task-id>finder@myteam</task-id>"
+            "<status>completed</status>"
+            "<result>all done</result>"
+            "</task-notification>"
+        )
+        msgs = [
+            _tu(0, "finder@myteam", "Task", {"description": "find bugs"}),
+            _uc(1, notif_text),
+        ]
+        with patch.object(_team, "_RELOAD_GATE_SCAN_CAP", 1):
+            state = self._extract(msgs)
+        subagents = state.subagents if state else []
+        finder = next((s for s in subagents if "finder" in s.agent_id), None)
+        self.assertIsNotNone(finder, "Task spawn must register finder@myteam")
+        self.assertEqual(
+            finder.status, "running",
+            f"With cap=1 the notification is truncated; finder@myteam must stay "
+            f"'running' (if-branch never fires); got status={finder.status!r}"
         )
 
 
