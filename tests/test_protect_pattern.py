@@ -155,9 +155,12 @@ class TestHardening1828(unittest.TestCase):
         # R4: benign SINGLE-quantifier groups must NOT be flagged — the prior
         # detector rejected these, silently dropping --protect-pattern so the
         # user's protected content got pruned (data loss).
+        # R5 P3: a FIXED-count inner brace ((\d{4})+, (\w{8})+) is unambiguous and
+        # linear — must NOT be flagged (was an over-rejection that dropped the
+        # user's bounded protect-pattern on the no-SIGALRM path).
         for p in [r"GATE CONTRACT R\d+", r"foo|bar|baz", r"R\d{1,5}", r"\bword\b",
                   r"[A-Za-z0-9_]+", r"(KEEP)+", r"(TODO|FIXME)+", r"(DO-NOT-PRUNE)+",
-                  r"(important){1,3}", r".*", r"(a+)"]:
+                  r"(important){1,3}", r".*", r"(a+)", r"(\d{4})+", r"(\w{8})+"]:
             self.assertFalse(risky(p), f"safe pattern wrongly flagged: {p}")
 
     def test_redos_pattern_fails_open_within_budget(self):

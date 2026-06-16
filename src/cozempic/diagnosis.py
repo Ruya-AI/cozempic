@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from .helpers import get_content_blocks, get_msg_type, text_of
+from .helpers import get_dict_blocks, get_msg_type, text_of
 from .tokens import estimate_session_tokens, extract_usage_tokens
 from .types import Message
 
@@ -44,17 +44,19 @@ def diagnose_session(messages: list[Message]) -> dict:
         if mtype == "file-history-snapshot":
             file_history_count += 1
 
-        for block in get_content_blocks(msg):
+        for block in get_dict_blocks(msg):  # read-only: dict-only iterator (R5 non-dict leak)
             btype = block.get("type", "")
             if btype == "thinking":
                 thinking_bytes += len(json.dumps(block.get("thinking", "")).encode("utf-8"))
                 sig = block.get("signature", "")
-                if sig:
-                    signature_bytes += len(sig.encode("utf-8"))
+                if isinstance(sig, str):
+                    signature_bytes += len(sig.encode("utf-8", "surrogateescape"))
             elif btype == "tool_result":
                 content = block.get("content", "")
                 if isinstance(content, str):
-                    tool_result_bytes += len(content.encode("utf-8"))
+                    # surrogateescape: a content string may carry a surrogate from a
+                    # non-UTF-8 byte (R5) — strict encode would raise here.
+                    tool_result_bytes += len(content.encode("utf-8", "surrogateescape"))
                 elif isinstance(content, list):
                     tool_result_bytes += len(json.dumps(content).encode("utf-8"))
 

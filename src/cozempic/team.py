@@ -503,15 +503,18 @@ def _is_team_message(msg_dict: dict, pending_task_ids: set[str] | None = None) -
 
             block_type = block.get("type", "")
 
-            # Tool use with team-related name — definitive signal
-            if block_type == "tool_use" and block.get("name") in TEAM_TOOL_NAMES:
+            # Tool use with team-related name — definitive signal.
+            # isinstance(str) guards the `in <set>` membership: an unhashable
+            # list/dict name (poisoned JSONL) would raise TypeError here (R5 finding).
+            name = block.get("name")
+            if block_type == "tool_use" and isinstance(name, str) and name in TEAM_TOOL_NAMES:
                 return True
 
             # Tool result — match by tool_use_id if we know the pending Task IDs;
             # fall back to nothing (don't use TEAM_KEYWORDS — too broad).
             if block_type == "tool_result" and pending_task_ids:
                 tool_use_id = block.get("tool_use_id", "")
-                if tool_use_id in pending_task_ids:
+                if isinstance(tool_use_id, str) and tool_use_id in pending_task_ids:
                     return True
 
     elif isinstance(content, str):
@@ -589,9 +592,14 @@ def extract_team_state(messages: list[Message]) -> TeamState:
         for block in (content if isinstance(content, list) else []):
             if not isinstance(block, dict):  # a content array can hold a bare string/number
                 continue
-            if block.get("type") == "tool_use" and block.get("name") in _TEAM_EXTRACT_TOOL_NAMES:
+            # isinstance(str) guards both the set membership AND the set .add:
+            # an unhashable list/dict name or id (poisoned JSONL) would raise
+            # TypeError in this pre-pass, which runs OUTSIDE the main loop's R4
+            # coercion and crashed extract_team_state -> guard respawn storm (R5).
+            name = block.get("name")
+            if block.get("type") == "tool_use" and isinstance(name, str) and name in _TEAM_EXTRACT_TOOL_NAMES:
                 uid = block.get("id", "")
-                if uid:
+                if isinstance(uid, str) and uid:
                     pending_task_ids.add(uid)
 
     def _is_extract_message(m: dict) -> bool:
@@ -611,10 +619,12 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 if not isinstance(blk, dict):
                     continue
                 bt = blk.get("type", "")
-                if bt == "tool_use" and blk.get("name") in _TEAM_EXTRACT_TOOL_NAMES:
+                name = blk.get("name")
+                if bt == "tool_use" and isinstance(name, str) and name in _TEAM_EXTRACT_TOOL_NAMES:
                     return True
                 if bt == "tool_result" and pending_task_ids:
-                    if blk.get("tool_use_id", "") in pending_task_ids:
+                    tid = blk.get("tool_use_id", "")
+                    if isinstance(tid, str) and tid in pending_task_ids:
                         return True
         elif isinstance(c, str):
             return "<task-notification>" in c

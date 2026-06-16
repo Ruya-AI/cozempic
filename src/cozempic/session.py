@@ -251,7 +251,12 @@ def find_sessions(project_filter: str | None = None) -> list[dict]:
             mtime = datetime.fromtimestamp(f.stat().st_mtime)
             session_id = f.stem
             line_count = 0
-            with open(f, "r", encoding="utf-8") as fh:
+            # errors="surrogateescape": this only COUNTS lines, but a single stray
+            # non-UTF-8 byte in ANY session file must not crash enumeration for ALL
+            # sessions (R5 completeness finding). load_messages now tolerates such
+            # bytes; the enumerator every CLI command + the guard hot path hits first
+            # must too.
+            with open(f, "r", encoding="utf-8", errors="surrogateescape") as fh:
                 for _ in fh:
                     line_count += 1
             sessions.append({
@@ -414,7 +419,10 @@ def find_current_session(
                     "session_id": p.stem,
                     "size": st.st_size,
                     "mtime": datetime.fromtimestamp(st.st_mtime),
-                    "lines": sum(1 for _ in open(p, "r", encoding="utf-8")),
+                    # surrogateescape (R5): a stray byte must not crash resolution of
+                    # the live session (UnicodeDecodeError is a ValueError, NOT caught
+                    # by `except OSError` below) — matches _match_session_by_text.
+                    "lines": sum(1 for _ in open(p, "r", encoding="utf-8", errors="surrogateescape")),
                 }
             except OSError:
                 pass
@@ -1035,7 +1043,14 @@ def save_messages(
                 if msg.get("_parse_error") is True and isinstance(msg.get("_raw"), str):
                     f.write(msg["_raw"] + "\n")
                 else:
-                    f.write(json.dumps(msg, separators=(",", ":")) + "\n")
+                    # ensure_ascii=False is REQUIRED for the surrogateescape round-trip
+                    # (R5 P0 fix): a non-UTF-8 byte INSIDE a string value decodes to a
+                    # surrogate; ensure_ascii=True would escape it to the LITERAL 6-char
+                    # text "\udcXX" (silent corruption — the byte is gone, the line grows).
+                    # ensure_ascii=False emits the raw surrogate char, which the
+                    # surrogateescape file handler re-encodes to the EXACT original byte.
+                    # It also matches CC's own JSON.stringify (raw UTF-8, not \u escapes).
+                    f.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
 

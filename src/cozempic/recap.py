@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .helpers import atomic_write_text, get_content_blocks, get_msg_type, text_of
+from .helpers import atomic_write_text, get_dict_blocks, get_msg_type, text_of
 from .types import Message
 
 # Common words that don't make good theme labels
@@ -32,9 +32,8 @@ _STOP_WORDS = frozenset(
 
 def _extract_text(msg: dict) -> str:
     """Extract readable text from a message, stripping system tags and noise."""
-    blocks = get_content_blocks(msg)
     parts = []
-    for block in blocks:
+    for block in get_dict_blocks(msg):  # read-only: dict-only iterator (R5 non-dict leak)
         if block.get("type") == "text":
             parts.append(text_of(block))
     return " ".join(parts)

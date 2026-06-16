@@ -223,15 +223,19 @@ class TestSnapshotAndAppend:
         # sees a non-dict; preserved verbatim on save).
         assert messages[2][1].get("_parse_error") is True
 
-        # Save and reload: content of the in-string line is preserved logically,
-        # and the structural line's exact bytes survive.
+        # Save and reload: BOTH the structural _raw line AND the in-string byte must
+        # survive BYTE-FOR-BYTE (R5 P0: the in-string case must NOT be rewritten to a
+        # literal \udcXX escape — that requires ensure_ascii=False on save). Asserting
+        # only surrogate-codepoint equality here gave false confidence and masked the
+        # P0 corruption; assert the raw bytes are present on disk.
         save_messages(jsonl, messages, create_backup=False, snapshot=snap)
         after = jsonl.read_bytes()
         assert b'\xfe' in after, "structural bad byte must survive byte-for-byte via _raw"
+        assert b'raw \xff byte' in after, "in-string bad byte must survive byte-for-byte (no \\udcXX escape)"
+        assert b'\\udcff' not in after, "in-string byte must NOT be corrupted to a literal escape"
         reloaded = load_messages(jsonl)
         assert len(reloaded) == 3
         assert reloaded[0][1]["message"]["content"] == "keep"
-        # in-string byte decodes back to the same surrogate it loaded as.
         assert reloaded[1][1]["message"]["content"].encode("utf-8", "surrogateescape") == b"raw \xff byte"
 
     def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):

@@ -271,6 +271,18 @@ def get_content_blocks(msg: dict) -> list[dict]:
     return []
 
 
+def get_dict_blocks(msg: dict) -> list[dict]:
+    """Like get_content_blocks but yields ONLY dict elements — for READ-ONLY
+    consumers (diagnosis, recap, token estimation) that never write the blocks
+    back, so dropping a non-dict element is safe. This is the shared guarded
+    iterator: read-only sites should use it instead of re-implementing a per-site
+    isinstance guard (the recurring sibling-miss this PR kept hitting — R5). WRITE
+    paths (strategies, executor) MUST keep get_content_blocks (verbatim) + their own
+    per-element guard, because they round-trip the list and dropping a non-dict
+    element there would be silent data loss."""
+    return [b for b in get_content_blocks(msg) if isinstance(b, dict)]
+
+
 def content_block_bytes(block: dict) -> int:
     """Calculate the serialized byte size of a content block."""
     return len(json.dumps(block, separators=(",", ":")).encode("utf-8"))
@@ -550,9 +562,13 @@ def _scan_quantified_group_bodies(pattern: str) -> list[str]:
 
 
 def _body_has_inner_quantifier(body: str) -> bool:
-    """True if BODY contains a quantifier (`*`, `+`, `?`, `{`) outside a char
-    class / escape. A quantified group whose body is itself quantified — `(a+)+`,
-    `(a?)+`, `(.*X){8}`, `(x+){10}` — is a classic exponential/polynomial ReDoS."""
+    """True if BODY contains a VARIABLE-WIDTH inner quantifier outside a char class /
+    escape. A quantified group whose body is itself variable-width — `(a+)+`, `(a?)+`,
+    `(.*X){8}`, `(x+){10}`, `(\\d{1,3}){2,}` — is a classic exponential/polynomial
+    ReDoS (the inner can match different widths, so the outer quantifier has many
+    ways to split the input). A FIXED-count inner `{n}` (e.g. `(\\d{4})+`) is NOT
+    variable-width — the partition is unique, so it is linear and must NOT be flagged
+    (R5 P3 over-rejection of bounded protect patterns)."""
     i, n, in_class = 0, len(body), False
     while i < n:
         c = body[i]
@@ -568,8 +584,19 @@ def _body_has_inner_quantifier(body: str) -> bool:
             in_class = True
             i += 1
             continue
-        if c in "*+?{":
+        if c in "*+?":
             return True
+        if c == "{":
+            j = body.find("}", i)
+            if j == -1:
+                i += 1
+                continue
+            # variable-width only if the brace spec carries a comma ({n,} / {n,m});
+            # a bare {n} is fixed-width and unambiguous.
+            if "," in body[i + 1:j]:
+                return True
+            i = j + 1
+            continue
         i += 1
     return False
 
