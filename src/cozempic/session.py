@@ -814,11 +814,24 @@ def _jsonl_line(msg: dict) -> str:
     encodable; still round-trips losslessly on reload). The scan is gated on isascii()
     so the common path pays nothing."""
     s = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
-    if not s.isascii() and any(
-        0xD800 <= ord(c) <= 0xDFFF and not (0xDC80 <= ord(c) <= 0xDCFF) for c in s
-    ):
-        return json.dumps(msg, separators=(",", ":"))  # ensure_ascii=True
-    return s
+    if s.isascii():
+        return s
+    # Escape ONLY the out-of-band lone surrogates (anything the surrogateescape file
+    # CAN'T encode), leaving in-band U+DC80..U+DCFF raw so a real non-UTF-8 byte stays
+    # BYTE-EXACT even when it shares a line with a sliced-astral \udXXX escape (R7:
+    # the whole-line ensure_ascii=True fallback drifted the real byte to literal text).
+    # A surrogate char inside a JSON string and its \uXXXX escaped form decode
+    # identically, so this rewrite is JSON-safe and round-trips losslessly.
+    out = []
+    rewrote = False
+    for c in s:
+        o = ord(c)
+        if 0xD800 <= o <= 0xDFFF and not (0xDC80 <= o <= 0xDCFF):
+            out.append("\\u%04x" % o)
+            rewrote = True
+        else:
+            out.append(c)
+    return "".join(out) if rewrote else s
 
 
 def _split_physical_lines(text: str) -> list[str]:

@@ -490,13 +490,16 @@ def _have_sigalrm() -> bool:
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
 def _count_unbounded_quantifiers(pattern: str) -> int:
-    """Count UNBOUNDED repetition operators (`*`, `+`, and open-ended `{n,}`) in
-    PATTERN, ignoring escaped operators (`\\*`) and operators inside a character
-    class `[...]` (where they are literal). This is the necessary-condition
-    heuristic for catastrophic backtracking: exponential/super-linear ReDoS
-    requires AT LEAST TWO overlapping unbounded repetitions (`.*.*`, `a+a+`,
-    `(a+)+`, `(a*)*`). A SINGLE unbounded quantifier — even on a group, e.g.
-    `(KEEP)+`, `(TODO|FIXME)+` — matches in linear time and is NOT risky."""
+    """Count VARIABLE-WIDTH repetition operators in PATTERN, ignoring escaped
+    operators (`\\*`) and operators inside a character class `[...]` (literal there).
+    Variable-width = `*`, `+`, open-ended `{n,}`, AND a bounded RANGE `{n,m}` with
+    m != n (e.g. `{1,500}`). This is the necessary-condition heuristic for
+    super-linear backtracking: it requires AT LEAST TWO overlapping variable-width
+    repetitions (`.*.*`, `a+a+`, `(a+)+`, and crucially `.{1,500}.{1,500}` — adjacent
+    BOUNDED ranges still backtrack polynomially and froze the no-budget path past the
+    512 cap, R7). A SINGLE variable quantifier — even on a group, e.g. `(KEEP)+`,
+    `R\\d{1,5}` — is linear and NOT risky. A FIXED count `{n}` / `{n,n}` is one width,
+    never variable, so it is not counted (keeps `(\\d{4})+` allowed)."""
     count = 0
     i = 0
     n = len(pattern)
@@ -525,10 +528,14 @@ def _count_unbounded_quantifiers(pattern: str) -> int:
                 i += 1
                 continue
             spec = pattern[i + 1:j]
-            # Open-ended `{n,}` (comma present, nothing after it) is unbounded;
-            # `{n}` and `{n,m}` are bounded and cannot drive catastrophic backtracking.
-            if "," in spec and spec.split(",", 1)[1].strip() == "":
-                count += 1
+            # Variable-width iff a comma is present AND the upper bound differs from
+            # the lower (open-ended `{n,}` counts; `{n,m}` with m>n counts; a fixed
+            # `{n}` or `{n,n}` does NOT — single width, linear).
+            if "," in spec:
+                lo, _, hi = spec.partition(",")
+                hi = hi.strip()
+                if hi == "" or hi != lo.strip():
+                    count += 1
             i = j + 1
             continue
         i += 1

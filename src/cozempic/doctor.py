@@ -643,7 +643,15 @@ def fix_corrupted_tool_use() -> str:
                 changed = True
 
             if changed:
-                lines[idx] = json.dumps(obj, ensure_ascii=False) + "\n"
+                # ensure_ascii=True (NOT False): a repaired line may carry a lone
+                # surrogate (a \udXXX escape CC emits for a sliced astral char) which
+                # json.loads turned into a real surrogate char. ensure_ascii=False would
+                # re-emit it raw -> atomic_write_text's strict utf-8 write raises
+                # UnicodeEncodeError, aborting the whole `doctor --fix` run (R7: the
+                # un-swept sibling of the save_messages surrogate fix). ensure_ascii=True
+                # re-escapes every surrogate to ASCII \uXXXX (always encodable; the file
+                # was strict-decoded above so no real-byte/in-band surrogate is present).
+                lines[idx] = json.dumps(obj) + "\n"
 
         try:
             if fixed_in_session > 0:
@@ -1411,10 +1419,22 @@ def run_doctor(fix: bool = False) -> list[CheckResult]:
     """Run all health checks. If fix=True, apply available fixes for issues."""
     results = []
     for name, check_fn, fix_fn in ALL_CHECKS:
-        result = check_fn()
+        # Defense in depth (R7): one poisoned session must NOT abort the whole doctor
+        # run. A check/fix that raises is reported as an error for THAT check and the
+        # remaining checks/fixes still run.
+        try:
+            result = check_fn()
+        except Exception as _check_exc:
+            results.append(CheckResult(name=name, status="error",
+                message=f"check raised an unexpected error: {_check_exc!r}"))
+            continue
         results.append(result)
         if fix and result.status in ("issue", "warning") and result.fix_description and fix_fn:
-            fix_msg = fix_fn()
+            try:
+                fix_msg = fix_fn()
+            except Exception as _fix_exc:
+                result.message += f"\n      Fix raised an unexpected error (skipped): {_fix_exc!r}"
+                continue
             # Only claim "fixed" if the issue is actually gone — re-run the check
             # and verify. A no-op fix ("nothing found", "skipped N sessions") or a
             # partial/failed fix previously reported false success (audit P1).
