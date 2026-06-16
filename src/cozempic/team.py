@@ -22,6 +22,17 @@ from pathlib import Path
 
 from .types import Message
 
+# Terminal (finished) statuses for teammate classification in build_team_recovery_receipt.
+# Duplicated from guard._STATUS_TERMINAL to avoid a circular import (guard imports team).
+# A future PR consolidating _constants.py can remove this copy.
+# ADD a comment here if guard._STATUS_TERMINAL changes so the two stay in sync.
+_TEAMMATE_QUIESCENT: frozenset[str] = frozenset({
+    "completed", "complete", "done", "failed", "cancelled",
+    "canceled", "stopped", "killed", "aborted", "error",
+    "success", "succeeded", "finished", "timeout", "timed_out",
+    "ok",
+})  # duplicated until a future PR consolidates this + guard._STATUS_TERMINAL + #132's cap into _constants.py.
+
 
 @dataclass
 class SubagentInfo:
@@ -268,7 +279,10 @@ def build_team_recovery_receipt(state: TeamState) -> dict:
     subagents = state.subagents or []
     teammates = state.teammates or []
     running_subagents = [s for s in subagents if (s.status or "").lower() == "running"]
-    active_teammates = [t for t in teammates if (t.status or "").lower() not in {"done", "completed"}]
+    active_teammates = [
+        t for t in teammates
+        if (t.status or "").strip().lower() not in _TEAMMATE_QUIESCENT
+    ]
 
     gaps: list[str] = []
     if state.is_empty():
