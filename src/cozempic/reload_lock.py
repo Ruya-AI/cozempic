@@ -104,16 +104,24 @@ def _lock_path_for(session_id: str) -> Path:
 
 
 def _is_process_alive(pid: int) -> bool:
-    """Returns True if `pid` is a live process owned by us."""
+    """Return True if ``pid`` is a live process (or owned by another user).
+
+    ``kill(pid, 0)`` returns 0 if the signal could be delivered, raises
+    ``ProcessLookupError`` if no such process exists, and
+    ``PermissionError`` if the process exists but we lack permission.
+    Conservative interpretation: PermissionError → alive (not ours, but
+    real), since a reload lock held by another user's process must not be
+    stolen. Matches spawn_lock._is_process_alive semantics exactly.
+    """
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
-        # ProcessLookupError = no such process
-        # PermissionError = process exists but owned by another user (don't
-        # touch — but treat as "not ours", which means lock is owned by a
-        # different user's process and we shouldn't disturb it)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True  # cross-user process is alive; don't steal its lock
     except OSError:
         return False
 

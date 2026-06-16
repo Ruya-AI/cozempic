@@ -311,6 +311,52 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         self.assertEqual(guard_slug, expected)
 
 
+class TestReloadLockProcessAlive(unittest.TestCase):
+    """T6 — _is_process_alive must return True on PermissionError.
+
+    A cross-user process that owns the reload lock raises PermissionError
+    on os.kill(pid, 0). The correct semantic is ALIVE (don't steal the lock),
+    matching spawn_lock._is_process_alive. At HEAD, reload_lock wrongly
+    returns False, allowing _acquire to unlink a live holder's lock.
+    """
+
+    def test_permissionerror_treats_as_alive(self):
+        """PermissionError on kill(pid,0) must return True (cross-user = alive)."""
+        from cozempic.reload_lock import _is_process_alive
+        with patch('cozempic.reload_lock.os.kill', side_effect=PermissionError):
+            result = _is_process_alive(1234)
+        self.assertTrue(result,
+            "_is_process_alive must return True for PermissionError — "
+            "cross-user process is alive and we must not steal its lock")
+
+    def test_processlookuperror_treats_as_dead(self):
+        """ProcessLookupError on kill(pid,0) must still return False (no such process)."""
+        from cozempic.reload_lock import _is_process_alive
+        with patch('cozempic.reload_lock.os.kill', side_effect=ProcessLookupError):
+            result = _is_process_alive(1234)
+        self.assertFalse(result,
+            "_is_process_alive must return False for ProcessLookupError")
+
+    def test_pid_zero_or_negative_returns_false(self):
+        """pid <= 0 is invalid — must return False without calling os.kill."""
+        from cozempic.reload_lock import _is_process_alive
+        self.assertFalse(_is_process_alive(0))
+        self.assertFalse(_is_process_alive(-1))
+        self.assertFalse(_is_process_alive(-999))
+
+    def test_parity_with_spawn_lock(self):
+        """reload_lock and spawn_lock must agree on PermissionError semantics."""
+        from cozempic.reload_lock import _is_process_alive as rl_alive
+        from cozempic.spawn_lock import _is_process_alive as sl_alive
+        with patch('cozempic.reload_lock.os.kill', side_effect=PermissionError), \
+             patch('cozempic.spawn_lock.os.kill', side_effect=PermissionError):
+            rl_result = rl_alive(1234)
+            sl_result = sl_alive(1234)
+        self.assertEqual(rl_result, sl_result,
+            f"reload_lock._is_process_alive({rl_result!r}) != "
+            f"spawn_lock._is_process_alive({sl_result!r}) on PermissionError")
+
+
 class TestReloadLockSymlinkDefense(unittest.TestCase):
     """Defense against symlink attacks via /tmp: if a malicious local user
     plants a symlink at our lock path, O_NOFOLLOW makes us fail rather
