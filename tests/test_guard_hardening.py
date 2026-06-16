@@ -2387,12 +2387,9 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
         Either way the invariant holds: with only B's session present, B's
         checkpoint must NOT be written and result must be None.
         """
-        import re as _re
         import time
         from cozempic.guard import checkpoint_team
-
-        def _correct_slug(cwd: str) -> str:
-            return _re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        from cozempic.session import cwd_to_project_slug
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2401,7 +2398,7 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             # No session file: if Strategy 3 correctly finds this dir, find_sessions
             # finds no JSONL here → sessions list is empty for this project.
             cwd_a = "/Users/x/topstep_automation"
-            slug_a = _correct_slug(cwd_a)      # -Users-x-topstep-automation
+            slug_a = cwd_to_project_slug(cwd_a)      # -Users-x-topstep-automation
             proj_a = tmp_path / slug_a
             proj_a.mkdir(parents=True)
             # No .jsonl file in proj_a — so project A has no sessions.
@@ -2409,7 +2406,7 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             time.sleep(0.02)  # ensure B is strictly newer
 
             # Project B: newer, no underscore — has a session (Strategy 4 returns this at base)
-            slug_b = _correct_slug("/Users/x/fanugugc")   # -Users-x-fanugugc
+            slug_b = cwd_to_project_slug("/Users/x/fanugugc")   # -Users-x-fanugugc
             proj_b = tmp_path / slug_b
             proj_b.mkdir(parents=True)
             sess_b_id = "bbbb2222-0000-0000-0000-200000000002"
@@ -2459,12 +2456,9 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
         assertIsNotNone FAILS.
         """
         import json
-        import re as _re
         import time
         from cozempic.guard import checkpoint_team
-
-        def _correct_slug(cwd: str) -> str:
-            return _re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        from cozempic.session import cwd_to_project_slug
 
         # Minimal JSONL that produces a non-empty TeamState.
         # A 'Task' tool_use block in an assistant message → 1 subagent detected.
@@ -2491,7 +2485,7 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
 
             # Project A: underscore cwd — correct dir name
             cwd_a = "/Users/x/topstep_automation"
-            slug_a = _correct_slug(cwd_a)        # -Users-x-topstep-automation
+            slug_a = cwd_to_project_slug(cwd_a)        # -Users-x-topstep-automation
             proj_a = tmp_path / slug_a
             proj_a.mkdir(parents=True)
             sess_a_id = "aaaa1111-0000-0000-0000-aaa000000001"
@@ -2502,7 +2496,7 @@ class TestCheckpointTeamWriteSideIsolation(unittest.TestCase):
             time.sleep(0.02)  # ensure B is strictly newer
 
             # Project B: newer, no underscore — DIFFERENT team state
-            slug_b = _correct_slug("/Users/x/fanugugc")   # -Users-x-fanugugc
+            slug_b = cwd_to_project_slug("/Users/x/fanugugc")   # -Users-x-fanugugc
             proj_b = tmp_path / slug_b
             proj_b.mkdir(parents=True)
             sess_b_id = "bbbb2222-0000-0000-0000-bbb000000002"

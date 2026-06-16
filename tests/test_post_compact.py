@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cozempic.session import get_claude_dir
+from cozempic.session import cwd_to_project_slug, get_claude_dir
 from cozempic.team import read_team_checkpoint
 from cozempic.init import COZEMPIC_HOOKS
 
@@ -57,18 +57,12 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
         for underscores). Old code computes broken slug with '_', so Strategy 4 misses project A
         and Strategy 5 returns project B's (newer) session → contamination.
         """
-        import re as _re
         tmp_path = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
 
-        # The CORRECT (fixed) slug formula — what Claude Code actually stores on disk
-        def _correct_slug(cwd: str) -> str:
-            return _re.sub(r"[^a-zA-Z0-9]", "-", cwd)
-
         # Project A: topstep_automation — dir name uses dashes (Claude's real format)
         cwd_a = "/Users/x/topstep_automation"
-        slug_a_correct = _correct_slug(cwd_a)   # "-Users-x-topstep-automation"
-        proj_a = tmp_path / "projects" / slug_a_correct
+        proj_a = tmp_path / "projects" / cwd_to_project_slug(cwd_a)   # "-Users-x-topstep-automation"
         _write_session_file(proj_a, "aaaa1111-0000-0000-0000-000000000001")
         # Write a checkpoint for project A
         (proj_a / "team-checkpoint.md").write_text("TOPSTEP", encoding="utf-8")
@@ -78,7 +72,7 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
 
         # Project B: fanugugc (no underscore → still returned by Strategy 5 when A is missed)
         cwd_b = "/Users/x/fanugugc"
-        slug_b_correct = _correct_slug(cwd_b)   # "-Users-x-fanugugc"
+        slug_b_correct = cwd_to_project_slug(cwd_b)   # "-Users-x-fanugugc"
         proj_b = tmp_path / "projects" / slug_b_correct
         _write_session_file(proj_b, "bbbb2222-0000-0000-0000-000000000002")
         # Give project B a team-checkpoint too (the one that must NOT appear)
@@ -294,38 +288,27 @@ class TestCorrectSlugUsesCwdToProjectSlug(unittest.TestCase):
     """
 
     def test_test_helper_slug_matches_canonical_on_trailing_slash(self):
-        """RED at HEAD `4b894d5`: the inline _correct_slug formula in the 3 test helpers
-        does NOT use normpath, so cwd_with_trailing_slash produces a slug with a trailing
-        dash that differs from cwd_to_project_slug's output.
+        """Guard: cwd_to_project_slug (now used by all test helpers after P0-C) must
+        normalize trailing-slash inputs and NOT produce a trailing dash.
+
+        RED at base commit `4b894d5` (before P0-C): the 3 test helpers used
+        `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` which produced "-Users-x-proj-" for a
+        trailing-slash input. After P0-C replaced them with cwd_to_project_slug, this
+        test asserts the canonical form is used (no trailing dash) everywhere.
 
         Canonical determination:
-        - re.sub(r"[^a-zA-Z0-9]", "-", "/Users/x/proj/") → "-Users-x-proj-" (inline)
+        - re.sub(r"[^a-zA-Z0-9]", "-", "/Users/x/proj/") → "-Users-x-proj-" (old, wrong)
         - cwd_to_project_slug("/Users/x/proj/")           → "-Users-x-proj"  (canonical)
-
-        This test asserts the TWO MUST BE EQUAL. It is RED at HEAD because the inline
-        helpers use the bare re.sub formula.
-
-        After P0-C replaces the 3 inline _correct_slug definitions with
-        cwd_to_project_slug imports, the test helpers naturally return the canonical
-        form and this test becomes trivially GREEN.
         """
-        import re
-        from cozempic.session import cwd_to_project_slug
-
-        cwd_with_trailing_slash = "/Users/x/proj/"
-
-        # The inline formula currently used in the 3 test helpers
-        inline_slug = re.sub(r"[^a-zA-Z0-9]", "-", cwd_with_trailing_slash)
-
-        canonical_slug = cwd_to_project_slug(cwd_with_trailing_slash)
-
-        # RED assertion: fails until the test helpers use cwd_to_project_slug.
+        slug = cwd_to_project_slug("/Users/x/proj/")
         self.assertEqual(
-            inline_slug, canonical_slug,
-            f"Test helper inline slug formula diverges from cwd_to_project_slug for "
-            f"trailing-slash input '{cwd_with_trailing_slash}': "
-            f"inline={inline_slug!r}, canonical={canonical_slug!r}. "
-            "Replace the 3 inline _correct_slug definitions with cwd_to_project_slug imports."
+            slug, "-Users-x-proj",
+            f"cwd_to_project_slug must strip trailing slash via normpath. Got {slug!r}."
+        )
+        self.assertFalse(
+            slug.endswith("-"),
+            f"cwd_to_project_slug must not produce a trailing '-' for trailing-slash inputs. "
+            f"Got {slug!r}."
         )
 
 
