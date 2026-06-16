@@ -2405,15 +2405,16 @@ _AGENT_LAUNCH_RE = re.compile(r"Async agent launched successfully\.?\s*agentId:\
 _WF_LAUNCH_RE = re.compile(r"[Ww]orkflow launched in (?:the )?background[.,]?\s*(?:Task|Run) ID:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
 _BG_LAUNCH_RE = re.compile(r"running in (?:the )?background(?: with| \()?\s*ID[:=]?\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
 _TN_BLOCK_RE = re.compile(r"<task-notification(?:\s[^>]*)?>(.*?)</task-notification>", re.DOTALL | re.IGNORECASE)
-# Maximum bytes of text fed into the block-regex scanners in detect_in_flight and
-# extract_team_state.  Both regexes use DOTALL lazy-star (.*?) which is
+# Maximum characters of text fed into the block-regex scanners in detect_in_flight
+# and extract_team_state.  Both regexes use DOTALL lazy-star (.*?) which is
 # O(openers × len) when there are many openers without closers — catastrophic
 # backtracking that can freeze the 30-second checkpoint/reload-gate loop.
-# 64KB is ~64× the size of a real task-notification; a notification beyond this
-# cap is MISSED → the launch stays "in-flight" → the gate OVER-DEFERS the reload
+# 64K chars ≈ 64× a real task-notification; a notification beyond this cap is
+# MISSED → the launch stays "in-flight" → the gate OVER-DEFERS the reload
 # (recoverable). It never UNDER-BLOCKS, which would SIGKILL.  Mirrors recap.py's
 # own DoS guard (text[:32768] and text[:8000]) introduced for system-reminder tags.
-_RELOAD_GATE_SCAN_CAP = 65536
+# Single source of truth in _constants; team.py imports the same object.
+from ._constants import _RELOAD_GATE_SCAN_CAP  # noqa: E402 — after regex block
 _TN_ID_RE = re.compile(r"<task-id>([^<]+)</task-id>", re.IGNORECASE)
 _TN_STATUS_RE = re.compile(r"<status>([^<]+)</status>", re.IGNORECASE)
 # Terminal completion vocabulary — broadened so a harness phrasing skew (success/

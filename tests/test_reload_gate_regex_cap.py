@@ -354,5 +354,48 @@ class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
         )
 
 
+class TestScanCapSharedConstant(unittest.TestCase):
+    """_RELOAD_GATE_SCAN_CAP must come from _constants so guard and team share one object.
+
+    RED at base (22feb3b): _constants.py does not exist → ImportError on
+    `from cozempic import _constants`.  All three tests are RED.
+
+    GREEN after P0-A: both guard.py and team.py import from _constants → assertIs
+    identity checks pass (same int object via module attribute, not interning).
+    """
+
+    def test_guard_cap_imported_from_constants(self):
+        """guard._RELOAD_GATE_SCAN_CAP must be the same object as _constants._RELOAD_GATE_SCAN_CAP."""
+        from cozempic import guard
+        from cozempic import _constants
+        self.assertIs(
+            guard._RELOAD_GATE_SCAN_CAP,
+            _constants._RELOAD_GATE_SCAN_CAP,
+            "guard._RELOAD_GATE_SCAN_CAP must be imported from _constants, not defined "
+            "locally — a future change to _constants must update both scan sites atomically.",
+        )
+
+    def test_team_cap_imported_from_constants(self):
+        """team._RELOAD_GATE_SCAN_CAP must be the same object as _constants._RELOAD_GATE_SCAN_CAP."""
+        from cozempic import team
+        from cozempic import _constants
+        self.assertIs(
+            team._RELOAD_GATE_SCAN_CAP,
+            _constants._RELOAD_GATE_SCAN_CAP,
+            "team._RELOAD_GATE_SCAN_CAP must be imported from _constants.",
+        )
+
+    def test_guard_and_team_caps_are_same_object(self):
+        """guard and team must reference the exact same constant object."""
+        from cozempic import guard, team
+        self.assertIs(
+            guard._RELOAD_GATE_SCAN_CAP,
+            team._RELOAD_GATE_SCAN_CAP,
+            "guard and team must use the SAME _RELOAD_GATE_SCAN_CAP object — "
+            "if they diverge, detect_in_flight and extract_team_state scan "
+            "different character windows for the same content.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

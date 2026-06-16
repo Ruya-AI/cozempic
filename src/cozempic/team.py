@@ -359,13 +359,10 @@ _TEAM_EXTRACT_TOOL_NAMES = TEAM_TOOL_NAMES | {"Agent"}
 # <output-file> tags BETWEEN <task-id> and <status> (ground-truthed 2026-06-09), which
 # a strict task-id→status regex misses → a COMPLETED background-Agent teammate is left
 # "running" forever → safe_to_reload wedges the guard inert. Mirrors detect_in_flight's
-# lenient _TN_*_RE so the two parsers agree on the same bytes.
-# Maximum bytes of content fed into the DOTALL lazy-star block-regex scanner in
-# extract_team_state's second pass.  Without a cap, many unmatched openers trigger
-# O(openers × len) catastrophic backtracking — same class as recap.py's DoS guard.
-# 64KB is ~64× a real notification; a missed notification → over-defers reload
-# (recoverable, not under-blocks / SIGKILL).  Mirrors guard._RELOAD_GATE_SCAN_CAP.
-_RELOAD_GATE_SCAN_CAP = 65536
+# lenient _TN_*_RE so the two parsers agree on the same characters.
+# Cap for DOTALL block-regex scans — single source of truth in _constants.
+# Guard.py imports the same object; tune both scan sites by changing _constants only.
+from ._constants import _RELOAD_GATE_SCAN_CAP
 
 _TASK_NOTIF_BLOCK_RE = re.compile(
     r"<task-notification(?:\s[^>]*)?>(.*?)</task-notification>", re.DOTALL | re.IGNORECASE)
