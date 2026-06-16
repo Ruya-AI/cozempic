@@ -771,8 +771,8 @@ def start_guard(
                     # Defer: stay alive, keep cycling at backoff cap.
                     if not deferred_exit_announced:
                         running_subagents = sum(
-                            1 for s in (state.subagents or [])
-                            if s.status in ("running", "unknown")
+                            1 for s in state.subagents
+                            if _is_active_subagent(s)
                         )
                         running_teammates = sum(
                             1 for t in (getattr(state, "teammates", None) or [])
@@ -825,13 +825,14 @@ def start_guard(
                         # different diagnostic. Do NOT tell the
                         # operator to `/clear` (that destroys
                         # subagent state too).
+                        _hc_desc = _hard_cap_exit_desc(state)
                         print(
                             f"  [{_now()}] Guard hard-cap exit "
                             f"(K={consecutive_empty_hard_prunes} >= "
                             f"{HARD_LOOP_HARD_EXIT_THRESHOLD}). "
-                            f"Subagents are still active; their state "
+                            f"{_hc_desc} still active; their state "
                             f"may be lost on the next compaction. "
-                            f"Consider letting current subagents "
+                            f"Consider letting current agents "
                             f"finish then starting a fresh session.",
                             flush=True,
                         )
@@ -2436,23 +2437,54 @@ _STATUS_TERMINAL = {"completed", "complete", "done", "failed", "cancelled",
 _TEAMMATE_BENIGN = {"", "config", "idle", "unknown"}
 
 
+def _is_active_subagent(s) -> bool:
+    """Return True if a subagent entry represents an actively-executing task.
+
+    Uses the DENYLIST predicate (not in _STATUS_TERMINAL) rather than an
+    ALLOWLIST so any non-terminal status — including None, empty, or an
+    off-vocabulary working word like "busy" / "in-progress" — is treated as
+    active.  This matches safe_to_reload's subagent check and ensures
+    _compute_agents_active fails safe in the same direction.
+    """
+    return (s.status or "").strip().lower() not in _STATUS_TERMINAL
+
+
+def _hard_cap_exit_desc(state) -> str:
+    """Return a concise description of what is still active at hard-cap exit.
+
+    Mirrors the soft-K block active_desc logic (guard.py:788-793) so the
+    hard-cap message accurately names the active population (subagent(s),
+    teammate(s), or both) rather than unconditionally saying 'Subagents'.
+    Extracted for testability — Q-B (lead decision).
+    """
+    hc_subagents = sum(1 for s in (state.subagents or []) if _is_active_subagent(s))
+    hc_teammates = sum(
+        1 for t in (getattr(state, "teammates", None) or [])
+        if (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+    )
+    parts = []
+    if hc_subagents:
+        parts.append(f"{hc_subagents} subagent(s)")
+    if hc_teammates:
+        parts.append(f"{hc_teammates} teammate(s)")
+    return " + ".join(parts) if parts else "active agent(s)"
+
+
 def _compute_agents_active(state) -> bool:
     """Return True when any subagent OR teammate is actively running.
 
-    Mirrors the canonical predicate used in safe_to_reload for teammate visibility
-    (guard.py:2725-2728) and extends it to subagents so both populations are covered
-    by a single, testable function.
+    Both populations use DENYLIST predicates (not-in-terminal-set) that
+    mirror safe_to_reload (guard.py:2739-2760) and fail safe on unrecognized
+    or off-vocabulary working statuses (e.g. None, '', 'busy', 'in-progress').
 
-    A subagent is active when its status is "running" or "unknown".
-    A teammate is active when its (stripped, lower-cased) status is NOT in
-    _STATUS_TERMINAL and NOT in _TEAMMATE_BENIGN — the same fail-safe DENYLIST
-    logic used by safe_to_reload.
+    Subagents: active when NOT in _STATUS_TERMINAL (via _is_active_subagent).
+    Teammates: active when NOT in (_STATUS_TERMINAL | _TEAMMATE_BENIGN).
 
-    Called from the daemon loop (guard.py:973-979) and from tests.
+    Called from the daemon loop (guard.py:988) and from tests.
     """
     if state is None or state.is_empty():
         return False
-    if any(s.status in ("running", "unknown") for s in (state.subagents or [])):
+    if any(_is_active_subagent(s) for s in state.subagents):  # always a list
         return True
     return any(
         (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
