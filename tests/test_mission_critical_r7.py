@@ -76,30 +76,30 @@ class TestRedosBoundedRangePolyMiss(unittest.TestCase):
         for p in [r"R\d{1,5}", r".{1,500}", r"\d{1,3}", r"(\d{4})+", r"(\w{8})+"]:
             self.assertFalse(risky(p), f"linear bounded pattern wrongly flagged: {p}")
 
-    def test_literal_separated_bounded_ranges_not_overrejected(self):
-        # R8: two bounded ranges separated by a REQUIRED literal are anchored and
-        # linear — they must NOT be flagged (R7 over-rejected these, silently dropping
-        # the user's --protect-pattern on the no-SIGALRM path). Adjacency, not count.
+    def test_count_rule_never_under_rejects_freeze_vectors(self):
+        # ROUNDS 7-10 LESSON: precise separator heuristics (R8 adjacency, R9
+        # top-level-anchor) each reopened the daemon FREEZE because real ReDoS
+        # detection needs class-overlap + branch-emptiness analysis. The detector
+        # reverted to the provably-safe COUNT rule (>=2 variable-width quantifiers),
+        # which can NEVER under-reject. Every freeze vector the precise rules missed
+        # (empty-alternation separators, class-overlapping literals, group-wrapped /
+        # optional-separated variables) MUST be flagged.
         from cozempic.helpers import _pattern_is_redos_risky as risky
-        for p in [r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", r"[A-Z]{2,4}-\d{1,6}",
-                  r"v\d{1,2}\.\d{1,2}", r"\w{1,20}@\w{1,20}", r".*foo.*", r"ERROR-\d{1,4}: .{1,80}"]:
-            self.assertFalse(risky(p), f"benign literal-separated pattern wrongly flagged: {p}")
-        # ...but ADJACENT variable ranges (no separator) stay flagged.
-        for p in [r".{1,50}.{1,50}", r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b"]:
-            self.assertTrue(risky(p), f"adjacent variable ranges must stay flagged: {p}")
-
-    def test_r9_loosely_separated_variables_still_flagged(self):
-        # R9: the adjacency rule must NOT under-reject when variable atoms are separated
-        # by an OPTIONAL/zero-width atom (can match empty) or wrapped in GROUPS — those
-        # froze the no-budget daemon (the R8 adjacency rule regressed here). A required
-        # TOP-LEVEL literal between them is the ONLY thing that anchors / exempts.
-        from cozempic.helpers import _pattern_is_redos_risky as risky
-        for p in [r"(.{1,500})(.{1,500})(.{1,500})c", r"(a*)(a*)(a*)c",
+        for p in [r".*(?:Z|).*(?:Z|).*(?:Z|).*c", r"a*(b|)a*(b|)a*(b|)a*c",
+                  r".*a.*a.*a.*a.*X", r".*log.*log.*log.*END", r".*/.*/.*/.*/x",
+                  r".*X.*X.*X.*X.*Y", r".*X.*X.*Y",
+                  r"(.{1,500})(.{1,500})(.{1,500})c", r"(a*)(a*)(a*)c",
                   r".{1,500}x?.{1,500}x?.{1,500}c", r".*x?.*y?.*z?.*c",
-                  r"\w*\W?\w*\W?\w*Q", r".*(abc)?.*(def)?.*Q", r".*(?:x)?.*(?:y)?.*c"]:
-            self.assertTrue(risky(p), f"loosely-separated variable atoms must be flagged: {p}")
-        for p in [r"\d{1,5}-\d{1,5}", r".*foo.*", r"\w{1,20}@\w{1,20}"]:
-            self.assertFalse(risky(p), f"required-literal-separated must stay allowed: {p}")
+                  r"\w*\W?\w*\W?\w*Q", r".{1,50}.{1,50}",
+                  r"a.{1,500}.{1,500}.{1,500}.{1,500}.{1,500}b"]:
+            self.assertTrue(risky(p), f"freeze vector MUST be flagged (count rule): {p}")
+        # Single-quantifier / fixed-brace patterns stay allowed (no over-block of the
+        # common safe shapes). NOTE: literal-separated multi-range patterns
+        # (\d{1,3}\.\d{1,3}) ARE conservatively flagged by the count rule — that is the
+        # accepted fail-open over-rejection on the no-SIGALRM path, not tested as "safe".
+        for p in [r"R\d{1,5}", r".{1,500}", r"\d{1,3}", r"(\d{4})+", r"(\w{8})+",
+                  r"(KEEP)+", r"(TODO|FIXME)+", r".*", r"\bword\b"]:
+            self.assertFalse(risky(p), f"benign single-quantifier pattern wrongly flagged: {p}")
 
 
 if __name__ == "__main__":

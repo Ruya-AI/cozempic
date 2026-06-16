@@ -489,131 +489,64 @@ def _have_sigalrm() -> bool:
 # across a group close. Conservative (may false-positive); used ONLY to fail
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
-def _has_adjacent_variable_quantifiers(pattern: str) -> bool:
-    """True if PATTERN has TWO variable-width quantified atoms with NO required,
-    non-variable, TOP-LEVEL atom between them — the necessary condition for super-
-    linear backtracking from ungrouped/loosely-separated repetition (`.*.*`,
-    `.{1,500}.{1,500}`, `(.{1,500})(.{1,500})`, `.*x?.*x?.*`).
+def _count_variable_quantifiers(pattern: str) -> int:
+    """Count VARIABLE-WIDTH repetition operators (`*`, `+`, open-ended `{n,}`, and a
+    bounded range `{n,m}` with m != n) in PATTERN, ignoring escaped operators (`\\*`)
+    and operators inside a character class `[...]` (literal there). A fixed `{n}` /
+    `{n,n}` and `?` are single/bounded width and are NOT counted.
 
-    The separator rule (R9): two variable quantifiers separated by a REQUIRED literal
-    at the TOP level — `\\d{1,3}\\.\\d{1,3}` (IPv4), `[A-Z]{2,4}-\\d{1,6}`, `.*foo.*` —
-    are anchored and match in linear time, so they are NOT flagged (fixing the R8
-    over-rejection). Everything else stays flagged. Two deliberate safety choices keep
-    this from EVER under-rejecting (the R8 adjacency rule regressed by under-rejecting,
-    reopening the freeze — R9): (1) an OPTIONAL or zero-width atom (`x?`, `\\b`, `(?:)?`)
-    does NOT anchor — it can match empty, leaving the surrounding variables effectively
-    adjacent; (2) a required atom anchors ONLY at the TOP level (depth 0) — an atom
-    inside a group can be skipped when the group is optional/alternated, so a group is
-    NEVER treated as a separator. Variable-width = `*`, `+`, `{n,}`, or `{n,m}` (m!=n);
-    `?`, fixed `{n}`, and bare atoms are not. Quantified GROUPS with a quantified or
-    ambiguous body are caught separately by _body_has_inner_quantifier /
-    _ambiguous_alternation."""
+    This is the PROVABLY-SAFE necessary-condition for super-linear backtracking:
+    catastrophic/polynomial ReDoS REQUIRES at least two overlapping variable-width
+    repetitions. So `>= 2` NEVER under-rejects (it cannot miss a freeze). The cost is
+    OVER-rejection: it also flags benign literal-separated ranges (`\\d{1,3}\\.\\d{1,3}`
+    IPv4, `.*foo.*`) whose required separator actually makes them linear.
 
-    def _quant(i):
-        """Parse a trailing quantifier at i. Returns (is_variable, is_optional, next_i)."""
-        if i >= n:
-            return (False, False, i)
-        ch = pattern[i]
-        if ch in "*+":
-            i2 = i + 1
-            if i2 < n and pattern[i2] in "?+":
-                i2 += 1
-            return (True, ch == "*", i2)  # * can match empty
-        if ch == "?":
-            i2 = i + 1
-            if i2 < n and pattern[i2] in "?+":
-                i2 += 1
-            return (False, True, i2)
-        if ch == "{":
-            j = pattern.find("}", i)
-            if j == -1:
-                return (False, False, i)
-            sp = pattern[i + 1:j]
-            var = optional = False
-            if "," in sp:
-                lo, _, hi = sp.partition(",")
-                hi = hi.strip()
-                var = hi == "" or hi != lo.strip()
-                optional = lo.strip() in ("", "0")
-            i2 = j + 1
-            if i2 < n and pattern[i2] in "?+":
-                i2 += 1
-            return (var, optional, i2)
-        return (False, False, i)
-
-    i, n = 0, len(pattern)
-    depth = 0
-    pending = False  # an un-anchored variable quantifier is open
-
-    def _consume(var, optional, zero_width=False):
-        nonlocal pending
-        if var:
-            if pending:
-                return True
-            pending = True
-        elif depth == 0 and not optional and not zero_width:
-            pending = False  # a required, non-variable, top-level atom anchors
-        return False
-
+    WHY THE COUNT AND NOT A MORE PRECISE RULE (the hard-won lesson, rounds 7-10):
+    distinguishing a real separator from a fake one needs full regex semantics —
+    character-class OVERLAP (`.*X.*X` freezes because `.` matches `X`) and branch
+    EMPTINESS (`.*(?:Z|).*` freezes because the branch can be empty). Every heuristic
+    that tried to be precise (R8 adjacency, R9 top-level-anchor) re-opened the daemon
+    FREEZE in the dangerous direction. The over-rejection is the SAFE direction: it is
+    FAIL-OPEN (skip pattern protection this cycle + a stderr warning, content stays
+    prunable — never destroyed, never a crash, never a freeze), it only affects the
+    no-SIGALRM path (Windows / non-main-thread), and the 512-char no-budget cap is an
+    independent backstop. A durable fix for the over-rejection would require running
+    the match under a real hard timeout (a killable subprocess), not a shape heuristic."""
+    count = 0
+    i, n, in_class = 0, len(pattern), False
     while i < n:
         c = pattern[i]
         if c == "\\":
-            atom = pattern[i:i + 2]
             i += 2
-            var, optional, i = _quant(i)
-            if _consume(var, optional, zero_width=atom in (r"\b", r"\B", r"\A", r"\Z", r"\z")):
-                return True
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
             continue
         if c == "[":
-            j = i + 1
-            while j < n and pattern[j] != "]":
-                if pattern[j] == "\\":
-                    j += 1
-                j += 1
-            i = j + 1
-            var, optional, i = _quant(i)
-            if _consume(var, optional):
-                return True
-            continue
-        if c == "(":
-            depth += 1
+            in_class = True
             i += 1
-            if i < n and pattern[i] == "?":  # skip (?: (?= (?! (?<= (?<! (?P<name> prefix
+            continue
+        if c in "*+":
+            count += 1
+            i += 1
+            continue
+        if c == "{":
+            j = pattern.find("}", i)
+            if j == -1:
                 i += 1
-                if i < n and pattern[i] in ":=!":
-                    i += 1
-                elif i < n and pattern[i] == "<":
-                    if i + 1 < n and pattern[i + 1] in "=!":
-                        i += 2
-                    else:
-                        k = pattern.find(">", i)
-                        i = k + 1 if k != -1 else i + 1
-                elif i < n and pattern[i] == "P":
-                    k = pattern.find(">", i)
-                    i = k + 1 if k != -1 else i + 1
+                continue
+            sp = pattern[i + 1:j]
+            if "," in sp:
+                lo, _, hi = sp.partition(",")
+                hi = hi.strip()
+                if hi == "" or hi != lo.strip():
+                    count += 1
+            i = j + 1
             continue
-        if c == ")":
-            depth = max(0, depth - 1)
-            i += 1
-            var, optional, i = _quant(i)  # the whole group may be repeated
-            if var and pending:
-                return True
-            if var:
-                pending = True
-            continue
-        if c == "|":
-            pending = False  # alternation branch boundary
-            i += 1
-            continue
-        if c in "^$":
-            i += 1  # zero-width anchor: transparent
-            continue
-        # ordinary literal char (including '.')
         i += 1
-        var, optional, i = _quant(i)
-        if _consume(var, optional):
-            return True
-    return False
+    return count
 
 
 def _scan_quantified_group_bodies(pattern: str) -> list[str]:
@@ -769,19 +702,16 @@ def _pattern_is_redos_risky(pattern: str) -> bool:
     CLOSED where no wall-clock budget exists (Windows / non-main thread), where a
     pure-Python thread cannot interrupt a CPU-bound `re` match.
 
-    R4 fix — the prior detector flagged ANY quantified group, which (a) MISSED
-    ungrouped adjacent quantifiers like `.*.*.*.*c` (the exact exponential freeze
-    that locked the Windows daemon even under the 512-char cap) and (b) OVER-rejected
-    benign single-quantifier groups like `(KEEP)+`, `(TODO|FIXME)+`, silently
-    dropping a user's --protect-pattern so protected content got pruned. Three
-    necessary-condition rules together fix both directions:
-      1. two ADJACENT variable-width quantified atoms (`.*.*`, `a*a*`,
-         `.{1,500}.{1,500}`) — but NOT literal-separated ranges like
-         `\\d{1,3}\\.\\d{1,3}` which are linear (R8: stop over-rejecting those).
-      2. a quantified group whose body is itself quantified (`(a?)+`, `(.*X){8}`).
+    Three necessary-condition rules, all fail-CLOSED (never under-reject → never let a
+    freeze through), at the cost of some safe-direction over-rejection on this path:
+      1. >= 2 variable-width quantifiers anywhere (`.*.*`, `a*a*`, `.{1,500}.{1,500}`,
+         and also `.*X.*X` / `.*(?:Z|).*` which DO freeze; this conservatively also
+         flags linear literal-separated ranges like `\\d{1,3}\\.\\d{1,3}` — accepted,
+         fail-open, see _count_variable_quantifiers for the rounds-7..10 rationale).
+      2. a quantified group whose body is itself variable-width (`(a?)+`, `(.*X){8}`).
       3. a quantified group with an AMBIGUOUS alternation (`(a|a)+`) — disjoint
          alternations like `(TODO|FIXME)+` stay allowed."""
-    if _has_adjacent_variable_quantifiers(pattern):
+    if _count_variable_quantifiers(pattern) >= 2:
         return True
     for body in _scan_quantified_group_bodies(pattern):
         if _body_has_inner_quantifier(body) or _ambiguous_alternation(body):
