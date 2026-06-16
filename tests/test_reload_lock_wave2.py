@@ -332,11 +332,10 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         orphaned on upgrade.
         """
         from cozempic.guard import _reload_armed_path
-        import re as _re
 
         uuid = "f641174c-d784-4aab-8f29-3a1c2b456def"
         # Pre-fix formula (the inline that was in guard before P0-A)
-        pre_fix_slug = _re.sub(r"[^a-z0-9_-]", "_", str(uuid).lower())[:12] or "session"
+        pre_fix_slug = re.sub(r"[^a-z0-9_-]", "_", str(uuid).lower())[:12] or "session"
 
         armed_path = _reload_armed_path(uuid)
         _PREFIX = "cozempic_reload_armed_"
