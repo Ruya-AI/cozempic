@@ -1641,12 +1641,9 @@ def guard_prune_cycle(
             # ALLOWS a prune that frees real headroom to reload even if it lands
             # just above the trigger band — that converges over a cycle or two, and
             # the disk reload-rate ledger below bounds any residual regrow loop.
-            # NB: gate on pre_te.total only — a maximal prune to post_te.total==0
-            # is FULL progress (pre - 0), not zero; `and post_te.total` would
-            # wrongly read it as 0 progress and skip the reload.
-            _tokens_saved_now = (
-                pre_te.total - post_te.total if pre_te.total else 0
-            )
+            # NB: gate on pre_te.total only (see _persisted_tokens_saved) — a
+            # maximal prune to post_te.total==0 is FULL progress, not zero.
+            _tokens_saved_now = _persisted_tokens_saved(pre_te.total, post_te.total)
             if (
                 auto_reload
                 and pre_te.total

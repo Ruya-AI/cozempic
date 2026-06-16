@@ -465,11 +465,11 @@ def _extract_block_text(block: dict) -> str:
         return content
     if isinstance(content, list):
         return "".join(
-            sub["text"]
+            t
             for sub in content
             if isinstance(sub, dict)
             and sub.get("type") == "text"
-            and isinstance(sub.get("text"), str)
+            and isinstance(t := sub.get("text"), str)
         )
     return ""
 
@@ -1014,8 +1014,8 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 for block in content:
                     if (isinstance(block, dict)
                             and block.get("type") == "text"
-                            and isinstance(block.get("text"), str)):
-                        team_msgs.append(block["text"][:300])
+                            and isinstance(t := block.get("text"), str)):
+                        team_msgs.append(t[:300])
 
     if team_msgs:
         state.lead_summary = " [...] ".join(team_msgs[-3:])

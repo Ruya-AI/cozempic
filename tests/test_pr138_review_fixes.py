@@ -12,6 +12,7 @@ Fix 3 — overflow.py: reactive safe-point gate must FAIL-CLOSED (Exception →
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,6 +75,7 @@ class TestExtractTeamStateNonStrText(unittest.TestCase):
 
     def _write_session(self, lines: list[dict]) -> Path:
         d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
         p = Path(d) / "session.jsonl"
         p.write_text("\n".join(json.dumps(ln) for ln in lines) + "\n")
         return p
@@ -279,30 +281,22 @@ class TestOverflowSafePointFailClosed(unittest.TestCase):
             rec = self._make_recovery(tmp, session_path)
             prune_result = self._prune_result_safe(session_path)
 
-            terminate_calls: list = []
-            checkpoint_calls: list = []
+            mock_terminate = MagicMock()
+            mock_checkpoint = MagicMock()
 
             with (
                 patch("cozempic.guard.guard_prune_cycle",
                       return_value=prune_result),
                 patch("cozempic.team.extract_team_state",
                       side_effect=RuntimeError("boom")),
-                patch("cozempic.guard._terminate_and_resume",
-                      side_effect=lambda *a, **kw: terminate_calls.append((a, kw))),
-                patch("cozempic.guard.checkpoint_team",
-                      side_effect=lambda **kw: checkpoint_calls.append(kw)),
+                patch("cozempic.guard._terminate_and_resume", mock_terminate),
+                patch("cozempic.guard.checkpoint_team", mock_checkpoint),
             ):
                 rec._do_recover()
 
             # FAIL-CLOSED: exception → deferred, not killed
-            self.assertEqual(
-                len(terminate_calls), 0,
-                "gate exception must NOT trigger _terminate_and_resume (fail-OPEN kills live work)"
-            )
-            self.assertGreater(
-                len(checkpoint_calls), 0,
-                "gate exception must trigger checkpoint_team (safe deferral)"
-            )
+            mock_terminate.assert_not_called()
+            mock_checkpoint.assert_called()
 
     def test_gate_load_messages_exception_causes_deferral(self):
         """When load_messages raises inside the gate, must FAIL-CLOSED."""
@@ -315,29 +309,21 @@ class TestOverflowSafePointFailClosed(unittest.TestCase):
             rec = self._make_recovery(tmp, session_path)
             prune_result = self._prune_result_safe(session_path)
 
-            terminate_calls: list = []
-            checkpoint_calls: list = []
+            mock_terminate = MagicMock()
+            mock_checkpoint = MagicMock()
 
             with (
                 patch("cozempic.guard.guard_prune_cycle",
                       return_value=prune_result),
                 patch("cozempic.guard.safe_to_reload",
                       side_effect=OSError("disk gone")),
-                patch("cozempic.guard._terminate_and_resume",
-                      side_effect=lambda *a, **kw: terminate_calls.append((a, kw))),
-                patch("cozempic.guard.checkpoint_team",
-                      side_effect=lambda **kw: checkpoint_calls.append(kw)),
+                patch("cozempic.guard._terminate_and_resume", mock_terminate),
+                patch("cozempic.guard.checkpoint_team", mock_checkpoint),
             ):
                 rec._do_recover()
 
-            self.assertEqual(
-                len(terminate_calls), 0,
-                "safe_to_reload exception must NOT trigger kill (fail-OPEN)"
-            )
-            self.assertGreater(
-                len(checkpoint_calls), 0,
-                "safe_to_reload exception must trigger checkpoint_team (fail-CLOSED)"
-            )
+            mock_terminate.assert_not_called()
+            mock_checkpoint.assert_called()
 
     def test_normal_safe_path_still_kills(self):
         """Control: when the gate succeeds with _safe=True, kill still proceeds."""
@@ -350,15 +336,14 @@ class TestOverflowSafePointFailClosed(unittest.TestCase):
             rec = self._make_recovery(tmp, session_path)
             prune_result = self._prune_result_safe(session_path)
 
-            terminate_calls: list = []
+            mock_terminate = MagicMock()
 
             with (
                 patch("cozempic.guard.guard_prune_cycle",
                       return_value=prune_result),
                 patch("cozempic.guard.safe_to_reload",
                       return_value=(True, "")),
-                patch("cozempic.guard._terminate_and_resume",
-                      side_effect=lambda *a, **kw: terminate_calls.append((a, kw))),
+                patch("cozempic.guard._terminate_and_resume", mock_terminate),
                 patch("cozempic.session.find_claude_pid", return_value=None),
                 # _ReloadLock imported lazily from .reload_lock inside _do_recover
                 patch("cozempic.reload_lock._ReloadLock") as mock_lock,
@@ -368,10 +353,7 @@ class TestOverflowSafePointFailClosed(unittest.TestCase):
                 rec._do_recover()
 
             # With safe=True and explicit pid=9999, _terminate_and_resume is called
-            self.assertGreater(
-                len(terminate_calls), 0,
-                "normal safe path must still proceed to kill+resume"
-            )
+            mock_terminate.assert_called()
 
 
 if __name__ == "__main__":
