@@ -298,7 +298,7 @@ class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
           `for tm_match in _TEAMMATE_MSG_RE.finditer(content):`
         and run this test — it will fail because the status becomes "idle".
         """
-        from cozempic.guard import _RELOAD_GATE_SCAN_CAP
+        from cozempic.team import _RELOAD_GATE_SCAN_CAP
 
         idle_notif = (
             '<teammate-message teammate_id="worker" summary="done">'
