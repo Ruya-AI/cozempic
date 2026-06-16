@@ -352,9 +352,14 @@ _PATTERN_PROTECTED_KEY: str = "__cozempic_pattern_protected__"
 _MAX_PROTECT_PATTERN_LEN: int = 1000
 _MAX_PROTECT_MATCH_BYTES: int = 256 * 1024
 # Hard per-surface cap on the no-SIGALRM (Windows / non-main-thread) match path,
-# where no wall-clock timer can interrupt a runaway regex. Bounds worst-case
-# backtracking to a few KB regardless of any shape-detector completeness gap.
-_NO_BUDGET_MATCH_CAP: int = 4096
+# where no wall-clock timer can interrupt a runaway regex. 512 (not 4096): a
+# quadratic-backtracking pattern the shape detector MISSED is O(n^2), so 4096 was
+# ~6.5s/message — 512 is ~64x faster (~0.1s) and bounds the per-message worst case
+# to a blink. Exponential ReDoS needs a quantified group, which the aggressive
+# _REDOS_SHAPE detector refuses outright, so the cap only has to bound polynomial
+# misses. Trade-off (no-budget path only): a legitimate marker past char 512 in one
+# surface may not match — acceptable vs a frozen daemon.
+_NO_BUDGET_MATCH_CAP: int = 512
 _PROTECT_OVERMATCH_WARN_FRACTION: float = 0.8
 
 

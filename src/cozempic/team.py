@@ -129,7 +129,7 @@ class TeamState:
         lines.append(f"# Agent Team Checkpoint: {self._san(self.team_name) or 'unnamed'}")
         lines.append(f"_Generated: {datetime.now().isoformat()}_")
         if self.config_source:
-            lines.append(f"_Source: {self.config_source}_")
+            lines.append(f"_Source: {self._san(self.config_source)}_")
         lines.append("")
 
         if self.lead_agent_id or self.lead_session_id:
@@ -139,7 +139,7 @@ class TeamState:
         if self.teammates:
             lines.append("## Teammates")
             for t in self.teammates:
-                status = f" ({t.status})" if t.status != "unknown" else ""
+                status = f" ({self._san(t.status)})" if t.status != "unknown" else ""
                 role = f" — {self._san(t.role)}" if t.role else ""
                 model = f" [{self._san(t.model)}]" if t.model else ""
                 cwd = f" cwd: {self._san(t.cwd)}" if t.cwd else ""
@@ -153,7 +153,7 @@ class TeamState:
             for s in self.subagents:
                 agent_type = f" [{self._san(s.subagent_type)}]" if s.subagent_type else ""
                 desc = f" — {self._san(s.description)}" if s.description else ""
-                lines.append(f"- `{self._san(s.agent_id)}`{agent_type}{desc} ({s.status})")
+                lines.append(f"- `{self._san(s.agent_id)}`{agent_type}{desc} ({self._san(s.status)})")
                 if s.result_summary:
                     lines.append(f"  Result: {self._san(s.result_summary)[:200]}")
             lines.append("")
@@ -202,14 +202,14 @@ class TeamState:
             for t in self.teammates:
                 role = f" — {self._san(t.role)}" if t.role else ""
                 model = f" [{self._san(t.model)}]" if t.model else ""
-                parts.append(f"  - {self._san(t.name)} (agent_id: {self._san(t.agent_id)}){role}{model} [{t.status}]")
+                parts.append(f"  - {self._san(t.name)} (agent_id: {self._san(t.agent_id)}){role}{model} [{self._san(t.status)}]")
 
         if self.subagents:
             parts.append(f"\nSubagents ({len(self.subagents)}):")
             for s in self.subagents:
                 agent_type = f" [{self._san(s.subagent_type)}]" if s.subagent_type else ""
                 desc = f" — {self._san(s.description)}" if s.description else ""
-                parts.append(f"  - {self._san(s.agent_id)}{agent_type}{desc} [{s.status}]")
+                parts.append(f"  - {self._san(s.agent_id)}{agent_type}{desc} [{self._san(s.status)}]")
                 if s.result_summary:
                     parts.append(f"    Result: {self._san(s.result_summary)[:150]}")
 
@@ -220,7 +220,7 @@ class TeamState:
                 shown_tasks = active_tasks[:10]
                 for t in shown_tasks:
                     owner = f" (owner: {self._san(t.owner)})" if t.owner else ""
-                    parts.append(f"  - [{t.status.upper()}] {self._san(t.subject)}{owner}")
+                    parts.append(f"  - [{self._san(t.status).upper()}] {self._san(t.subject)}{owner}")
                 if len(active_tasks) > len(shown_tasks):
                     parts.append(f"  - ... {len(active_tasks) - len(shown_tasks)} more active task(s) omitted")
             else:

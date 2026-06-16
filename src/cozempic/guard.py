@@ -58,6 +58,9 @@ HARD_LOOP_EXIT_THRESHOLD = 10
 # spinning (inert-but-alive, watchdog-invisible) and exits for SessionStart to
 # respawn — turning a deterministic repeating failure into a visible respawn.
 GUARD_CYCLE_ERROR_EXIT = 5
+# C2: max consecutive cycles the escalation-exit will defer while agents are
+# active before escalating anyway (a stuck guard must not spin inert forever).
+GUARD_CYCLE_ERROR_DEFER_MAX = 20
 
 
 # ── Hard cap: K=10 exit deferral when agents_active (PR #93 item #4) ────────
@@ -891,6 +894,7 @@ def start_guard(
     consecutive_cycle_errors = 0      # C2: deterministic per-cycle error -> escalate, not silent-inert
     last_agents_active = False        # C2: don't escalate-exit while a subagent team is live
     logged_decode_skip = False        # C1/C2: log a non-UTF-8 session once, don't respawn-storm
+    deferred_error_cycles = 0         # C2: bound the agents-active escalation deferral
     interactive_mode = _detect_interactive(claude_pid)   # H
     force_pct = _force_reload_pct()                       # E
     force_threshold_tokens = (
@@ -1234,6 +1238,7 @@ def start_guard(
                 # End-of-cycle: remember this size so the next cycle can detect idle.
                 prev_size = current_size
                 consecutive_cycle_errors = 0  # a clean cycle clears the error streak
+                deferred_error_cycles = 0
 
             except (KeyboardInterrupt, SystemExit):
                 raise  # voluntary exits (Ctrl-C, K-exit) reach the outer handler/finally
@@ -1261,15 +1266,21 @@ def start_guard(
                       f"({consecutive_cycle_errors}/{GUARD_CYCLE_ERROR_EXIT}): {_cycle_exc!r}", flush=True)
                 if consecutive_cycle_errors >= GUARD_CYCLE_ERROR_EXIT:
                     # C2: defer the escalation-exit while a subagent team is live —
-                    # don't drop guard coverage mid-team. Cap the counter so it
-                    # escalates promptly once the team goes quiescent.
-                    if last_agents_active:
+                    # don't drop guard coverage mid-team. BUT BOUND the deferral: a
+                    # guard erroring this long while "agents active" may be reading a
+                    # stale/zombie team state, and spinning inert forever (the
+                    # round-3 regression) is worse than a brief gap. After
+                    # GUARD_CYCLE_ERROR_DEFER_MAX deferred cycles, escalate anyway.
+                    if last_agents_active and deferred_error_cycles < GUARD_CYCLE_ERROR_DEFER_MAX:
+                        deferred_error_cycles += 1
                         print(f"  Guard: {consecutive_cycle_errors} cycle errors but agents are "
-                              f"active — deferring respawn until quiescent.", flush=True)
+                              f"active — deferring respawn ({deferred_error_cycles}/"
+                              f"{GUARD_CYCLE_ERROR_DEFER_MAX}).", flush=True)
                         consecutive_cycle_errors = GUARD_CYCLE_ERROR_EXIT  # hold at threshold
                         continue
                     print(f"  Guard cycle-error escalation: {consecutive_cycle_errors} consecutive "
-                          f"cycle errors — exiting for respawn (last: {_cycle_exc!r}).", flush=True)
+                          f"cycle errors ({deferred_error_cycles} deferred) — exiting for respawn "
+                          f"(last: {_cycle_exc!r}).", flush=True)
                     sys.exit(1)
                 continue
     except KeyboardInterrupt:
