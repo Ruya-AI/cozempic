@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 import sys
 import tempfile
 import time
@@ -46,18 +47,16 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
             sys.stdout = old_stdout
         return captured.getvalue()
 
-    def test_does_not_return_other_projects_checkpoint_when_other_is_newer(self, tmp_path=None):
+    def test_does_not_return_other_projects_checkpoint_when_other_is_newer(self):
         """Core bug: Strategy 5 picks a newer OTHER project's session → wrong checkpoint.
 
         Fixture uses the CORRECT dir names (as Claude Code actually creates them, with dashes
         for underscores). Old code computes broken slug with '_', so Strategy 4 misses project A
         and Strategy 5 returns project B's (newer) session → contamination.
         """
-        import tempfile
         import re as _re
-        # Use explicit tmp_path if provided by pytest, otherwise create our own
-        if tmp_path is None:
-            tmp_path = Path(tempfile.mkdtemp())
+        tmp_path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
 
         # The CORRECT (fixed) slug formula — what Claude Code actually stores on disk
         def _correct_slug(cwd: str) -> str:
@@ -105,8 +104,8 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
 
     def test_falls_back_safely_when_no_session_found(self):
         """strict→None→Path(cwd) fallback must not crash and produce no output."""
-        import tempfile
         tmp_path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
         # Empty projects dir — no sessions at all
         (tmp_path / "projects").mkdir(parents=True, exist_ok=True)
 
@@ -131,10 +130,10 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
 
         This tests the include_global=False guard added to the read_team_checkpoint call.
         """
-        import tempfile
         from cozempic.session import get_claude_dir
 
         tmp_path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
         (tmp_path / "projects").mkdir(parents=True, exist_ok=True)
 
         cwd = str(tmp_path / "my_project")
