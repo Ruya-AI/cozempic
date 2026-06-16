@@ -353,12 +353,13 @@ _MAX_PROTECT_PATTERN_LEN: int = 1000
 _MAX_PROTECT_MATCH_BYTES: int = 256 * 1024
 # Hard per-surface cap on the no-SIGALRM (Windows / non-main-thread) match path,
 # where no wall-clock timer can interrupt a runaway regex. 512 (not 4096): a
-# quadratic-backtracking pattern the shape detector MISSED is O(n^2), so 4096 was
-# ~6.5s/message — 512 is ~64x faster (~0.1s) and bounds the per-message worst case
-# to a blink. Exponential ReDoS needs a quantified group, which the aggressive
-# _REDOS_SHAPE detector refuses outright, so the cap only has to bound polynomial
-# misses. Trade-off (no-budget path only): a legitimate marker past char 512 in one
-# surface may not match — acceptable vs a frozen daemon.
+# super-linear pattern the quantifier-count detector MISSED is bounded to ~512 chars
+# of backtracking — 4096 was ~6.5s/message, 512 is ~64x faster (~0.1s), a blink.
+# _pattern_is_redos_risky refuses any pattern with >=2 unbounded quantifiers (the
+# necessary condition for exponential ReDoS), so this cap only has to bound the
+# residual single-quantifier-ambiguous-alternation case. Trade-off (no-budget path
+# only): a legitimate marker past char 512 in one surface may not match — acceptable
+# vs a frozen daemon.
 _NO_BUDGET_MATCH_CAP: int = 512
 _PROTECT_OVERMATCH_WARN_FRACTION: float = 0.8
 
@@ -464,30 +465,206 @@ def _have_sigalrm() -> bool:
 # across a group close. Conservative (may false-positive); used ONLY to fail
 # CLOSED where no wall-clock budget exists (Windows / non-main thread), never to
 # relax the POSIX SIGALRM path.
-import re as _re_redos
-# A regex heuristic can NEVER be complete for ReDoS, and on the no-budget path a
-# missed catastrophic pattern freezes the daemon. So be AGGRESSIVE / fail-closed:
-# treat ANY quantified group as risky — a `)` (optionally followed by `?`/`+`/`*`)
-# that is then quantified by `+`, `*`, or a `{` brace. The necessary condition for
-# catastrophic backtracking is a quantified group, so this catches every form the
-# narrow detector missed — (a|a)+, (x+){n}, (a?)+, ((a)|(a))+, (x+)?+ — at the cost
-# of also refusing benign group-repetition like (abc)+ on Windows. Over-refusal is
-# the SAFE direction: it only means "skip --protect-pattern this cycle + warn"
-# (the documented fail-open outcome), never a frozen daemon.
-_REDOS_SHAPE = _re_redos.compile(
-    r"\)[?+*]?\s*[+*]"      # a group close, opt quantifier, then + or * : (..)+ (..)* (..)?+ (..)*+
-    r"|\)[?+*]?\s*\{",      # a group close then a brace quantifier : (..){n}  (..){n,}
-)
+def _count_unbounded_quantifiers(pattern: str) -> int:
+    """Count UNBOUNDED repetition operators (`*`, `+`, and open-ended `{n,}`) in
+    PATTERN, ignoring escaped operators (`\\*`) and operators inside a character
+    class `[...]` (where they are literal). This is the necessary-condition
+    heuristic for catastrophic backtracking: exponential/super-linear ReDoS
+    requires AT LEAST TWO overlapping unbounded repetitions (`.*.*`, `a+a+`,
+    `(a+)+`, `(a*)*`). A SINGLE unbounded quantifier — even on a group, e.g.
+    `(KEEP)+`, `(TODO|FIXME)+` — matches in linear time and is NOT risky."""
+    count = 0
+    i = 0
+    n = len(pattern)
+    in_class = False
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2  # escaped next char — never an operator
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            continue
+        if c in "*+":
+            count += 1
+            i += 1
+            continue
+        if c == "{":
+            j = pattern.find("}", i)
+            if j == -1:
+                i += 1
+                continue
+            spec = pattern[i + 1:j]
+            # Open-ended `{n,}` (comma present, nothing after it) is unbounded;
+            # `{n}` and `{n,m}` are bounded and cannot drive catastrophic backtracking.
+            if "," in spec and spec.split(",", 1)[1].strip() == "":
+                count += 1
+            i = j + 1
+            continue
+        i += 1
+    return count
+
+
+def _scan_quantified_group_bodies(pattern: str) -> list[str]:
+    """Inner body of each group `(...)` immediately followed by an unbounded or
+    braced quantifier (`+`, `*`, `{...}`). Honors escapes, char classes, and
+    nesting. A group followed by `?` (or nothing) is NOT returned — `(...)?` alone
+    cannot drive catastrophic backtracking."""
+    bodies: list[str] = []
+    stack: list[int] = []
+    i, n, in_class = 0, len(pattern), False
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            continue
+        if c == "(":
+            stack.append(i)
+            i += 1
+            continue
+        if c == ")":
+            if stack:
+                start = stack.pop()
+                nxt = pattern[i + 1] if i + 1 < n else ""
+                if nxt in ("+", "*", "{"):  # NOT `in "+*{"` — "" is a substring of every str
+                    bodies.append(pattern[start + 1:i])
+            i += 1
+            continue
+        i += 1
+    return bodies
+
+
+def _body_has_inner_quantifier(body: str) -> bool:
+    """True if BODY contains a quantifier (`*`, `+`, `?`, `{`) outside a char
+    class / escape. A quantified group whose body is itself quantified — `(a+)+`,
+    `(a?)+`, `(.*X){8}`, `(x+){10}` — is a classic exponential/polynomial ReDoS."""
+    i, n, in_class = 0, len(body), False
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            continue
+        if c in "*+?{":
+            return True
+        i += 1
+    return False
+
+
+def _split_top_level_alts(body: str) -> list[str]:
+    """Split BODY on top-level `|` only (not inside nested groups / char classes)."""
+    alts: list[str] = []
+    cur: list[str] = []
+    depth, in_class = 0, False
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            cur.append(body[i:i + 2])
+            i += 2
+            continue
+        if in_class:
+            cur.append(c)
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            cur.append(c)
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            cur.append(c)
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            cur.append(c)
+            i += 1
+            continue
+        if c == "|" and depth == 0:
+            alts.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    alts.append("".join(cur))
+    return alts
+
+
+def _ambiguous_alternation(body: str) -> bool:
+    """True if BODY is an alternation whose branches can match a common first
+    character — `(a|a)+`, `((a)|(a))+` backtrack catastrophically. A DISJOINT
+    alternation like `(TODO|FIXME)+` (T vs F) is unambiguous and SAFE, so it is
+    NOT flagged (the R4 over-rejection complaint)."""
+    if "|" not in body:
+        return False
+    alts = _split_top_level_alts(body)
+    if len(alts) < 2:
+        return False
+
+    def _first(alt: str) -> str | None:
+        j = 0
+        while j < len(alt) and alt[j] == "(":
+            j += 1
+        if j >= len(alt):
+            return None  # empty branch → group is optional+ambiguous
+        ch = alt[j]
+        return "*WILD*" if ch in r".[\\" else ch  # dot/class/escape overlaps anything
+
+    firsts = [_first(a) for a in alts]
+    if any(f is None or f == "*WILD*" for f in firsts):
+        return True
+    return len(set(firsts)) < len(firsts)  # two branches share a first char
 
 
 def _pattern_is_redos_risky(pattern: str) -> bool:
-    """Heuristic: True if PATTERN contains a quantified group (the necessary
-    condition for catastrophic backtracking). Deliberately aggressive — used ONLY
-    to fail CLOSED where no wall-clock budget exists (Windows / non-main thread),
-    where a pure-Python thread cannot interrupt a CPU-bound `re` match. A
-    false-positive just skips pattern protection for that cycle (+ a warning),
-    which is strictly safer than a frozen guard."""
-    return bool(_REDOS_SHAPE.search(pattern))
+    """Heuristic: True if PATTERN can backtrack catastrophically. Used ONLY to fail
+    CLOSED where no wall-clock budget exists (Windows / non-main thread), where a
+    pure-Python thread cannot interrupt a CPU-bound `re` match.
+
+    R4 fix — the prior detector flagged ANY quantified group, which (a) MISSED
+    ungrouped adjacent quantifiers like `.*.*.*.*c` (the exact exponential freeze
+    that locked the Windows daemon even under the 512-char cap) and (b) OVER-rejected
+    benign single-quantifier groups like `(KEEP)+`, `(TODO|FIXME)+`, silently
+    dropping a user's --protect-pattern so protected content got pruned. Three
+    necessary-condition rules together fix both directions:
+      1. >= 2 unbounded quantifiers anywhere (`.*.*`, `(a+)+`, `a*a*`).
+      2. a quantified group whose body is itself quantified (`(a?)+`, `(.*X){8}`).
+      3. a quantified group with an AMBIGUOUS alternation (`(a|a)+`) — disjoint
+         alternations like `(TODO|FIXME)+` stay allowed."""
+    if _count_unbounded_quantifiers(pattern) >= 2:
+        return True
+    for body in _scan_quantified_group_bodies(pattern):
+        if _body_has_inner_quantifier(body) or _ambiguous_alternation(body):
+            return True
+    return False
 
 
 def _match_time_budget(seconds: float):

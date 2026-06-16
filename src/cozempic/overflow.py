@@ -151,10 +151,13 @@ class OverflowRecovery:
                 # Seek to last ~100KB to read tail efficiently
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(0, size - 102400))
+                seek_to = max(0, size - 102400)
+                f.seek(seek_to)
                 tail = f.read().decode("utf-8", errors="replace")
         except OSError:
             return False
+
+        truncated_head = seek_to > 0  # the first tail line is a partial fragment
 
         # A marker counts ONLY in an actual API-ERROR line — NOT a user turn that
         # merely discusses context limits ("my prompt is too long..."). The bare
@@ -163,17 +166,26 @@ class OverflowRecovery:
         # line and require either isApiErrorMessage:true, or a non-user message
         # whose serialized content carries the marker.
         import json as _json
-        lines = tail.strip().split("\n")
-        for line in lines[-20:]:
-            line = line.strip()
+        lines = tail.split("\n")
+        # The 100KB seek lands MID-LINE, so the first element is a truncated JSON
+        # fragment. If it happens to contain a marker substring it fails json.loads —
+        # and the old `except → return True` then false-fired an unsolicited
+        # kill+resume on a perfectly benign large session whose tail merely DISCUSSED
+        # overflow phrasing (R4 finding overflow-falsefire-unparseable-tail). Drop
+        # that partial fragment, and NEVER infer overflow from an unparseable line:
+        # a real overflow is a structurally-valid API-error entry (below).
+        if truncated_head and lines:
+            lines = lines[1:]
+        for line in [ln.strip() for ln in lines[-20:]]:
             if not line or not any(m in line for m in OVERFLOW_MARKERS):
                 continue
             try:
                 obj = _json.loads(line)
             except (ValueError, _json.JSONDecodeError):
-                # Unparseable tail line carrying a marker — could be a raw TUI
-                # error echo; treat as overflow (conservative, pre-existing form).
-                return True
+                # Unparseable marker-bearing line — cannot confirm it is a genuine
+                # API error, so do NOT treat it as overflow (the structural gate
+                # below is the only trigger). Prevents the truncated-tail false-kill.
+                continue
             if not isinstance(obj, dict):
                 continue
             # ONLY a genuine API-ERROR entry counts. Requiring isApiErrorMessage (or

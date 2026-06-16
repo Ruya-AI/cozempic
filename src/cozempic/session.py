@@ -141,12 +141,13 @@ def _parse_delta_lines(delta: bytes) -> list[str]:
     subclass), or json.JSONDecodeError if any line is not valid JSON.
     Returns a list of raw JSON line strings (no trailing newline per element).
     """
-    # STRICT decode — this delta is appended to the WRITE buffer. An invalid byte
-    # must raise (caller treats it as a conflict and skips), never be written as
-    # U+FFFD. save_messages wraps this in except (ValueError, JSONDecodeError),
-    # and UnicodeDecodeError is a ValueError subclass, so a bad-byte delta is
-    # correctly handled as "incomplete/conflict — defer", not a corrupting merge.
-    text = delta.decode("utf-8")
+    # errors="surrogateescape" mirrors the load/save decode: an appended line whose
+    # bytes are not valid UTF-8 (a binary tool_result Claude wrote in the prune
+    # window) maps to reversible surrogates and is re-encoded to the EXACT bytes by
+    # the surrogateescape-opened append file — lossless, never U+FFFD. A
+    # STRUCTURALLY invalid byte still fails the per-line json.loads below and is
+    # handled as "incomplete/conflict — defer", not a corrupting merge.
+    text = delta.decode("utf-8", "surrogateescape")
     if not text.endswith("\n"):
         raise ValueError("delta does not end on newline boundary — Claude may be mid-write")
     lines = []
@@ -735,7 +736,10 @@ def _parse_one_line(raw: str, idx: int) -> Message | None:
             file=sys.stderr,
         )
         return None
-    byte_len = len(stripped.encode("utf-8"))
+    # surrogateescape: a line decoded with surrogateescape (non-UTF-8 bytes mapped
+    # to surrogates) must re-encode with the SAME handler to recover the true byte
+    # length — strict encode would raise on the surrogate.
+    byte_len = len(stripped.encode("utf-8", "surrogateescape"))
     try:
         obj = json.loads(stripped)
     except json.JSONDecodeError:
@@ -755,6 +759,18 @@ def _parse_one_line(raw: str, idx: int) -> Message | None:
     # etc.) is normal and left as-is.
     if "message" in obj and not isinstance(obj["message"], dict):
         return (idx, {"_raw": stripped, "_parse_error": True}, byte_len)
+    # ROOT GUARD (mission-critical R4 P0): `_raw`/`_parse_error` are RESERVED
+    # loader-internal sentinel keys — the ONLY messages that may legitimately carry
+    # them are the wrappers produced ABOVE (which return before reaching here). A
+    # genuine on-disk dict carrying them is forged/colliding (no real CC message
+    # uses these keys). If we passed it through, save_messages would trust
+    # msg.get("_parse_error") as a control flag and write msg["_raw"] VERBATIM in
+    # place of the real line — silently substituting attacker/tool-authored bytes
+    # for genuine content (data loss + injection), or KeyError/TypeError on a
+    # missing/non-str _raw (crash). Strip the sentinel keys so the save side can
+    # only ever honor a wrapper the loader itself created.
+    if "_raw" in obj or "_parse_error" in obj:
+        obj = {k: v for k, v in obj.items() if k not in ("_raw", "_parse_error")}
     return (idx, obj, byte_len)
 
 
@@ -783,7 +799,12 @@ def _split_physical_lines(text: str) -> list[str]:
 def load_messages(path: Path) -> list[Message]:
     """Load JSONL file. Returns list of (line_index, message_dict, byte_size)."""
     messages: list[Message] = []
-    with open(path, "r", encoding="utf-8") as f:
+    # errors="surrogateescape": a non-UTF-8 byte (binary tool_result, truncated
+    # multibyte) is mapped to a reversible surrogate, NOT silently replaced with
+    # U+FFFD. save_messages re-encodes with the same handler so the exact original
+    # bytes round-trip — lossless, unlike "replace" (corrupts) and unlike strict
+    # (aborts → permanently inert guard, R4 finding non-utf8-inert-forever).
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         for i, line in enumerate(f):
             parsed = _parse_one_line(line, i)
             if parsed is not None:
@@ -803,12 +824,17 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     raw = path.read_bytes()
     snapshot = _FileSnapshot.from_bytes(path, raw)
     messages: list[Message] = []
-    # STRICT decode (no errors="replace") — this feeds save_messages on the WRITE
-    # path. A non-UTF-8 byte (binary tool_result, truncated multibyte) must ABORT
-    # the prune (UnicodeDecodeError, a ValueError subclass) exactly as the strict
-    # load_messages did, NOT be silently rewritten to U+FFFD and os.replace()'d over
-    # the live transcript. The caller handles the raise the same way it always did.
-    text = raw.decode("utf-8")
+    # errors="surrogateescape" (R4 fix, supersedes the round-3 strict abort): a
+    # non-UTF-8 byte must NOT be rewritten to U+FFFD and os.replace()'d over the
+    # live transcript (corruption — the reason strict was chosen). But strict ABORTED
+    # the prune every cycle, so the guard went permanently inert on any session that
+    # picked up one stray byte and the user sailed into auto-compaction
+    # (R4 finding non-utf8-inert-forever). surrogateescape resolves the tension: bad
+    # bytes map to reversible surrogates and save_messages re-encodes with the SAME
+    # handler, so the exact original bytes round-trip losslessly AND the prune can
+    # proceed. Verified: in-string bytes survive via json escaping, structural bytes
+    # via the _raw passthrough written through the surrogateescape-opened tmp file.
+    text = raw.decode("utf-8", "surrogateescape")
     del raw  # C9: free the bytes copy before line processing to cap peak memory
     for i, line in enumerate(_split_physical_lines(text)):
         parsed = _parse_one_line(line, i)
@@ -995,9 +1021,18 @@ def save_messages(
     )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        # errors="surrogateescape" mirrors the load decode so a _raw passthrough
+        # carrying surrogate-mapped bytes (a structurally-invalid-UTF-8 line) is
+        # re-encoded to its EXACT original bytes rather than raising UnicodeEncodeError.
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
             for _, msg, _ in messages:
-                if msg.get("_parse_error"):
+                # Honor the loader's _raw passthrough ONLY for a well-formed wrapper:
+                # _parse_error is True AND _raw is a str. The loader strips these
+                # reserved keys from genuine on-disk dicts (so a forged content key
+                # can't reach here), but defend anyway — a missing/non-str _raw must
+                # re-serialize, never KeyError/TypeError mid-save (which on the guard
+                # path aborts AFTER Claude is SIGTERM'd but BEFORE resume).
+                if msg.get("_parse_error") is True and isinstance(msg.get("_raw"), str):
                     f.write(msg["_raw"] + "\n")
                 else:
                     f.write(json.dumps(msg, separators=(",", ":")) + "\n")
@@ -1024,7 +1059,7 @@ def save_messages(
                         f"Session file has an incomplete append — deferring prune: {path}"
                     ) from exc
                 if extra_lines:
-                    with open(tmp_path, "a", encoding="utf-8") as fa:
+                    with open(tmp_path, "a", encoding="utf-8", errors="surrogateescape") as fa:
                         for line in extra_lines:
                             fa.write(line + "\n")
                         fa.flush()

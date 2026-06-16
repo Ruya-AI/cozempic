@@ -144,13 +144,20 @@ class TestHardening1828(unittest.TestCase):
 
     def test_redos_shape_detector(self):
         from cozempic.helpers import _pattern_is_redos_risky as risky
-        # Aggressive/fail-closed: every catastrophic FORM the narrow detector
-        # missed must now be flagged (mission-critical C8).
+        # Every catastrophic FORM must be flagged — including the R4-added
+        # UNGROUPED adjacent quantifiers (.*.*.*.*c / a*a*) the prior group-only
+        # detector MISSED and which froze the Windows daemon under the 512 cap.
         for p in [r"(a+)+$", r"(a*)*", r"(ab+c)*", r"(a|a)+", r"(x+){10}",
-                  r"(x+){2,}", r"(a?)+", r"((a)|(a))+", r"(\S+\s+){5,}", r"(.*X){8}"]:
+                  r"(x+){2,}", r"(a?)+", r"((a)|(a))+", r"(\S+\s+){5,}", r"(.*X){8}",
+                  r".*.*.*.*c", r"a*a*", r"(secret-\d+)+"]:
             self.assertTrue(risky(p), f"catastrophic form not flagged: {p}")
-        # Non-group patterns stay usable (no false-positive freeze).
-        for p in [r"GATE CONTRACT R\d+", r"foo|bar|baz", r"R\d{1,5}", r"\bword\b", r"[A-Za-z0-9_]+"]:
+        # Safe patterns stay usable (no false-positive freeze / silent protect drop).
+        # R4: benign SINGLE-quantifier groups must NOT be flagged — the prior
+        # detector rejected these, silently dropping --protect-pattern so the
+        # user's protected content got pruned (data loss).
+        for p in [r"GATE CONTRACT R\d+", r"foo|bar|baz", r"R\d{1,5}", r"\bword\b",
+                  r"[A-Za-z0-9_]+", r"(KEEP)+", r"(TODO|FIXME)+", r"(DO-NOT-PRUNE)+",
+                  r"(important){1,3}", r".*", r"(a+)"]:
             self.assertFalse(risky(p), f"safe pattern wrongly flagged: {p}")
 
     def test_redos_pattern_fails_open_within_budget(self):

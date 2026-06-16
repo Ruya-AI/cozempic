@@ -277,9 +277,16 @@ def _is_context_message(msg: dict) -> bool:
     # Assistant messages that are pure thinking (no text/tool_use output)
     if mtype == "assistant":
         blocks = get_content_blocks(msg)
+        # isinstance guard: get_content_blocks returns content VERBATIM (the round-3
+        # revert that stopped write-path data loss), so a non-dict content element
+        # reaches here. Without the guard b.get(...) raises AttributeError, which is
+        # UNHANDLED in cmd_treat (aborts the prune → user marches into auto-compaction)
+        # and a respawn-storm in the guard cycle (R4 findings is-context-message /
+        # nondict-block-elem token crash).
         has_output = any(
             b.get("type") in ("text", "tool_use", "tool_result")
             for b in blocks
+            if isinstance(b, dict)
         )
         if blocks and not has_output:
             return False

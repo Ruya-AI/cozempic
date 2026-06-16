@@ -491,11 +491,28 @@ def check_corrupted_tool_use() -> CheckResult:
     )
 
 
+def _raw_content_blocks(obj) -> list:
+    """Content blocks of a RAW-parsed (json.loads, not session._parse_one_line)
+    JSONL line, defended against the non-dict shapes the session loader wraps but
+    doctor's own scanners see raw: a non-dict top-level line, a non-dict inner
+    "message", or a non-list content. Returns [] for any non-conforming shape so
+    one poisoned session can't abort the whole doctor run with an AttributeError
+    (R4 findings doctor-nondict-*). Callers still isinstance-guard each element.
+    """
+    if not isinstance(obj, dict):
+        return []
+    msg = obj.get("message")
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content", [])
+    return content if isinstance(content, list) else []
+
+
 def _count_corrupted_tool_use(path: Path) -> int:
     """Count corrupted tool_use blocks in a session file."""
     import json as _json
     count = 0
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -504,11 +521,11 @@ def _count_corrupted_tool_use(path: Path) -> int:
                 obj = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
-            content = obj.get("message", {}).get("content", [])
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if block.get("type") == "tool_use" and len(block.get("name", "")) > 200:
+            for block in _raw_content_blocks(obj):
+                if not isinstance(block, dict):
+                    continue
+                name = block.get("name", "")
+                if block.get("type") == "tool_use" and isinstance(name, str) and len(name) > 200:
                     count += 1
     return count
 
@@ -595,16 +612,14 @@ def fix_corrupted_tool_use() -> str:
             except json.JSONDecodeError:
                 continue
 
-            content = obj.get("message", {}).get("content", [])
-            if not isinstance(content, list):
-                continue
-
             changed = False
-            for block in content:
+            for block in _raw_content_blocks(obj):
+                if not isinstance(block, dict):
+                    continue
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
-                if len(name) <= 200:
+                if not isinstance(name, str) or len(name) <= 200:
                     continue
 
                 # Parse corrupted name: 'ToolName" key1="val1" key2="val2"...'
@@ -731,7 +746,7 @@ def _count_orphaned_tool_results(path: Path) -> int:
     tool_use_ids: set[str] = set()
     all_results: list[str] = []
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -740,10 +755,9 @@ def _count_orphaned_tool_results(path: Path) -> int:
                 obj = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
-            content = obj.get("message", {}).get("content", [])
-            if not isinstance(content, list):
-                continue
-            for block in content:
+            for block in _raw_content_blocks(obj):
+                if not isinstance(block, dict):
+                    continue
                 if block.get("type") == "tool_use":
                     use_id = block.get("id", "")
                     if use_id:

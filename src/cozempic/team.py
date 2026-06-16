@@ -23,6 +23,22 @@ from pathlib import Path
 from .types import Message
 
 
+def _sfield(d: dict, *keys: str, default: str = "") -> str:
+    """First present-and-non-empty STRING value among *keys in untrusted tool-input
+    dict *d, else *default. Tool-input fields in poisoned/malformed JSONL can be any
+    JSON type — a non-str prompt crashes ``prompt[:200]`` (TypeError 'int' not
+    subscriptable) and an unhashable list/dict crashes ``task_id in seen`` / dict-key
+    use (TypeError). Every string/slice/.strip()/dict-key read in extract_team_state
+    routes through this so a single bad field can't crash the extractor and wedge the
+    guard into a respawn storm (R4 finding team-input-field-crash). Mirrors the
+    ``x or y or default`` semantics the call sites relied on (skips empty strings)."""
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return default
+
+
 @dataclass
 class SubagentInfo:
     """Information about a spawned subagent (Task tool call)."""
@@ -626,21 +642,28 @@ def extract_team_state(messages: list[Message]) -> TeamState:
 
             # ── Tool use blocks ──────────────────────────────────────
             if block_type == "tool_use":
+                # Coerce name/id to str: both are used as dict keys / in comparisons
+                # below; an unhashable list/dict value (poisoned JSONL) would crash
+                # `tool_use_id_to_name[tool_use_id]` (R4 team-input-field-crash).
                 name = block.get("name", "")
+                if not isinstance(name, str):
+                    name = ""
                 inp = block.get("input", {})
                 if not isinstance(inp, dict):  # tool 'input' can be a non-dict in malformed JSONL
                     inp = {}
                 tool_use_id = block.get("id", "")
+                if not isinstance(tool_use_id, str):
+                    tool_use_id = ""
 
                 if tool_use_id and name:
                     tool_use_id_to_name[tool_use_id] = name
 
                 # Task tool = subagent spawn
                 if name == "Task":
-                    description = inp.get("description", "")
-                    subagent_type = inp.get("subagent_type", "")
-                    prompt = inp.get("prompt", "")[:200]
-                    resume_id = inp.get("resume", "")
+                    description = _sfield(inp, "description")
+                    subagent_type = _sfield(inp, "subagent_type")
+                    prompt = _sfield(inp, "prompt")[:200]
+                    resume_id = _sfield(inp, "resume")
                     bg = inp.get("run_in_background", False)
 
                     # Use tool_use_id as temporary key until we get agent_id
@@ -661,14 +684,14 @@ def extract_team_state(messages: list[Message]) -> TeamState:
 
                 # TaskOutput = checking on background agent
                 elif name == "TaskOutput":
-                    task_id = inp.get("task_id", "")
+                    task_id = _sfield(inp, "task_id")
                     if task_id and task_id in seen_subagents:
                         # Still running, waiting for result
                         pass
 
                 # TaskStop = stopping a background agent
                 elif name == "TaskStop":
-                    task_id = inp.get("task_id", "")
+                    task_id = _sfield(inp, "task_id")
                     if task_id and task_id in seen_subagents:
                         seen_subagents[task_id].status = "stopped"
 
@@ -679,14 +702,16 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                     # kept as a fallback for backward compat. Prefer the real key
                     # so a transcript carrying BOTH (rollout overlap) uses the
                     # authoritative "team_name", not the stale legacy "name".
-                    state.team_name = inp.get("team_name") or inp.get("name") or state.team_name
+                    state.team_name = _sfield(inp, "team_name", "name") or state.team_name
                     _tms = inp.get("teammates", [])
                     for tm in (_tms if isinstance(_tms, list) else []):
                         if not isinstance(tm, dict):  # teammates array can hold a non-dict
                             continue
-                        agent_id = tm.get("agentId", tm.get("agent_id", ""))
-                        tm_name = tm.get("name", agent_id)
-                        role = tm.get("role", tm.get("description", ""))
+                        # Coerce to str: agent_id is a dict key (seen_teammates),
+                        # tm_name/role are rendered — non-str/unhashable values crash.
+                        agent_id = _sfield(tm, "agentId", "agent_id")
+                        tm_name = _sfield(tm, "name") or agent_id
+                        role = _sfield(tm, "role", "description")
                         if agent_id:
                             seen_teammates[agent_id] = TeammateInfo(
                                 agent_id=agent_id,
@@ -703,8 +728,8 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 # create a placeholder entry now so the spawn is immediately
                 # visible; the result handler below upgrades to the real agentId.
                 elif name == "Agent":
-                    agent_name = inp.get("name", "")
-                    agent_role = inp.get("role", inp.get("description", ""))
+                    agent_name = _sfield(inp, "name")
+                    agent_role = _sfield(inp, "role", "description")
                     # Placeholder key: use tool_use_id if available, else name.
                     # The result handler re-keys by the real agentId.
                     placeholder = tool_use_id or agent_name or f"agent-{len(seen_teammates)}"
@@ -730,7 +755,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 # uses suffixed ids (alice@myteam), so a genuine disband still lifts
                 # the wedge; only bare-id inline rosters fall back to the safe wedge.
                 elif name == "TeamDelete":
-                    _del_team = (inp.get("team_name") or inp.get("name") or "").strip()
+                    _del_team = _sfield(inp, "team_name", "name").strip()
                     _suffix = "@" + _del_team
                     if _del_team:
                         for _tm in seen_teammates.values():
@@ -739,36 +764,39 @@ def extract_team_state(messages: list[Message]) -> TeamState:
 
                 # TaskCreate (shared todo list)
                 elif name == "TaskCreate":
-                    task_id = inp.get("taskId", inp.get("id", str(len(seen_tasks))))
-                    subject = inp.get("subject", inp.get("title", ""))
+                    task_id = _sfield(inp, "taskId", "id") or str(len(seen_tasks))
+                    subject = _sfield(inp, "subject", "title")
                     seen_tasks[task_id] = TaskInfo(
                         task_id=task_id,
                         subject=subject,
                         status="pending",
-                        owner=inp.get("owner", ""),
-                        description=inp.get("description", ""),
+                        owner=_sfield(inp, "owner"),
+                        description=_sfield(inp, "description"),
                     )
 
                 # TaskUpdate (shared todo list)
                 elif name == "TaskUpdate":
-                    task_id = inp.get("taskId", inp.get("id", ""))
+                    task_id = _sfield(inp, "taskId", "id")
                     if task_id in seen_tasks:
-                        if inp.get("status"):
-                            seen_tasks[task_id].status = inp["status"]
-                        if inp.get("owner"):
-                            seen_tasks[task_id].owner = inp["owner"]
-                        if inp.get("subject"):
-                            seen_tasks[task_id].subject = inp["subject"]
+                        if _sfield(inp, "status"):
+                            seen_tasks[task_id].status = _sfield(inp, "status")
+                        if _sfield(inp, "owner"):
+                            seen_tasks[task_id].owner = _sfield(inp, "owner")
+                        if _sfield(inp, "subject"):
+                            seen_tasks[task_id].subject = _sfield(inp, "subject")
                     else:
                         seen_tasks[task_id] = TaskInfo(
                             task_id=task_id,
-                            subject=inp.get("subject", ""),
-                            status=inp.get("status", "unknown"),
-                            owner=inp.get("owner", ""),
+                            subject=_sfield(inp, "subject"),
+                            status=_sfield(inp, "status", default="unknown"),
+                            owner=_sfield(inp, "owner"),
                         )
 
                 elif name in ("SendMessage", "TeamMessage"):
-                    target = inp.get("to", inp.get("agentId", ""))
+                    # _sfield → str: `to` can be a list (multi-recipient) or other
+                    # non-hashable in poisoned JSONL; used as a dict key below, an
+                    # unhashable value crashes (R4 team-input-field-crash).
+                    target = _sfield(inp, "to", "agentId")
                     # Resolve bare name to agentId (P0-C): SendMessage carries a
                     # bare name ("alice") but seen_teammates is keyed by full
                     # agentId ("alice@myteam"). The _name_to_agent_id index bridges
@@ -781,6 +809,8 @@ def extract_team_state(messages: list[Message]) -> TeamState:
             # ── Tool result blocks ───────────────────────────────────
             elif block_type == "tool_result":
                 tool_use_id = block.get("tool_use_id", "")
+                if not isinstance(tool_use_id, str):  # dict-key use below
+                    tool_use_id = ""
                 tool_name = tool_use_id_to_name.get(tool_use_id, "")
 
                 # Task tool result = subagent finished, capture result

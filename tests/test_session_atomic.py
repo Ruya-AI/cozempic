@@ -200,20 +200,39 @@ class TestSnapshotAndAppend:
         for p in poison:
             assert p in raw, f"poison line not preserved on save: {p}"
 
-    def test_invalid_utf8_aborts_not_corrupts(self, tmp_path):
-        """Mission-critical: a non-UTF-8 byte on the WRITE path must raise (safe
-        abort, file untouched) — NOT be silently rewritten to U+FFFD and saved.
-        Regression: load_messages_and_snapshot used errors='replace'."""
+    def test_invalid_utf8_roundtrips_losslessly_not_corrupts_not_aborts(self, tmp_path):
+        """Mission-critical (R4): a non-UTF-8 byte must neither ABORT the prune
+        (the round-3 strict-decode behavior, which left the guard permanently inert
+        on any session with one stray byte) NOR be silently rewritten to U+FFFD
+        (the errors='replace' corruption). surrogateescape round-trips the exact
+        bytes losslessly while letting the prune proceed."""
         jsonl = tmp_path / "bad.jsonl"
         good = b'{"type":"user","message":{"role":"user","content":"keep"}}\n'
-        jsonl.write_bytes(good + b'{"type":"user","message":{"role":"user","content":"raw \xff byte"}}\n')
-        before = jsonl.read_bytes()
-        with pytest.raises(UnicodeDecodeError):
-            load_messages_and_snapshot(jsonl)
-        assert jsonl.read_bytes() == before, "file must be byte-untouched on a decode abort"
-        # And the strict load_messages agrees (both abort on the same input).
-        with pytest.raises(UnicodeDecodeError):
-            load_messages(jsonl)
+        # (a) bad byte INSIDE a JSON string value — loads as a surrogate, content
+        # survives a load->save->load round-trip identically.
+        in_string = b'{"type":"user","message":{"role":"user","content":"raw \xff byte"}}\n'
+        # (b) bad byte OUTSIDE a string (structural) — json.loads fails, wrapped as
+        # _raw and written back BYTE-FOR-BYTE through the surrogateescape save.
+        structural = b'{"type":"user"\xfe,"message":{"role":"user","content":"x"}}\n'
+        jsonl.write_bytes(good + in_string + structural)
+
+        # No abort — load proceeds.
+        messages, snap = load_messages_and_snapshot(jsonl)
+        assert len(messages) == 3
+        # The structural line round-trips as an opaque _raw wrapper (no consumer
+        # sees a non-dict; preserved verbatim on save).
+        assert messages[2][1].get("_parse_error") is True
+
+        # Save and reload: content of the in-string line is preserved logically,
+        # and the structural line's exact bytes survive.
+        save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+        after = jsonl.read_bytes()
+        assert b'\xfe' in after, "structural bad byte must survive byte-for-byte via _raw"
+        reloaded = load_messages(jsonl)
+        assert len(reloaded) == 3
+        assert reloaded[0][1]["message"]["content"] == "keep"
+        # in-string byte decodes back to the same surrogate it loaded as.
+        assert reloaded[1][1]["message"]["content"].encode("utf-8", "surrogateescape") == b"raw \xff byte"
 
     def test_load_and_snapshot_no_toctou_duplication(self, tmp_path):
         """Read-once: a line appended AFTER load_messages_and_snapshot must be
