@@ -776,8 +776,7 @@ def start_guard(
                         )
                         running_teammates = sum(
                             1 for t in (getattr(state, "teammates", None) or [])
-                            if (t.status or "").strip().lower()
-                            not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+                            if _is_active_teammate(t)
                         )
                         running_count = running_subagents + running_teammates
                         worst_case_min = (
@@ -2449,18 +2448,26 @@ def _is_active_subagent(s) -> bool:
     return (s.status or "").strip().lower() not in _STATUS_TERMINAL
 
 
+def _is_active_teammate(t) -> bool:
+    """Return True if a teammate entry is actively working.
+
+    Uses the DENYLIST predicate: NOT in (_STATUS_TERMINAL | _TEAMMATE_BENIGN).
+    Mirrors the safe_to_reload teammate check and _compute_agents_active.
+    """
+    return (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+
+
 def _hard_cap_exit_desc(state) -> str:
     """Return a concise description of what is still active at hard-cap exit.
 
-    Mirrors the soft-K block active_desc logic (guard.py:788-793) so the
-    hard-cap message accurately names the active population (subagent(s),
-    teammate(s), or both) rather than unconditionally saying 'Subagents'.
-    Extracted for testability — Q-B (lead decision).
+    Mirrors the soft-K block active_desc logic so the hard-cap message accurately
+    names the active population (subagent(s), teammate(s), or both) rather than
+    unconditionally saying 'Subagents'.  Extracted for testability — Q-B.
     """
-    hc_subagents = sum(1 for s in (state.subagents or []) if _is_active_subagent(s))
+    hc_subagents = sum(1 for s in state.subagents if _is_active_subagent(s))
     hc_teammates = sum(
         1 for t in (getattr(state, "teammates", None) or [])
-        if (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+        if _is_active_teammate(t)
     )
     parts = []
     if hc_subagents:
@@ -2478,7 +2485,7 @@ def _compute_agents_active(state) -> bool:
     or off-vocabulary working statuses (e.g. None, '', 'busy', 'in-progress').
 
     Subagents: active when NOT in _STATUS_TERMINAL (via _is_active_subagent).
-    Teammates: active when NOT in (_STATUS_TERMINAL | _TEAMMATE_BENIGN).
+    Teammates: active when NOT in (_STATUS_TERMINAL | _TEAMMATE_BENIGN) (via _is_active_teammate).
 
     Called from the daemon loop (guard.py:988) and from tests.
     """
@@ -2487,7 +2494,7 @@ def _compute_agents_active(state) -> bool:
     if any(_is_active_subagent(s) for s in state.subagents):  # always a list
         return True
     return any(
-        (t.status or "").strip().lower() not in (_STATUS_TERMINAL | _TEAMMATE_BENIGN)
+        _is_active_teammate(t)
         for t in (getattr(state, "teammates", None) or [])
     )
 
