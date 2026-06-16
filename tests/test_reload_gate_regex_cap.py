@@ -234,11 +234,17 @@ def _tc(idx: int, team_name: str, teammate_name: str, agent_id: str) -> tuple:
     return (idx, d, 200)
 
 
-def _tc_result(idx: int, team_name: str) -> tuple:
-    """3-tuple for the TeamCreate tool_result."""
+def _tc_result(idx: int, team_name: str, tc_idx: int | None = None) -> tuple:
+    """3-tuple for the TeamCreate tool_result.
+
+    tc_idx: the idx used for the matching _tc() call.  Defaults to idx-1 for
+    backward compat with existing consecutive-call patterns, but explicit is
+    preferred to avoid arithmetic coupling when the two calls are not adjacent.
+    """
+    ref_idx = tc_idx if tc_idx is not None else idx - 1
     text = f"Team '{team_name}' created."
     d = {"message": {"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": f"tc-{idx - 1}", "content": text}
+        {"type": "tool_result", "tool_use_id": f"tc-{ref_idx}", "content": text}
     ]}}
     return (idx, d, len(text))
 
@@ -274,7 +280,7 @@ class TestExtractTeamStateTeammateMsgCap(unittest.TestCase):
         """
         return [
             _tc(0, "myteam", "worker", "worker@myteam"),
-            _tc_result(1, "myteam"),
+            _tc_result(1, "myteam", tc_idx=0),  # explicit: references _tc(0, ...)
             # SendMessage to worker → marks it as "running" in seen_teammates
             _tu(2, "sm-1", "SendMessage", {"to": "worker", "message": "start"}),
             _tr(3, "sm-1", "delivered"),
