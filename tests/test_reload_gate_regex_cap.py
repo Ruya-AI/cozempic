@@ -648,6 +648,31 @@ class TestTNIDREAttributeTolerance(unittest.TestCase):
             f"got result={result}"
         )
 
+    def test_attributed_status_clears_agent(self):
+        """_TN_STATUS_RE must match <status priority="high">X</status> (attribute-tolerant).
+
+        SIBLING of _TN_ID_RE's attribute-tolerance — same "two parsers agree on the same
+        bytes" contract; team.py's _TASK_NOTIF_STATUS_RE is already tolerant.
+
+        RED at base (0bab302): guard.py strict r"<status>…" returns [] for an attributed
+        <status> → completion not recorded → agent not cleared → assertFalse FAILS.
+        GREEN after the fold: attribute-tolerant pattern finds "completed" → cleared.
+        """
+        notif_attr_status = (
+            "<task-notification>"
+            "<task-id>agent-xyz</task-id>"
+            '<status priority="high">completed</status>'
+            "<result>done</result>"
+            "</task-notification>"
+        )
+        result = self._detect(notif_attr_status)
+        self.assertFalse(
+            result.get("agent"),
+            "detect_in_flight must clear the agent when <status> carries XML "
+            "attributes — _TN_STATUS_RE must be attribute-tolerant like team.py's "
+            f"_TASK_NOTIF_STATUS_RE; got result={result}"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

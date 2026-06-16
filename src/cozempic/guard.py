@@ -2420,7 +2420,12 @@ from ._constants import _RELOAD_GATE_SCAN_CAP  # noqa: E402 — after regex bloc
 # The strict form silently drops any notification whose <task-id> carries an XML
 # attribute → launch stays "in-flight" → gate over-defers indefinitely.
 _TN_ID_RE = re.compile(r"<task-id(?:\s[^>]*)?>([^<]+)</task-id>", re.IGNORECASE)
-_TN_STATUS_RE = re.compile(r"<status>([^<]+)</status>", re.IGNORECASE)
+# Attribute-tolerant: matches <status>X</status> and <status priority="high">X</status>.
+# SIBLING of _TN_ID_RE above — same "two parsers agree on the same bytes" contract,
+# parity with team.py _TASK_NOTIF_STATUS_RE (r"<status(?:\s[^>]*)?>…"). The strict form
+# silently dropped any notification whose <status> carried an attribute → completion
+# not recorded → launch stays "in-flight" → gate over-defers indefinitely.
+_TN_STATUS_RE = re.compile(r"<status(?:\s[^>]*)?>([^<]+)</status>", re.IGNORECASE)
 # Terminal completion vocabulary — broadened so a harness phrasing skew (success/
 # done/finished vs completed) can't pin a finished task "in-flight" forever.
 _INFLIGHT_DONE = {"completed", "complete", "failed", "cancelled", "canceled",
