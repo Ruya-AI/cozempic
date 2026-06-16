@@ -545,5 +545,110 @@ class TestScanCapSharedConstant(unittest.TestCase):
         )
 
 
+class TestTNIDREAttributeTolerance(unittest.TestCase):
+    """guard.py _TN_ID_RE must tolerate XML attributes on the <task-id> tag.
+
+    team.py uses `r"<task-id(?:\\s[^>]*)?>([^<]+)</task-id>"` (attribute-tolerant).
+    guard.py used the strict `r"<task-id>([^<]+)</task-id>"` which silently misses
+    notifications with attributes like `<task-id xmlns="ns">X</task-id>`.
+
+    Divergence: a notification the harness generates with an attributed <task-id>
+    would clear the subagent via team.py's extract_team_state but NOT via guard.py's
+    detect_in_flight — the launch stays "in-flight", over-deferring the reload
+    indefinitely (never SIGKILL, but wedges the gate).
+
+    RED at base (cc292cb / 3eac817 / 22feb3b): _TN_ID_RE = r"<task-id>…"
+    → findall on '<task-id xmlns="ns">agent-xyz</task-id>' returns [] → agent not
+    cleared → assertFalse(result.get("agent")) FAILS.
+
+    GREEN after P0-B: _TN_ID_RE = r"<task-id(?:\\s[^>]*)?>…" → findall returns
+    ["agent-xyz"] → agent cleared → assertFalse passes.
+    """
+
+    def _detect(self, raw_text: str) -> dict:
+        from cozempic.guard import detect_in_flight
+        # Full sequence: Agent launch → spawn-ack (populates launched_agent)
+        # → task-notification with attributed <task-id> (must clear it).
+        msgs = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu-b1", "name": "Agent",
+                         "input": {"name": "finder-p1"}}
+                    ],
+                }
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu-b1",
+                         "content": "Async agent launched successfully. agentId: agent-xyz"}
+                    ],
+                }
+            },
+            {"type": "user", "content": raw_text},
+        ]
+        return detect_in_flight(msgs)
+
+    def test_plain_task_id_clears_agent(self):
+        """Sanity check: plain <task-id> (no attributes) clears the agent."""
+        notif = (
+            "<task-notification>"
+            "<task-id>agent-xyz</task-id>"
+            "<status>completed</status>"
+            "<result>done</result>"
+            "</task-notification>"
+        )
+        result = self._detect(notif)
+        self.assertFalse(
+            result.get("agent"),
+            f"Plain <task-id> must clear the agent; got result={result}"
+        )
+
+    def test_attributed_task_id_clears_agent(self):
+        """_TN_ID_RE must match <task-id xmlns="ns">X</task-id> (attribute-tolerant).
+
+        RED at base: guard.py strict pattern r"<task-id>…" returns [] for
+        '<task-id xmlns="ns">agent-xyz</task-id>' → agent not cleared → assertFalse FAILS.
+        GREEN after P0-B: attribute-tolerant pattern finds "agent-xyz" → cleared.
+        """
+        notif_with_attr = (
+            "<task-notification>"
+            '<task-id xmlns="ns">agent-xyz</task-id>'
+            "<status>completed</status>"
+            "<result>done</result>"
+            "</task-notification>"
+        )
+        result = self._detect(notif_with_attr)
+        self.assertFalse(
+            result.get("agent"),
+            "detect_in_flight must clear the agent when <task-id> carries XML "
+            "attributes — _TN_ID_RE must be attribute-tolerant like team.py's "
+            "_TASK_NOTIF_ID_RE; "
+            f"got result={result}"
+        )
+
+    def test_task_id_with_whitespace_attribute_clears_agent(self):
+        """_TN_ID_RE must also match <task-id  data-x="1">X</task-id> (leading space)."""
+        notif_space_attr = (
+            "<task-notification>"
+            '<task-id  data-x="1">agent-xyz</task-id>'
+            "<status>completed</status>"
+            "<result>done</result>"
+            "</task-notification>"
+        )
+        result = self._detect(notif_space_attr)
+        self.assertFalse(
+            result.get("agent"),
+            "detect_in_flight must clear agent for <task-id> with leading-space "
+            "attribute; "
+            f"got result={result}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
