@@ -109,7 +109,6 @@ class TestPersistedTokensSavedCallSite(unittest.TestCase):
         from cozempic.team import TeamState
 
         pruned_msgs = [(0, {"type": "user"}, 0)]  # post-prune: 0 tokens
-        snap_mock = MagicMock()
         # pre=100_000, post=0 — maximal prune; the BUG drops savings to 0
         totals = iter([100_000, 0])
 
@@ -122,12 +121,11 @@ class TestPersistedTokensSavedCallSite(unittest.TestCase):
         with (
             patch("cozempic.guard._guard_tmp_root", return_value=self.scratch),
             patch("cozempic.guard.load_messages_and_snapshot",
-                  return_value=([(0, {"type": "user"}, 100_000)], snap_mock)),
+                  return_value=([(0, {"type": "user"}, 100_000)], MagicMock())),
             patch("cozempic.guard.load_messages",
                   return_value=[(0, {"type": "user"}, 100_000)]),
             patch("cozempic.guard.prune_with_team_protect",
                   return_value=(pruned_msgs, {}, TeamState())),
-            patch("cozempic.guard.snapshot_session", return_value=snap_mock),
             patch("cozempic.tokens.estimate_session_tokens", side_effect=_est),
             patch("cozempic.tokens.calibrate_ratio", return_value=0.5),
         ):
@@ -145,16 +143,12 @@ class TestPersistedTokensSavedCallSite(unittest.TestCase):
                              "when auto_reload=False")
 
         # Now invoke the deferred writer — patch the I/O it touches:
-        #   _PruneLock (imported from .session in guard.py)
+        #   _PruneLock: MagicMock supports context manager protocol natively
         #   save_messages (imported directly in guard.py)
         #   record_savings (lazy-imported inside _record_persisted_savings from .helpers)
         mock_record = MagicMock()
-        lock_cm = MagicMock()
-        lock_cm.__enter__ = MagicMock(return_value=None)
-        lock_cm.__exit__ = MagicMock(return_value=False)
-
         with (
-            patch("cozempic.guard._PruneLock", return_value=lock_cm),
+            patch("cozempic.guard._PruneLock"),
             patch("cozempic.guard.save_messages", return_value=None),
             patch("cozempic.guard.cleanup_old_backups"),
             patch("cozempic.helpers.record_savings", mock_record),
@@ -163,10 +157,8 @@ class TestPersistedTokensSavedCallSite(unittest.TestCase):
 
         # RED at base: mock_record NOT called (tokens_saved computed as 0)
         # GREEN after fix: mock_record called once with total_tokens=100_000
-        mock_record.assert_called_once()
-        _, kwargs = mock_record.call_args
-        self.assertEqual(kwargs.get("total_tokens"), 100_000,
-                         "record_savings must be called with total_tokens == pre-prune total")
+        from unittest.mock import ANY
+        mock_record.assert_called_once_with(100_000, total_tokens=100_000, turn_count=ANY)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
