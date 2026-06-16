@@ -268,12 +268,18 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         """
         from cozempic.reload_lock import _slug_for as rl_slug
         from cozempic.spawn_lock import _slug_for as sl_slug
+        from cozempic.guard import _reload_armed_path
 
         # Non-UUID uppercase input: 12+ chars, contains upper letters.
         raw = "ABCD1234EFGH-XX"
 
-        # guard._reload_armed_path inline formula (re.sub + .lower(), truncate 12)
-        guard_slug = re.sub(r"[^a-z0-9_-]", "_", raw.lower())[:12]
+        # Call the REAL guard function — not an inlined copy of its formula.
+        # If _reload_armed_path drifts (different regex, truncation, path-stripping),
+        # this test will catch it. An inline formula copy would not.
+        _PREFIX = "cozempic_reload_armed_"
+        _SUFFIX = ".json"
+        armed_path = _reload_armed_path(raw)
+        guard_slug = armed_path.name[len(_PREFIX):-len(_SUFFIX)]
 
         rl = rl_slug(raw)
         sl = sl_slug(raw)
