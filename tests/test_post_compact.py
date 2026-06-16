@@ -225,26 +225,32 @@ class TestPostCompactStrategy1Isolation(unittest.TestCase):
         )
 
 class TestCorrectSlugUsesCwdToProjectSlug(unittest.TestCase):
-    """P0-C: inline _correct_slug in test helpers must use cwd_to_project_slug.
+    """Characterization of cwd_to_project_slug normpath behavior (post-P0-C).
 
-    The inline formula `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` used in 3 test-helper
-    sites does NOT apply os.path.normpath — trailing-slash inputs produce a trailing
-    "-" that mismatches the project dir name on disk and would cause test false-passes.
+    P0-C replaced 3 inline `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` helpers with
+    direct cwd_to_project_slug calls.  The canonical function applies normpath
+    before slug-ifying, so trailing-slash inputs are normalized correctly.
 
-    cwd_to_project_slug normalizes via normpath first → canonical slug.
+    This class holds a characterization test (not a behavioral RED/GREEN guard)
+    documenting the normpath contract the helpers now rely on.
     """
 
-    def test_test_helper_slug_matches_canonical_on_trailing_slash(self):
-        """Guard: cwd_to_project_slug (now used by all test helpers after P0-C) must
-        normalize trailing-slash inputs and NOT produce a trailing dash.
+    def test_cwd_to_project_slug_normalizes_trailing_slash(self):
+        """Characterization: cwd_to_project_slug strips trailing slashes via normpath.
 
-        RED at base commit `4b894d5` (before P0-C): the 3 test helpers used
-        `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` which produced "-Users-x-proj-" for a
-        trailing-slash input. After P0-C replaced them with cwd_to_project_slug, this
-        test asserts the canonical form is used (no trailing dash) everywhere.
+        P0-C replaced the 3 inline `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` helpers with
+        direct calls to cwd_to_project_slug.  The value of that swap is DRY + normpath-
+        correctness: the old inline formula produced "-Users-x-proj-" for trailing-slash
+        inputs (normpath not applied), while cwd_to_project_slug applies normpath first
+        and returns "-Users-x-proj".
 
-        Canonical determination:
-        - re.sub(r"[^a-zA-Z0-9]", "-", "/Users/x/proj/") → "-Users-x-proj-" (old, wrong)
+        This test characterizes the canonical behavior the helpers now rely on.  It is
+        NOT a behavioral RED/GREEN guard for the swap itself — cwd_to_project_slug is
+        production code that was already correct before P0-C; the swap's correctness is
+        verified by the diff (3 `re.sub` sites → `cwd_to_project_slug`), not by this test.
+
+        Canonical behavior:
+        - re.sub(r"[^a-zA-Z0-9]", "-", "/Users/x/proj/") → "-Users-x-proj-" (old inline, wrong)
         - cwd_to_project_slug("/Users/x/proj/")           → "-Users-x-proj"  (canonical)
         """
         slug = cwd_to_project_slug("/Users/x/proj/")
