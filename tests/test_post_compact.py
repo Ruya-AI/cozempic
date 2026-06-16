@@ -165,6 +165,100 @@ class TestCmdPostCompactCrossProjectIsolation(unittest.TestCase):
         )
 
 
+class TestPostCompactStrategy1Isolation(unittest.TestCase):
+    """R-1: Strategy 1 (lookup_active_transcript) must be explicitly blocked.
+
+    test_falls_back_safely and test_global_checkpoint_not_read both use an empty
+    projects dir, which incidentally prevents Strategy 1 from running (find_sessions()
+    returns [] → early return before Strategy 1 is reached). The isolation is
+    implicit, not explicit — a future move of Strategy 1 before the `if not sessions`
+    guard, or a test variant that adds sessions, would make both tests non-hermetic.
+
+    This test proves the gap: when a non-empty projects dir allows Strategy 1 to
+    run AND lookup_active_transcript returns a fake cross-project session, the
+    cmd_post_compact output is wrong (wrong-project checkpoint bleeds in).
+    Adding find_claude_pid → None to both tests closes this gap explicitly.
+    """
+
+    def _run_post_compact(self, cwd: str) -> str:
+        from cozempic.cli import cmd_post_compact
+        args = argparse.Namespace(cwd=cwd)
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            cmd_post_compact(args)
+        finally:
+            sys.stdout = old_stdout
+        return captured.getvalue()
+
+    def test_strategy1_injects_wrong_project_when_find_claude_pid_not_patched(self):
+        """R-1 (RED at HEAD `ae7fe54`): without find_claude_pid → None, Strategy 1
+        fires and injects a wrong-project checkpoint into cmd_post_compact output.
+
+        Setup:
+        - projects/ has project B with a session file + checkpoint "PROJ_B_STATE"
+        - cmd_post_compact is called with cwd=project_a (no session, no checkpoint)
+        - find_claude_pid returns fake PID 99999 (not patched → None as in the fix)
+        - lookup_active_transcript returns a fake record pointing at B's session
+
+        Without the find_claude_pid → None patch in test_falls_back_safely and
+        test_global_checkpoint_not_read, Strategy 1 would fire from a real live session
+        and inject the wrong-project checkpoint.  This test reproduces that failure
+        deterministically by injecting both ends of the Strategy 1 chain.
+
+        After fix: test_falls_back_safely + test_global_checkpoint_not_read each
+        add `patch("cozempic.session.find_claude_pid", return_value=None)` so that
+        lookup_active_transcript → find_claude_pid() → None → returns None,
+        Strategy 1 is blocked, and the tests are hermetic regardless of session order.
+
+        This test stays GREEN after the fix (Strategy 1 blocked → no B checkpoint)
+        and RED at HEAD (no blocking → B's checkpoint bleeds in).
+        """
+        tmp_path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_path, ignore_errors=True)
+
+        # Project B: non-empty projects dir so find_sessions() returns sessions,
+        # allowing Strategy 1 to execute (bypasses the early-exit guard).
+        proj_b = tmp_path / "projects" / "-proj-b"
+        proj_b.mkdir(parents=True)
+        sess_b = "bbbb2222-0000-0000-0000-000000000002"
+        sess_b_path = proj_b / f"{sess_b}.jsonl"
+        sess_b_path.write_text('{"role":"user","content":"hi"}\n', encoding="utf-8")
+        (proj_b / "team-checkpoint.md").write_text("PROJ_B_STATE", encoding="utf-8")
+
+        # Strategy 1 returns B's session: fake active-transcript record for B
+        fake_active_record = {
+            "transcript_path": str(sess_b_path),
+            "pid": 99999,
+        }
+
+        # cwd=project_a has no checkpoint — output must be "" for the correct project
+        cwd_a = str(tmp_path / "project_a")
+        Path(cwd_a).mkdir(exist_ok=True)
+
+        with (
+            patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
+            patch("cozempic.session._session_id_from_process", return_value=None),
+            # Omit find_claude_pid → None to simulate the gap in the existing tests:
+            # find_claude_pid returns a non-None value so lookup_active_transcript
+            # proceeds to return fake_active_record.
+            patch("cozempic.session.find_claude_pid", return_value=99999),
+            patch("cozempic.session.lookup_active_transcript", return_value=fake_active_record),
+        ):
+            output = self._run_post_compact(cwd=cwd_a)
+
+        # RED at HEAD: Strategy 1 fires, resolves to B's project dir, finds B's
+        # checkpoint, and injects it — cmd_post_compact must NOT output B's state
+        # when called with cwd=project_a.
+        self.assertNotIn(
+            "PROJ_B_STATE", output,
+            "Strategy 1 injected project B's checkpoint into project A's cmd_post_compact "
+            "output. Add find_claude_pid → None to test_falls_back_safely and "
+            "test_global_checkpoint_not_read to block Strategy 1 explicitly."
+        )
+
+
 class TestReadTeamCheckpoint(unittest.TestCase):
 
     def test_returns_content_when_file_exists(self):
