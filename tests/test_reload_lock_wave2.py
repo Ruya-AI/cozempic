@@ -300,15 +300,169 @@ class TestReloadLockSessionIdSanitization(unittest.TestCase):
         """
         from cozempic.reload_lock import _slug_for as rl_slug
         from cozempic.spawn_lock import _slug_for as sl_slug
+        from cozempic.guard import _reload_armed_path
 
         uuid = "f641174c-d784-4aab-8f29-3a1c2b456def"
         expected = "f641174c-d78"  # first 12 chars, all lowercase already
 
-        guard_slug = re.sub(r"[^a-z0-9_-]", "_", uuid.lower())[:12]
+        # Call the REAL guard function — not an inlined copy of its formula.
+        _PREFIX = "cozempic_reload_armed_"
+        _SUFFIX = ".json"
+        armed_path = _reload_armed_path(uuid)
+        guard_slug = armed_path.name[len(_PREFIX):-len(_SUFFIX)]
 
         self.assertEqual(rl_slug(uuid), expected)
         self.assertEqual(sl_slug(uuid), expected)
         self.assertEqual(guard_slug, expected)
+
+    # ── UUID invariance — production session_ids must be unaffected ───────────
+
+    def test_uuid_session_id_armed_path_invariant(self):
+        """Regression guard: _reload_armed_path filename is UNCHANGED for a UUID session_id.
+
+        UUIDs have no dots and no path separators, so Path(uuid).stem == uuid.
+        _slug_for(uuid) must produce the same result as the pre-fix inline formula
+        for any standard lowercase UUID, ensuring live armed-sentinels are not
+        orphaned on upgrade.
+        """
+        from cozempic.guard import _reload_armed_path
+        import re as _re
+
+        uuid = "f641174c-d784-4aab-8f29-3a1c2b456def"
+        # Pre-fix formula (the inline that was in guard before P0-A)
+        pre_fix_slug = _re.sub(r"[^a-z0-9_-]", "_", str(uuid).lower())[:12] or "session"
+
+        armed_path = _reload_armed_path(uuid)
+        _PREFIX = "cozempic_reload_armed_"
+        _SUFFIX = ".json"
+        post_fix_slug = armed_path.name[len(_PREFIX):-len(_SUFFIX)]
+
+        self.assertEqual(post_fix_slug, pre_fix_slug,
+            f"UUID session_id armed-path slug changed after fix: "
+            f"{pre_fix_slug!r} → {post_fix_slug!r}. "
+            "Live armed-sentinels would be orphaned on upgrade.")
+
+    # ── T1 — path-form session_id: _reload_armed_path must match _slug_for ───
+
+    def test_reload_armed_path_path_input_matches_slug_for(self):
+        """T1 (RED at HEAD): _reload_armed_path must use reload_lock._slug_for for path inputs.
+
+        At HEAD, _reload_armed_path inlines re.sub on the raw path string, producing
+        '_users_foo_m' for '/Users/foo/MySession-ABC.jsonl'. _slug_for extracts the
+        stem first, producing 'mysession-ab'. This is the split-brain XF-1 for path
+        inputs: the reload-lock and the armed sentinel live under different slugs.
+        """
+        from cozempic.guard import _reload_armed_path
+        from cozempic.reload_lock import _slug_for as rl_slug
+
+        path_input = '/Users/foo/MySession-ABC.jsonl'
+        armed_path = _reload_armed_path(path_input)
+        _PREFIX = "cozempic_reload_armed_"
+        _SUFFIX = ".json"
+        armed_slug = armed_path.name[len(_PREFIX):-len(_SUFFIX)]
+
+        self.assertEqual(armed_slug, rl_slug(path_input),
+            f"_reload_armed_path slug {armed_slug!r} != _slug_for slug "
+            f"{rl_slug(path_input)!r} for path input {path_input!r}")
+
+    # ── T2 — path-form session_id: _reload_ledger_path must match _slug_for ──
+
+    def test_reload_ledger_path_path_input_matches_slug_for(self):
+        """T2 (RED at HEAD): _reload_ledger_path must use reload_lock._slug_for for path inputs.
+
+        Same divergence as T1 but on the ledger path producer.
+        """
+        from cozempic.guard import _reload_ledger_path
+        from cozempic.reload_lock import _slug_for as rl_slug
+
+        path_input = '/Users/foo/MySession-ABC.jsonl'
+        ledger_path = _reload_ledger_path(path_input, Path('/dummy'))
+        _PREFIX = "cozempic_reload_"
+        _SUFFIX = ".history"
+        ledger_slug = ledger_path.name[len(_PREFIX):-len(_SUFFIX)]
+
+        self.assertEqual(ledger_slug, rl_slug(path_input),
+            f"_reload_ledger_path slug {ledger_slug!r} != _slug_for slug "
+            f"{rl_slug(path_input)!r} for path input {path_input!r}")
+
+    # ── T3 — empty/None session: fallback must be 'default', not 'session' ───
+
+    def test_reload_armed_path_empty_session_uses_default_slug(self):
+        """T3 (RED at HEAD): _reload_armed_path(None, None) must produce slug 'default'.
+
+        At HEAD, the fallback is 'session' (inline formula's or "session").
+        _slug_for("") returns "default". The mismatch means the armed sentinel
+        and the reload sentinel target different conceptual session slots when
+        both have None/empty session_id.
+        """
+        from cozempic.guard import _reload_armed_path
+
+        armed_path = _reload_armed_path(None, None)
+        self.assertIn("default", armed_path.name,
+            f"Expected 'default' in armed path for None session, "
+            f"got: {armed_path.name!r}")
+        self.assertNotIn("session", armed_path.name,
+            f"Expected 'session' fallback to be replaced by 'default', "
+            f"got: {armed_path.name!r}")
+
+    # ── T8 — armed + ledger slugs must agree with each other for path input ──
+
+    def test_reload_armed_ledger_parity(self):
+        """T8 (RED at HEAD): armed and ledger slugs must agree for path-form session_id.
+
+        Both functions inline the same (broken) formula — both produce '_users_foo_m'
+        for the path input, while _slug_for produces 'mysession-ab'. After P0-A both
+        call _slug_for, so they agree with each other AND with the lock.
+        """
+        from cozempic.guard import _reload_armed_path, _reload_ledger_path
+        from cozempic.reload_lock import _slug_for as rl_slug
+
+        path_input = '/Users/foo/MySession-ABC.jsonl'
+        armed_path = _reload_armed_path(path_input)
+        ledger_path = _reload_ledger_path(path_input, Path('/dummy'))
+
+        armed_slug = armed_path.name[len("cozempic_reload_armed_"):-len(".json")]
+        ledger_slug = ledger_path.name[len("cozempic_reload_"):-len(".history")]
+        expected_slug = rl_slug(path_input)
+
+        self.assertEqual(armed_slug, expected_slug,
+            f"armed slug {armed_slug!r} != rl_slug {expected_slug!r}")
+        self.assertEqual(ledger_slug, expected_slug,
+            f"ledger slug {ledger_slug!r} != rl_slug {expected_slug!r}")
+        self.assertEqual(armed_slug, ledger_slug,
+            f"armed slug {armed_slug!r} != ledger slug {ledger_slug!r}")
+
+    # ── Regression guard: path-branch uppercase _slug_for ────────────────────
+
+    def test_slug_for_path_branch_uppercase_stem(self):
+        """Regression guard: _slug_for with an uppercase-stem path must lowercase
+        AFTER stem extraction.
+
+        A refactor that moves .lower() to BEFORE Path().stem would leave the
+        uppercase stem un-lowercased, producing 'ABCDEF123456' instead of
+        'abcdef123456' — the XF-1 regression for path inputs. This test is
+        GREEN at HEAD (the code is correct) and guards against future ordering
+        regressions.
+        """
+        from cozempic.reload_lock import _slug_for
+        slug = _slug_for('/Users/foo/ABCDEF123456.jsonl')
+        self.assertEqual(slug, 'abcdef123456')
+        self.assertEqual(slug, slug.lower(), "Slug must be fully lowercase")
+
+    # ── T: parity test for _reload_ledger_path ───────────────────────────────
+
+    def test_slug_parity_ledger_path_matches_reload_lock(self):
+        """_reload_ledger_path must use the same slug as reload_lock._slug_for."""
+        from cozempic.guard import _reload_ledger_path
+        from cozempic.reload_lock import _slug_for as rl_slug
+
+        raw = "ABCD1234EFGH-XX"
+        ledger_path = _reload_ledger_path(raw, Path("/tmp/ignored.jsonl"))
+        _PREFIX = "cozempic_reload_"
+        _SUFFIX = ".history"
+        ledger_slug = ledger_path.name[len(_PREFIX):-len(_SUFFIX)]
+        self.assertEqual(ledger_slug, rl_slug(raw),
+            f"ledger slug {ledger_slug!r} != rl_slug {rl_slug(raw)!r} for {raw!r}")
 
 
 class TestReloadLockProcessAlive(unittest.TestCase):

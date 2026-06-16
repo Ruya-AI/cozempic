@@ -2755,8 +2755,9 @@ def safe_to_reload(team_state, messages, session_path) -> tuple[bool, str]:
 # precondition). `cozempic reload` clears the sentinel (user took control).
 # Shared by guard (write) and cli `nudge` (read/warn).
 def _reload_armed_path(session_id: str | None, session_path: Path | None = None) -> Path:
-    raw = (session_id or (session_path.stem if session_path else None) or "session")
-    slug = re.sub(r"[^a-z0-9_-]", "_", str(raw).lower())[:12] or "session"
+    from .reload_lock import _slug_for as _rl_slug_for  # lazy — matches guard.py:2233 pattern
+    raw = session_id or (session_path.stem if session_path else None) or None
+    slug = _rl_slug_for(raw) if raw else "default"
     return _guard_tmp_root() / f"cozempic_reload_armed_{slug}.json"
 
 
@@ -2837,8 +2838,9 @@ def clear_armed(session_id, session_path: Path | None = None) -> None:
 
 
 def _reload_ledger_path(session_id: str | None, session_path: Path) -> Path:
-    raw = (session_id or session_path.stem or "session")
-    slug = re.sub(r"[^a-z0-9_-]", "_", raw.lower())[:12] or "session"
+    from .reload_lock import _slug_for as _rl_slug_for  # lazy — matches guard.py:2233 pattern
+    raw = session_id or session_path.stem or None
+    slug = _rl_slug_for(raw) if raw else "default"
     return _guard_tmp_root() / f"cozempic_reload_{slug}.history"
 
 
