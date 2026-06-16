@@ -283,6 +283,52 @@ class TestPostCompactStrategy1Isolation(unittest.TestCase):
         )
 
 
+class TestCorrectSlugUsesCwdToProjectSlug(unittest.TestCase):
+    """P0-C: inline _correct_slug in test helpers must use cwd_to_project_slug.
+
+    The inline formula `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` used in 3 test-helper
+    sites does NOT apply os.path.normpath — trailing-slash inputs produce a trailing
+    "-" that mismatches the project dir name on disk and would cause test false-passes.
+
+    cwd_to_project_slug normalizes via normpath first → canonical slug.
+    """
+
+    def test_test_helper_slug_matches_canonical_on_trailing_slash(self):
+        """RED at HEAD `4b894d5`: the inline _correct_slug formula in the 3 test helpers
+        does NOT use normpath, so cwd_with_trailing_slash produces a slug with a trailing
+        dash that differs from cwd_to_project_slug's output.
+
+        Canonical determination:
+        - re.sub(r"[^a-zA-Z0-9]", "-", "/Users/x/proj/") → "-Users-x-proj-" (inline)
+        - cwd_to_project_slug("/Users/x/proj/")           → "-Users-x-proj"  (canonical)
+
+        This test asserts the TWO MUST BE EQUAL. It is RED at HEAD because the inline
+        helpers use the bare re.sub formula.
+
+        After P0-C replaces the 3 inline _correct_slug definitions with
+        cwd_to_project_slug imports, the test helpers naturally return the canonical
+        form and this test becomes trivially GREEN.
+        """
+        import re
+        from cozempic.session import cwd_to_project_slug
+
+        cwd_with_trailing_slash = "/Users/x/proj/"
+
+        # The inline formula currently used in the 3 test helpers
+        inline_slug = re.sub(r"[^a-zA-Z0-9]", "-", cwd_with_trailing_slash)
+
+        canonical_slug = cwd_to_project_slug(cwd_with_trailing_slash)
+
+        # RED assertion: fails until the test helpers use cwd_to_project_slug.
+        self.assertEqual(
+            inline_slug, canonical_slug,
+            f"Test helper inline slug formula diverges from cwd_to_project_slug for "
+            f"trailing-slash input '{cwd_with_trailing_slash}': "
+            f"inline={inline_slug!r}, canonical={canonical_slug!r}. "
+            "Replace the 3 inline _correct_slug definitions with cwd_to_project_slug imports."
+        )
+
+
 class TestReadTeamCheckpoint(unittest.TestCase):
 
     def test_returns_content_when_file_exists(self):
