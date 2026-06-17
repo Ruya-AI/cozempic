@@ -151,7 +151,31 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
             futile += 1
     rep.futile_cycles = futile
     rep.recent_pcts = rep.recent_pcts[-loop_trip:]
-    rep.daemon_starts = len(_DAEMON_START_RE.findall(text))
+
+    # Parse daemon-start markers and attempt to extract ISO timestamps from each.
+    # The capture group is optional — lines without "at <ISO>" yield group(1)=None.
+    for m in _DAEMON_START_RE.finditer(text):
+        rep.daemon_starts += 1
+        raw_ts = m.group(1)
+        if raw_ts is not None:
+            try:
+                rep.daemon_start_times.append(datetime.fromisoformat(raw_ts))
+            except ValueError:
+                rep.daemon_start_times.append(None)
+        else:
+            rep.daemon_start_times.append(None)
+
+    # Compute recent_starts: count of daemon restarts whose ISO timestamp falls
+    # within RATE_WINDOW_S seconds of the most recent parseable timestamp (anchor).
+    # If no parseable timestamps exist, recent_starts stays 0 and the rate path
+    # is bypassed entirely — the flat-count fallback handles old-format logs.
+    parseable = [dt for dt in rep.daemon_start_times if dt is not None]
+    if parseable:
+        anchor = max(parseable)
+        rep.recent_starts = sum(
+            1 for dt in parseable
+            if (anchor - dt).total_seconds() <= RATE_WINDOW_S
+        )
 
     backoffs = [int(s) for s in _BACKOFF_RE.findall(text)]
     if backoffs:
@@ -159,50 +183,56 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
         rep.max_backoff_s = max(backoffs)
     rep.has_exit = bool(_EXIT_RE.search(text))
 
-    # C7: erroring/inert-guard signature — the guard is erroring MORE than it is
-    # productively pruning. Discriminator (R15, after three weaker attempts each leaked):
-    #   cycle_errors >= loop_trip  AND  cycle_errors > productive_prunes
-    # where productive_prunes = total_prune_cycles - futile_cycles (prunes that actually
-    # freed space). This is robust in BOTH directions on a flat append-mode log:
-    #  - HEALTHY busy guard (many productive prunes, occasional transient error):
-    #    cycle_errors <= productive_prunes -> NOT flagged.
-    #  - HEALTHY IDLE guard (short sessions, 0 prunes, 0 errors, several restarts):
-    #    cycle_errors (0) < loop_trip -> NOT flagged (the daemon_starts-only trigger of
-    #    the prior attempt false-flagged this — R15 FP).
-    #  - HEALTHY fresh gen + a couple of STALE escalations from dead gens (~10 errors):
-    #    < loop_trip -> NOT flagged (R15 FP).
-    #  - ERROR respawn storm, even WITH a stray early productive prune line in the tail
-    #    (the R15 FN that defeated the total_prune_cycles==0 gate): many errors greatly
-    #    outnumber the lone productive prune -> flagged.
-    #  - single INERT generation (>= loop_trip errors, 0 prunes) -> flagged.
-    # The futile-PRUNE storm (f641174c: many <1%-freed prunes, ~0 errors) has
-    # productive_prunes near 0 but cycle_errors near 0 too, so it is owned by the
-    # separate futile-dominance branch below (which keeps the "respawn storm" reason).
+    # C7: erroring/inert-guard signature. Two-path verdict (rate-first, flat-fallback):
     #
-    # KNOWN RESIDUAL (accepted, REPORT-ONLY; tracked follow-up = a rate-based redesign):
-    # because this counts over a flat 256KB append-mode tail with no recency/rate
-    # awareness, two edge cases survive — (FN) a CURRENT error-storm can be masked if
-    # stale productive-prune lines from an earlier dead generation still in the window
-    # outnumber the errors; (FP) a long healthy daemon that self-recovered >= loop_trip
-    # SCATTERED transient errors (counter reset each time, never escalated) with its
-    # productive prunes scrolled out of the window can be flagged. Both are bounded:
-    # this is a REPORT-ONLY monitor (--fix is manual + guard-identity-gated), the
-    # daemon's OWN circuit-breaker self-arrests real error-storms, and the well-tested
-    # futile-PRUNE loop detection (the real f641174c incident shape) is unaffected. The
-    # durable fix is to parse the per-line timestamps and key the verdict on RESTART
-    # RATE within a recent window — deferred to a follow-up (not blocking PR #138).
+    # PATH A — rate-based (implemented here, fixes the known FN/FP residuals):
+    #   When ≥1 parseable ISO timestamp exists in daemon-start markers, count how many
+    #   restarts fall within RATE_WINDOW_S of the most recent one. If that count
+    #   reaches RATE_STORM_TRIP the log shows an error respawn storm regardless of
+    #   what older productive-prune lines say. This is the "durable fix" referenced in
+    #   the KNOWN RESIDUAL comment below (now implemented).
+    #     FN fix: a current error storm is flagged even when stale productive-prune
+    #       lines from an earlier dead generation dominate the window.
+    #     FP fix: a healthy single-daemon with scattered recovered errors has
+    #       recent_starts=1 < RATE_STORM_TRIP → NOT flagged.
+    #   When recent_starts < RATE_STORM_TRIP (and ≥1 parseable timestamp exists), the
+    #   rate path is authoritative — the flat-count fallback is suppressed.
+    #
+    # PATH B — flat-count fallback (original R15 discriminator):
+    #   Used only when 0 parseable timestamps exist (old daemon versions, truncated
+    #   lines). Behaviour for those logs is IDENTICAL to before — zero regression.
+    #   Discriminator:  cycle_errors >= loop_trip  AND  cycle_errors > productive_prunes
+    #
     rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
     rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
     _productive_prunes = rep.total_prune_cycles - rep.futile_cycles
-    if rep.cycle_errors >= loop_trip and rep.cycle_errors > _productive_prunes:
-        rep.looping = True
-        rep.reason = (
-            f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations / "
-            f"{rep.daemon_starts} restarts vs {_productive_prunes} space-freeing prunes "
-            f"— guard is erroring more than it is productively pruning (inert or "
-            f"respawn-cycling on a deterministic failure); investigate the logged exception"
-        )
-        return rep
+
+    if parseable:
+        # PATH A: rate-based verdict. Authoritative when any ISO timestamp was parsed.
+        if rep.recent_starts >= RATE_STORM_TRIP:
+            rep.looping = True
+            rep.reason = (
+                f"{rep.recent_starts} guard restarts in the last "
+                f"{RATE_WINDOW_S // 60}min — error respawn storm (rate-based); "
+                f"{rep.cycle_errors} per-cycle errors / "
+                f"{rep.cycle_escalations} escalations"
+            )
+            return rep
+        # recent_starts < RATE_STORM_TRIP with parseable timestamps: not a storm.
+        # The flat-count is suppressed — a single daemon with scattered errors
+        # must not be flagged just because its prune lines scrolled out of the tail.
+    else:
+        # PATH B: flat-count fallback — no parseable timestamps (old log format).
+        # Original R15 discriminator: erroring more than productively pruning.
+        if rep.cycle_errors >= loop_trip and rep.cycle_errors > _productive_prunes:
+            rep.looping = True
+            rep.reason = (
+                f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations / "
+                f"{rep.daemon_starts} restarts vs {_productive_prunes} space-freeing prunes "
+                f"— guard is erroring more than it is productively pruning (inert or "
+                f"respawn-cycling on a deterministic failure); investigate the logged exception"
+            )
+            return rep
 
     futile_ratio = futile / rep.total_prune_cycles if rep.total_prune_cycles else 0.0
     if futile >= loop_trip and futile_ratio >= FUTILE_DOMINANCE:
