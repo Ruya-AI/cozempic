@@ -125,6 +125,10 @@ class OverflowRecovery:
     size is concerning or overflow is detected.
     """
 
+    # After a safe-point defer (in-flight work / gate error), suppress re-running a
+    # full prune cycle on every subsequent growth event for this long (ynaamane #3c).
+    _DEFER_COOLDOWN_S: float = 60.0
+
     def __init__(
         self,
         session_path: Path,
@@ -143,6 +147,7 @@ class OverflowRecovery:
         self.danger_threshold_tokens = danger_threshold_tokens
         self.claude_pid = claude_pid
         self._recovering = False  # Prevent re-entrant recovery
+        self._defer_until = 0.0   # monotonic deadline; suppress re-run after a safe-point defer
 
     def detect_overflow(self) -> bool:
         """Check last 20 lines of the JSONL for overflow markers."""
@@ -218,6 +223,13 @@ class OverflowRecovery:
 
         # Prevent re-entrant recovery
         if self._recovering:
+            return
+
+        # Re-entry throttle (ynaamane #3c): after a safe-point defer we deliberately
+        # did NOT count a breaker slot, so the breaker won't auto-halt a busy in-flight
+        # session — instead suppress re-running a full prune cycle until the cooldown
+        # elapses, so frequent growth events don't hammer guard_prune_cycle.
+        if time.monotonic() < self._defer_until:
             return
 
         # Slow path: check for actual overflow
@@ -310,8 +322,10 @@ class OverflowRecovery:
             checkpoint_team(session_path=self.session_path, quiet=False)
             return
 
-        # 5. Record in breaker
-        self.breaker.record_recovery(rx, before_mb, after_mb)
+        # 5. (breaker recording moved BELOW the 5b safe-point gate — a benign
+        # in-flight defer must NOT consume a circuit-breaker slot, else 3 benign
+        # defers silently disable the reactive net; mirrors the proactive path
+        # which does not count a safe-point defer. ynaamane review #3.)
         orig_tok = result.get("original_tokens")
         final_tok = result.get("final_tokens")
         saved_tok = (orig_tok - final_tok) if (orig_tok and final_tok) else -1
@@ -344,13 +358,29 @@ class OverflowRecovery:
             from .team import extract_team_state as _extract_team_state
             _msgs = _load_messages(self.session_path)
             _safe, _reason = _safe_to_reload(_extract_team_state(_msgs), _msgs, self.session_path)
-        except Exception:
-            _safe, _reason = True, ""  # gate must never itself block a needed recovery
+        except Exception as _gate_exc:
+            # FAIL-CLOSED (ynaamane review #1): the daemon's asymmetry is "over-defer
+            # is recoverable; wrongly SIGKILLing live Claude work is catastrophic." So
+            # if the safety gate ITSELF throws (e.g. a malformed tool_result crashes
+            # extract_team_state), DEFER the kill — never proceed to terminate a session
+            # that may hold running subagents. The prune is recomputed next cycle.
+            _safe, _reason = False, f"safety-gate error: {_gate_exc!r}"
         if not _safe:
-            print(f"  [{now}] In-flight work detected ({_reason}) — deferring kill; "
-                  f"prune saved, no resume this cycle.", file=sys.stderr)
+            # NOTE: the pruned output is NOT yet on disk here — guard_prune_cycle
+            # returns a DEFERRED writer that only fires inside _terminate_and_resume
+            # (post-kill). So on a defer NOTHING is persisted this cycle; we re-run on
+            # the next growth event (throttled below). (ynaamane review #3b.)
+            print(f"  [{now}] In-flight work / gate defer ({_reason}) — deferring kill; "
+                  f"prune NOT persisted this cycle, will retry.", file=sys.stderr)
             checkpoint_team(session_path=self.session_path, quiet=True)
+            # Throttle re-entry: a busy in-flight session can fire many growth events;
+            # don't re-run a full prune cycle on each. (ynaamane review #3c.)
+            self._defer_until = time.monotonic() + self._DEFER_COOLDOWN_S
             return
+
+        # Record the recovery only now that we are actually proceeding to kill+resume
+        # (a real recovery), so a benign defer above never burns a breaker slot.
+        self.breaker.record_recovery(rx, before_mb, after_mb)
 
         # 6. Terminate Claude + auto-resume
         # Wave 2: acquire single-flight reload lock. If another reload

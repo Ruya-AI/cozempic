@@ -1022,10 +1022,11 @@ def load_messages_incremental(path: Path) -> list[Message]:
             return list(entry.messages)
 
         complete = raw_bytes[: last_newline + 1]
-        try:
-            chunk = complete.decode("utf-8")
-        except UnicodeDecodeError:
-            chunk = complete.decode("utf-8", errors="replace")
+        # surrogateescape (ynaamane review, LOW): mirror load_messages /
+        # load_messages_and_snapshot rather than the lossy U+FFFD "replace". This is
+        # the read-only incremental path so the only effect is correct byte_len
+        # accounting on non-UTF-8 lines, but it keeps every decode path consistent.
+        chunk = complete.decode("utf-8", "surrogateescape")
 
         new_messages, lines_consumed = _parse_jsonl_chunk(
             chunk, entry.next_line_index

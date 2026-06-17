@@ -464,10 +464,14 @@ def _extract_block_text(block: dict) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        # str-guard each sub["text"] (ynaamane review #2): a non-str text (e.g.
+        # {"type":"text","text":99999} in malformed JSONL) would make "".join raise
+        # TypeError, crashing extract_team_state — which is NOT strategy-isolated and
+        # feeds the reactive overflow safe-gate (its throw used to fail-OPEN -> SIGKILL).
         return "".join(
-            sub.get("text", "")
+            sub["text"]
             for sub in content
-            if isinstance(sub, dict) and sub.get("type") == "text"
+            if isinstance(sub, dict) and sub.get("type") == "text" and isinstance(sub.get("text"), str)
         )
     return ""
 
@@ -1007,11 +1011,13 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     for line_idx, msg, byte_size in messages:
         if msg.get("type") == "assistant" and _is_team_message(msg):
             inner = msg.get("message", {})
-            content = inner.get("content", [])
+            content = inner.get("content", []) if isinstance(inner, dict) else []
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
-                        team_msgs.append(block.get("text", "")[:300])
+                        _t = block.get("text", "")
+                        if isinstance(_t, str):  # non-str text would crash the [:300] slice (#2)
+                            team_msgs.append(_t[:300])
 
     if team_msgs:
         state.lead_summary = " [...] ".join(team_msgs[-3:])
@@ -1175,7 +1181,11 @@ def write_team_checkpoint(state: TeamState, project_dir: Path | None = None) -> 
         from .session import get_claude_dir
         path = get_claude_dir() / "team-checkpoint.md"
 
-    path.write_text(state.to_markdown(), encoding="utf-8")
+    # atomic_write_text (ynaamane review #5): a SIGKILL/OOM mid-write would otherwise
+    # leave a PARTIAL checkpoint that PostCompact reads back as recovery state. Every
+    # other shared-state writer is atomic (temp + os.replace); this one was the holdout.
+    from .helpers import atomic_write_text
+    atomic_write_text(path, state.to_markdown())
     return path
 
 

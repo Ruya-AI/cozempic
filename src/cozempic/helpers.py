@@ -607,6 +607,28 @@ def _has_alternation(pattern: str) -> bool:
     return False
 
 
+def _strip_group_prefix(body: str) -> str:
+    """Strip a leading group-type marker from a group body so rule-2 doesn't see the
+    marker's `?` as an inner quantifier (ynaamane review, LOW): `(?:abc)+` was
+    over-rejected because the body `?:abc` tripped _body_has_inner_quantifier on the
+    leading `?`. Handles `(?:` non-capturing, `(?flags:` inline-flags, `(?P<name>`
+    named; lookaround / comment groups have no real repeatable body (and a genuinely
+    nested quantifier inside them is still caught by the >=2-quantifier count rule)."""
+    if not body.startswith("?"):
+        return body
+    if body.startswith("?:"):
+        return body[2:]
+    if body.startswith("?P<") or body.startswith("?<"):  # named (?P<n>) — (?<= / (?<! handled below
+        if body.startswith(("?<=", "?<!")):
+            return ""  # lookbehind: no repeatable body
+        gt = body.find(">")
+        return body[gt + 1:] if gt != -1 else ""
+    colon = body.find(":")
+    if colon != -1 and all(c in "aiLmsux" for c in body[1:colon]):  # (?ims: inline flags
+        return body[colon + 1:]
+    return ""  # lookahead (?= (?!, comment (?#, or unknown — no repeatable body
+
+
 def _scan_quantified_group_bodies(pattern: str) -> list[str]:
     """Inner body of each group `(...)` immediately followed by an unbounded or
     braced quantifier (`+`, `*`, `{...}`). Honors escapes, char classes, and
@@ -638,7 +660,7 @@ def _scan_quantified_group_bodies(pattern: str) -> list[str]:
                 start = stack.pop()
                 nxt = pattern[i + 1] if i + 1 < n else ""
                 if nxt in ("+", "*", "{"):  # NOT `in "+*{"` — "" is a substring of every str
-                    bodies.append(pattern[start + 1:i])
+                    bodies.append(_strip_group_prefix(pattern[start + 1:i]))
             i += 1
             continue
         i += 1

@@ -1684,7 +1684,11 @@ def guard_prune_cycle(
     # counters on every deferred or looping cycle that never actually wrote — the
     # in-the-wild prune-spike signature: a stuck guard re-pruning every interval
     # bumps the counter each time despite persisting nothing.
-    tokens_saved = pre_te.total - post_te.total if pre_te.total and post_te.total else 0
+    # Gate on pre_te.total ONLY (ynaamane review #4): `and post_te.total` is the same
+    # trap fixed at _tokens_saved_now above — a maximal prune to post_te.total == 0 is
+    # FULL progress (pre - 0), not zero, so requiring post_te.total to be truthy makes
+    # the largest-possible savings event record as 0.
+    tokens_saved = (pre_te.total - post_te.total) if pre_te.total else 0
 
     def _record_persisted_savings():
         """Record savings to the lifetime tracker / global counter. Call ONLY
@@ -2345,6 +2349,22 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
         def _ps_q(s: str) -> str:  # PowerShell single-quote literal (double internal ')
             return "'" + s.replace("'", "''") + "'"
 
+        # SESSION-SCOPED success poll (ynaamane review, LOW): mirror the POSIX
+        # `pgrep -f 'claude.*<sid12>'` so a DIFFERENT session's Claude on a
+        # multi-session Windows host is not misread as OUR successful resume.
+        # Get-Process has no CommandLine, so use Get-CimInstance Win32_Process and
+        # match the session id on the command line. sid12 is sanitized to
+        # [a-z0-9_-] so it is safe inside a -like glob. Fall back to any-claude only
+        # when the session id is unknown.
+        if sid12:
+            _ps_find_new = (
+                "$new=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+                f"Where-Object {{ $_.CommandLine -like '*claude*' -and $_.CommandLine -like '*{sid12}*' }} | "
+                "Select-Object -First 1"
+            )
+        else:
+            _ps_find_new = "$new=Get-Process -Name claude -ErrorAction SilentlyContinue | Select-Object -First 1"
+
         windows_ps_script = (
             "$ErrorActionPreference='SilentlyContinue'; "
             # Phase 1: wait for the old Claude to exit.
@@ -2356,7 +2376,7 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
             + (f"Remove-Item -Force -ErrorAction SilentlyContinue {_ps_q(_win_sentinel)}; " if _win_sentinel else "")
             # Phase 4: poll for the new claude; log on success, write status on timeout.
             + f"$deadline=(Get-Date).AddSeconds({RELOAD_WATCHER_POLL_TIMEOUT_SECONDS}); $new=$null; "
-            f"while ((Get-Date) -lt $deadline) {{ $new=Get-Process -Name claude -ErrorAction SilentlyContinue | Select-Object -First 1; if ($new) {{ break }}; Start-Sleep -Seconds {RELOAD_WATCHER_POLL_INTERVAL_SECONDS} }}; "
+            f"while ((Get-Date) -lt $deadline) {{ {_ps_find_new}; if ($new) {{ break }}; Start-Sleep -Seconds {RELOAD_WATCHER_POLL_INTERVAL_SECONDS} }}; "
             f"if ($new) {{ Add-Content -Path {_ps_q(_win_log)} -Value \"$(Get-Date): Cozempic guard resumed Claude (new PID $($new.Id))\" }} "
             f"else {{ Set-Content -Path {_ps_q(_win_status)} -Value \"failed`n$(Get-Date -Format o)`nnew Claude did not start within {RELOAD_WATCHER_POLL_TIMEOUT_SECONDS}s`ninvestigate: claude on PATH / auth / JSONL path\" }}"
         )

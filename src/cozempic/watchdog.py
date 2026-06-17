@@ -141,15 +141,24 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     # C7: erroring/inert-guard signature (no "Pruned:" lines at all). Flag a daemon
     # that keeps hitting per-cycle exceptions — either spinning (many skip lines) or
     # respawn-cycling on a deterministic error (escalation markers).
-    rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
-    rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
-    # Only flag the erroring/inert signature when it actually dominates — a HEALTHY
-    # long-lived daemon logs occasional TRANSIENT (recovered) cycle errors amid
-    # productive pruning, and must NOT be flagged (else --fix SIGTERMs it). The
-    # reliable "stuck" signals are: >=2 escalations (a daemon that gave up and
-    # respawn-cycled on a deterministic failure), OR many cycle errors with NO
-    # productive prunes at all (erroring INSTEAD of pruning).
-    if rep.cycle_escalations >= 2 or (rep.cycle_errors >= loop_trip and rep.total_prune_cycles == 0):
+    # Scope the per-cycle error/escalation signals to the CURRENT generation — the log
+    # tail after the LAST daemon-start marker (ynaamane review #7). Guard logs are
+    # append-mode and keyed by cwd, so escalation/error lines from prior DEAD
+    # generations accumulate; counting them whole-log false-flags a CURRENTLY-healthy
+    # daemon in a respawn-prone cwd (and `--fix` would then SIGTERM a healthy guard).
+    # A respawn STORM is unaffected: each storming generation is itself erroring (no
+    # productive prunes), so it trips the current-gen rule below; and futile-prune
+    # storms are caught by the separate futile-dominance branch (daemon_starts-aware).
+    _starts = list(_DAEMON_START_RE.finditer(text))
+    _cur_gen = text[_starts[-1].end():] if _starts else text
+    rep.cycle_errors = len(_CYCLE_ERR_RE.findall(_cur_gen))
+    rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(_cur_gen))
+    _cur_gen_prunes = len(_PRUNED_RE.findall(_cur_gen))
+    # Flag the erroring/inert signature only for the CURRENT generation: >=2
+    # escalations in this generation, OR many cycle errors with NO productive prunes in
+    # this generation (erroring INSTEAD of pruning). A healthy current generation logs
+    # occasional transient errors amid productive prunes and is never flagged.
+    if rep.cycle_escalations >= 2 or (rep.cycle_errors >= loop_trip and _cur_gen_prunes == 0):
         rep.looping = True
         rep.reason = (
             f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations with "

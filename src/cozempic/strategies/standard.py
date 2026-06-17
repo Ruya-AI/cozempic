@@ -162,7 +162,7 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
                         for sub in content:
                             if isinstance(sub, dict) and sub.get("type") == "text":
                                 text = sub.get("text", "")
-                                if len(text.encode("utf-8")) > max_bytes:
+                                if isinstance(text, str) and len(text.encode("utf-8", "surrogateescape")) > max_bytes:
                                     half = max_bytes // 2
                                     sub = {**sub, "text": text[:half] + "\n...[trimmed by cozempic]...\n" + text[-half:]}
                             trimmed_content.append(sub)
@@ -418,7 +418,7 @@ def strategy_tool_result_age(messages: list[Message], config: dict) -> StrategyR
         if not blocks:
             continue
 
-        has_tool_result = any(b.get("type") == "tool_result" for b in blocks)
+        has_tool_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
         if not has_tool_result:
             continue
 

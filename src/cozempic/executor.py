@@ -9,6 +9,7 @@ from .helpers import (
     msg_bytes,
     set_content_blocks,
 )
+from ._validation import ConfigError
 from .registry import STRATEGIES
 from .types import Message, PruneAction, StrategyResult
 
@@ -292,6 +293,11 @@ def run_prescription(
             try:
                 sr = STRATEGIES[sname].func(current, config)
             except (KeyboardInterrupt, SystemExit):
+                raise
+            except ConfigError:
+                # A user CONFIG error (bad coerce_non_negative_int value) must NOT be
+                # swallowed and mislabeled as a "malformed message" — that hides the
+                # very validation this layer adds. Propagate it (ynaamane review #6).
                 raise
             except Exception as _strat_exc:
                 import sys as _sys

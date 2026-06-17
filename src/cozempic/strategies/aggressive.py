@@ -103,6 +103,8 @@ def strategy_error_retry_collapse(messages: list[Message], config: dict) -> Stra
         if is_protected(msg):
             continue
         for block in get_content_blocks(msg):
+            if not isinstance(block, dict):  # non-dict content element (ynaamane review, LOW)
+                continue
             if block.get("type") == "tool_use":
                 name = block.get("name", "")
                 inp = json.dumps(block.get("input", {}), sort_keys=True)
