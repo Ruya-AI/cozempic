@@ -1184,8 +1184,12 @@ def write_team_checkpoint(state: TeamState, project_dir: Path | None = None) -> 
     # atomic_write_text (ynaamane review #5): a SIGKILL/OOM mid-write would otherwise
     # leave a PARTIAL checkpoint that PostCompact reads back as recovery state. Every
     # other shared-state writer is atomic (temp + os.replace); this one was the holdout.
+    # errors="surrogatepass": team fields are extracted from transcript content decoded
+    # with surrogateescape, so to_markdown() can carry a lone surrogate from a non-UTF-8
+    # byte; a strict encode would raise UnicodeEncodeError mid-write (R14). surrogatepass
+    # encodes any surrogate (WTF-8) so the checkpoint write never crashes.
     from .helpers import atomic_write_text
-    atomic_write_text(path, state.to_markdown())
+    atomic_write_text(path, state.to_markdown(), errors="surrogatepass")
     return path
 
 

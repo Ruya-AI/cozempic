@@ -20,7 +20,8 @@ _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
 # are durable before the rename, so power-loss or OOM-kill leaves the target
 # either fully-old or fully-new — never zeroed.
 
-def atomic_write_text(target: _Path, data: str, encoding: str = "utf-8") -> None:
+def atomic_write_text(target: _Path, data: str, encoding: str = "utf-8",
+                      errors: str = "strict") -> None:
     """Atomic, collision-safe text write.
 
     Two concurrent calls on the same `target` BOTH succeed without losing
@@ -38,7 +39,7 @@ def atomic_write_text(target: _Path, data: str, encoding: str = "utf-8") -> None
     )
     tmp_path = _Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
+        with os.fdopen(fd, "w", encoding=encoding, errors=errors) as f:
             f.write(data)
             f.flush()
             try:

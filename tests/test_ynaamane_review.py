@@ -117,19 +117,32 @@ class TestConfigErrorNotSwallowed(unittest.TestCase):
                 run_prescription(load_messages(p), [mega[0]], {"mega_block_max_bytes": "not-an-int"})
 
 
-class TestWatchdogGenerationScoping(unittest.TestCase):
-    """#7: cycle errors/escalations are scoped to the CURRENT generation, so stale
-    lines from a dead generation don't false-flag a currently-healthy guard."""
+class TestWatchdogErrorStormDiscriminator(unittest.TestCase):
+    """#7 (+ R14): the error/escalation branch is gated on ZERO prune cycles. A guard
+    that is PRODUCTIVELY pruning is never flagged — even one whose tail carries stale
+    escalations from dead generations (the #7 false-positive). But a deterministic-
+    error RESPAWN STORM (many restarts, 0 prunes) is still caught — generation-scoping
+    (the first #7 attempt) let it escape because each generation exits below the
+    thresholds (R14)."""
 
-    def test_stale_escalations_then_healthy_current_gen_not_flagged(self):
+    def test_healthy_pruning_guard_with_stale_escalations_not_flagged(self):
         from cozempic.watchdog import scan_log_text
         text = ("Guard daemon started\n"
-                + "  Guard cycle-error escalation: 5 consecutive cycle errors\n" * 3
-                + "Guard daemon started\n"           # current generation begins
-                + "Pruned: 1.2M (45.0%)\n" * 5)      # healthy: productive prunes
+                + "  Guard cycle-error escalation: 5 consecutive cycle errors\n" * 3  # dead gen
+                + "Guard daemon started\n"
+                + "  Pruned: 12,345 tokens freed (45.0%)\n" * 5)  # healthy: real prune lines
         self.assertFalse(scan_log_text(text).looping)
 
-    def test_current_gen_erroring_no_prunes_flagged(self):
+    def test_multi_generation_error_storm_flagged(self):
+        from cozempic.watchdog import scan_log_text
+        # 26 generations, each 5 errors + 1 escalation then exit, ZERO prunes — the
+        # exact storm generation-scoping let escape (each gen < the thresholds).
+        gen = ("--- Guard daemon started ---\n"
+               + "  Guard: skipping a cycle after an unexpected error (1/5): E\n" * 5
+               + "  Guard cycle-error escalation: 5 consecutive cycle errors\n")
+        self.assertTrue(scan_log_text(gen * 26).looping)
+
+    def test_single_inert_generation_flagged(self):
         from cozempic.watchdog import scan_log_text
         text = "Guard daemon started\n" + "  Guard: skipping a cycle after an unexpected error (1/5): E\n" * 22
         self.assertTrue(scan_log_text(text).looping)
