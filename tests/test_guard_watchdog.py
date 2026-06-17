@@ -456,5 +456,171 @@ class TestC7RateWindow(unittest.TestCase):
         self.assertIn("storm", rep.reason)
 
 
+class TestC7InertSingleGen(unittest.TestCase):
+    """C-1 + H-2: escalation-aware inert-guard detection inside PATH A.
+
+    The round-1 blanket flat-count suppression dropped a genuine inert-guard case:
+    a single modern-format daemon (1 ISO timestamp → parseable → PATH A) that has
+    fired ≥loop_trip errors AND issued a cycle-error escalation (deterministically
+    stuck, NOT a recovered transient) was incorrectly not flagged.
+
+    The discriminator: cycle_escalations >= 1 separates a truly stuck guard from one
+    that self-recovered (recovered daemons never escalate; escalation = the C2 path
+    that exits for respawn, confirming the errors were not transient).
+    """
+
+    def test_escalated_inert_single_gen_flagged(self):
+        """C-1 RED→GREEN: single modern-log daemon, ≥loop_trip errors + escalation → flag.
+
+        This is the case the round-1 code dropped: one ISO start → parseable=[1 ts] →
+        PATH A → recent_starts=1 < RATE_STORM_TRIP=5 → round-1 says not-a-storm and
+        returns (looping=False). But this daemon DID escalate — it's genuinely stuck.
+        """
+        now = datetime(2026, 6, 10, 12, 0, 0)
+        text = _daemon_start(ts=now.isoformat())
+        # 25 error-skip lines (>= loop_trip=20) followed by a cycle-error escalation
+        text += "".join(_error_cycle(n=j) for j in range(1, 26))
+        text += _escalation()
+        rep = scan_log_text(text)
+        # RED at HEAD: recent_starts=1 < 5 → PATH A returns not-a-storm → looping=False
+        # GREEN after: escalation gate catches it → looping=True
+        self.assertTrue(rep.looping,
+                        "a single escalated inert daemon (>=loop_trip errors + escalation) "
+                        "must be flagged even with only 1 recent daemon start")
+        self.assertIn("inert", rep.reason)
+        self.assertIn("escalat", rep.reason)
+
+    def test_recovered_daemon_not_flagged(self):
+        """C-1 preservation: single daemon, ≥loop_trip errors, 0 escalations → NOT flag.
+
+        This is the FP case the rate-window was designed to fix (T-2 from round 1):
+        a daemon that self-recovered from transient errors never escalates.
+        Must stay not-flagged after adding the escalation gate.
+        (characterization — preservation criterion; green at HEAD and after)
+        """
+        now = datetime(2026, 6, 10, 10, 0, 0)
+        text = _daemon_start(ts=(now - timedelta(hours=2)).isoformat())
+        text += "".join(_good_cycle(n=i) for i in range(1, 4))  # 3 productive prunes
+        # 21 error lines, 0 escalations (transient, self-recovered)
+        for _ in range(3):
+            text += "".join(_error_cycle(n=j) for j in range(1, 8))
+        rep = scan_log_text(text)
+        self.assertFalse(rep.looping,
+                         "a recovered daemon (no escalation) must NOT be flagged — "
+                         "escalation is the discriminator for genuine stuckness")
+
+
+class TestC7SlideWindow(unittest.TestCase):
+    """C-2: sliding-window anchor robustness and regex line-anchoring.
+
+    The round-1 max() anchor is defeated by a single forged future timestamp:
+    6 genuine restarts within 1h + 1 injected far-future (2099) start → the
+    max() anchor becomes 2099; (2099 - real_ts) >> RATE_WINDOW_S → recent_starts=1
+    → storm not flagged (FN).
+
+    Fix: replace max()-anchored window with max restarts in ANY sliding window of
+    RATE_WINDOW_S seconds (sort timestamps, for each t_i count t_j in [t_i, t_i+W]).
+    A single outlier forms its own window of 1 — can't inflate the real storm count.
+
+    Fix 2: line-anchor _DAEMON_START_RE (re.MULTILINE + leading-whitespace pattern)
+    so a forged "Guard daemon started at <ISO>" substring embedded MID-LINE (e.g.
+    inside a team-name log entry) does NOT count as a daemon restart.
+    """
+
+    def test_future_timestamp_injection_still_flags_storm(self):
+        """C-2a RED→GREEN: genuine 6-restart storm + injected far-future start → still FLAG.
+
+        Round-1 max() anchor: anchor=2099 → (2099 - 2026_ts) > RATE_WINDOW_S → 0 in window.
+        Sliding-window fix: the 6 genuine 2026 starts cluster within 30min → window of 6.
+        """
+        now = datetime(2026, 6, 10, 20, 0, 0)
+        parts = []
+        # 6 genuine restarts within 30 min
+        for i in range(6):
+            ts = (now - timedelta(minutes=30 - i * 5)).isoformat()
+            parts.append(_daemon_start(ts=ts))
+            parts.append(_error_cycle(n=1))
+        # 1 injected far-future start (e.g. from a forged log line)
+        parts.append(_daemon_start(ts="2099-01-01T00:00:00"))
+        parts.append(_error_cycle(n=1))
+        text = "".join(parts)
+        rep = scan_log_text(text)
+        # RED at HEAD: max()=2099 → real starts outside window → looping=False
+        # GREEN after: sliding window finds 6 genuine starts in 30min → looping=True
+        self.assertTrue(rep.looping,
+                        "a genuine 6-restart storm must be flagged even with an injected "
+                        "far-future daemon-start timestamp that defeats max()-anchoring")
+        self.assertIn("storm", rep.reason)
+
+    def test_midline_forged_header_not_counted(self):
+        """C-2b RED→GREEN: daemon-start substring MID-LINE must not be counted as a restart.
+
+        The real guard log format is "--- Guard daemon started at <ISO> ---" at the
+        START of a line. A forged substring embedded inside another log line (e.g. a
+        team-name that contains "Guard daemon started at 2026-...") must NOT match.
+        """
+        # This is a single, valid modern daemon start
+        now = datetime(2026, 6, 10, 12, 0, 0)
+        text = _daemon_start(ts=now.isoformat())
+        # 5 forged mid-line occurrences — embedded in log lines that are NOT line-starts
+        for i in range(5):
+            fake_ts = (now - timedelta(minutes=i * 5)).isoformat()
+            # Embedded inside a line that starts with something else (team name, etc.)
+            text += f"  [12:00:00] Team 'Guard daemon started at {fake_ts}' state preserved\n"
+        text += "".join(_error_cycle(n=j) for j in range(1, 6))
+        rep = scan_log_text(text)
+        # With line-anchoring: daemon_starts=1 (only the real start), recent_starts=1
+        # Without line-anchoring: daemon_starts=6, recent_starts may reach RATE_STORM_TRIP
+        self.assertEqual(rep.daemon_starts, 1,
+                         "mid-line forged 'Guard daemon started' substrings must not be "
+                         "counted as daemon restarts (line-anchor required)")
+        self.assertFalse(rep.looping,
+                         "mid-line forged headers must not trigger a storm false-positive")
+
+
+class TestC7EdgeCases(unittest.TestCase):
+    """M-1 (tz robustness) + M-3 (boundary-inclusive window) + T-3/T-4/T-5 docstring note."""
+
+    def test_timezone_aware_timestamp_treated_as_unparseable(self):
+        """M-1: a tz-aware ISO timestamp (+02:00 suffix) must not crash; treated as None.
+
+        datetime.fromisoformat on Python 3.11+ accepts tz-aware strings and returns a
+        tz-aware datetime. Mixing tz-aware + naive datetimes in max()/subtraction
+        raises TypeError. Guard: strip or treat tz-aware as unparseable (None → fallback).
+        """
+        now = datetime(2026, 6, 10, 12, 0, 0)
+        text = _daemon_start(ts=now.isoformat())  # one valid naive start
+        # One tz-aware ISO timestamp — must not crash scan_log_text
+        text += "--- Guard daemon started at 2026-06-10T12:00:00+02:00 ---\nCWD: /y\n\n"
+        text += "".join(_error_cycle(n=j) for j in range(1, 5))
+        # Must not raise; daemon_starts=2, but tz-aware counts as None (not parseable)
+        rep = scan_log_text(text)
+        self.assertEqual(rep.daemon_starts, 2)
+        self.assertFalse(rep.looping,
+                         "tz-aware timestamp must be handled gracefully (not crash)")
+
+    def test_window_boundary_inclusive(self):
+        """M-3: a start exactly RATE_WINDOW_S seconds before the anchor still counts.
+
+        The window is inclusive: (anchor - dt).total_seconds() <= RATE_WINDOW_S.
+        A start exactly 3600s old must be counted, not dropped.
+        """
+        anchor_ts = datetime(2026, 6, 10, 20, 0, 0)
+        # 4 starts within the last 30min
+        parts = [_daemon_start(ts=(anchor_ts - timedelta(minutes=i * 5)).isoformat())
+                 for i in range(4)]
+        # 1 start exactly RATE_WINDOW_S=3600s before anchor (boundary — must count)
+        boundary_ts = anchor_ts - timedelta(seconds=RATE_WINDOW_S)
+        parts.append(_daemon_start(ts=boundary_ts.isoformat()))
+        # Together: 5 starts including the boundary one → should flag
+        text = "".join(parts) + "".join(_error_cycle(n=j) for j in range(1, 5))
+        rep = scan_log_text(text)
+        self.assertEqual(rep.recent_starts, 5,
+                         "a start exactly RATE_WINDOW_S seconds before the anchor "
+                         "must be included (boundary is inclusive)")
+        self.assertTrue(rep.looping,
+                        "5 starts including the boundary one must trigger storm detection")
+
+
 if __name__ == "__main__":
     unittest.main()
