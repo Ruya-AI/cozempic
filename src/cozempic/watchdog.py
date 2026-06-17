@@ -223,22 +223,26 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
 
     # C7: erroring/inert-guard signature. Two-path verdict (rate-first, flat-fallback):
     #
-    # PATH A — rate-based (implemented here, fixes the known FN/FP residuals):
-    #   When ≥1 parseable ISO timestamp exists in daemon-start markers, count how many
-    #   restarts fall within RATE_WINDOW_S of the most recent one. If that count
-    #   reaches RATE_STORM_TRIP the log shows an error respawn storm regardless of
-    #   what older productive-prune lines say. This is the "durable fix" referenced in
-    #   the KNOWN RESIDUAL comment below (now implemented).
+    # PATH A — rate-based (authoritative when ≥1 parseable ISO timestamp exists):
+    #   Count the maximum daemon restarts in ANY RATE_WINDOW_S-second sliding window
+    #   (outlier-robust — a forged future/past timestamp forms its own window of 1 and
+    #   cannot suppress a genuine restart cluster or inflate recent_starts). If that
+    #   count reaches RATE_STORM_TRIP the log shows a respawn storm regardless of what
+    #   older productive-prune lines say.
     #     FN fix: a current error storm is flagged even when stale productive-prune
-    #       lines from an earlier dead generation dominate the window.
+    #       lines from an earlier dead generation dominate the log window.
     #     FP fix: a healthy single-daemon with scattered recovered errors has
     #       recent_starts=1 < RATE_STORM_TRIP → NOT flagged.
     #   When recent_starts < RATE_STORM_TRIP (and ≥1 parseable timestamp exists), the
-    #   rate path is authoritative — the flat-count fallback is suppressed.
+    #   rate path is authoritative — the flat-count fallback (PATH B) is suppressed.
     #
     # PATH B — flat-count fallback (original R15 discriminator):
     #   Used only when 0 parseable timestamps exist (old daemon versions, truncated
     #   lines). Behaviour for those logs is IDENTICAL to before — zero regression.
+    #   NOTE: PATH B is suppressed whenever ≥1 timestamp parses, including mixed-
+    #   generation logs (e.g. one old-format start + one modern-format start). A
+    #   non-escalated inert daemon whose log contains even one parseable timestamp is
+    #   NOT flagged by PATH B — a documented scoped limitation (see PR body + TODO.md).
     #   Discriminator:  cycle_errors >= loop_trip  AND  cycle_errors > productive_prunes
     #
     rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
@@ -251,8 +255,9 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
             rep.looping = True
             rep.reason = (
                 f"{rep.recent_starts} guard restarts within a "
-                f"{RATE_WINDOW_S // 60}min window — error respawn storm (rate-based); "
+                f"{RATE_WINDOW_S // 60}min window — respawn storm (rate-based); "
                 f"{rep.cycle_errors} per-cycle errors / "
+                f"{rep.futile_cycles} futile prune cycles / "
                 f"{rep.cycle_escalations} escalations"
             )
             return rep
@@ -268,8 +273,10 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
         # DEFERRED RESIDUAL: a daemon that errors ≥loop_trip times but NEVER
         # escalates (C2 escalation path was disabled or the loop exited via a
         # different path) is not caught by this discriminator. That shape is rare
-        # (C2 escalation fires before K=loop_trip in normal operation) and is
-        # already handled by PATH B for no-timestamp logs. Tracking in TODO.md.
+        # (C2 escalation fires before K=loop_trip in normal operation). PATH B is
+        # suppressed whenever ≥1 timestamp parses (including mixed-generation logs),
+        # so such a daemon is NOT caught by PATH B either if its log carries any
+        # parseable ISO timestamp. Documented scoped limitation in PR body + TODO.md.
         if (
             rep.cycle_escalations >= 1
             and rep.cycle_errors >= loop_trip
