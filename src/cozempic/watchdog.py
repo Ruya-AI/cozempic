@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .helpers import _pid_is_alive as _pid_alive
@@ -74,7 +75,10 @@ _PRUNED_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _BACKOFF_RE = re.compile(r"back-off \(next sleep:\s*(\d+)s", re.IGNORECASE)
-_DAEMON_START_RE = re.compile(r"Guard daemon started", re.IGNORECASE)
+_DAEMON_START_RE = re.compile(
+    r"Guard daemon started(?:\s+at\s+([\d\-T:.]+))?",
+    re.IGNORECASE,
+)
 # Circuit-breaker / daemon-exit markers (recorded for diagnostics — NOT treated
 # as proof of health: the real f641174c storm K-exited 21x and still looped).
 _EXIT_RE = re.compile(
@@ -104,6 +108,8 @@ class LoopReport:
     looping: bool = False
     reason: str = ""
     recent_pcts: list = field(default_factory=list)
+    daemon_start_times: list = field(default_factory=list)  # datetime | None per start
+    recent_starts: int = 0  # starts within RATE_WINDOW_S of the anchor timestamp
 
 
 def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
