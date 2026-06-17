@@ -303,5 +303,185 @@ class TestFixIdentityGate(unittest.TestCase):
         self.assertEqual(killed.get("sig"), signal.SIGTERM)
 
 
+def _error_cycle(n=1):
+    """One guard error-skip line (no timestamp, matches _CYCLE_ERR_RE)."""
+    return f"  Guard: skipping a cycle after an unexpected error ({n}/5): RuntimeError(boom)\n"
+
+
+def _escalation():
+    """One guard cycle-error escalation line (matches _CYCLE_ESCALATION_RE)."""
+    return "  Guard cycle-error escalation: 5 consecutive cycle errors (0 deferred) — exiting for respawn (last: RuntimeError(boom)).\n"
+
+
+class TestC7RateWindow(unittest.TestCase):
+    """Rate-based storm detection: the rate-window path must fire before the flat-count.
+
+    T-1 (AC-1): multi-generation error storm masked by stale prunes must FLAG.
+    T-2 (AC-2a): single healthy daemon with scattered recovered errors must NOT flag.
+    T-3 (AC-2b): spread-out restarts across a day must NOT flag.
+    T-4 (AC-3): real f641174c fixture stays NOT flagged.
+    T-5 (edge): no-timestamp logs fall back to flat-count (no regression).
+    T-6 (edge): mixed parseable and None timestamps — anchor uses latest parseable.
+    """
+
+    def test_storm_flagged_stale_prunes_T1(self):
+        """T-1 (AC-1): 5 rapid respawns with error blocks inside 1h are a storm.
+
+        At base (flat-count only), the stale productive prunes from Gen 1 mask
+        the current error storm → NOT flagged (FN). After the rate-window fix,
+        recent_starts >= RATE_STORM_TRIP → flagged.
+
+        The flat-count FN arises because productive_prunes (35) > cycle_errors (25),
+        so the C7 branch doesn't fire. The rate path must fire first.
+        """
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 10, 20, 0, 0)
+        # Gen 1: healthy, dead — 35 productive prune cycles, started 11h ago
+        gen1_ts = (now - timedelta(hours=11)).isoformat()
+        gen1 = _daemon_start(ts=gen1_ts)
+        gen1 += "".join(_good_cycle(n=i) for i in range(1, 36))  # 35 productive prunes
+
+        # Gen 2–6: current error storm — 5 rapid restarts, each with 5 error lines,
+        # all within 30 minutes of each other
+        storm = ""
+        for i in range(5):
+            storm_ts = (now - timedelta(minutes=30 - i * 5)).isoformat()
+            storm += _daemon_start(ts=storm_ts)
+            storm += "".join(_error_cycle(n=j) for j in range(1, 6))
+            storm += _escalation()
+
+        text = gen1 + storm
+        rep = scan_log_text(text)
+        # At base: productive_prunes=35 > cycle_errors=25 → NOT looping (FN)
+        # After fix: recent_starts=5 >= RATE_STORM_TRIP=5 → looping=True
+        self.assertTrue(rep.looping,
+                        "rate-based path must flag a storm of 5 rapid respawns "
+                        "even when stale prune lines outnumber errors in the window")
+        self.assertIn("storm", rep.reason)
+
+    def test_scattered_errors_not_flagged_T2(self):
+        """T-2 (AC-2a): single daemon, 21 scattered recovered errors, must NOT flag.
+
+        At base (flat-count): 21 >= 20 (loop_trip) AND 21 > 3 (productive_prunes)
+        → looping=True (FP). After the rate-window fix, recent_starts=1 <
+        RATE_STORM_TRIP=5 → rate path skips, flat-count doesn't fire because
+        we never reach the flat-count unless timestamps are absent or < 2.
+
+        Wait — the design is rate-FIRST: if recent_starts < trip, rate path skips
+        and falls through to flat-count. This means T-2 actually STILL hits the
+        flat-count. So the fix only resolves the FP if the rate path changes
+        behavior here. The rate-first approach alone doesn't fix T-2 unless the
+        rate path overrides or the flat-count is only used as fallback for
+        insufficient timestamps (< 2 parseable starts). RE-READ the design:
+
+        The fallback condition is: "if FEWER THAN 2 daemon-start timestamps parse,
+        fall through to the existing flat-count logic". With 1 daemon-start that
+        HAS a parseable timestamp, we have exactly 1 parseable timestamp.
+        1 < 2 → we ARE in the fallback zone → flat-count runs.
+
+        But the handoff says: "recent_starts=1 < RATE_STORM_TRIP=5 → not flagged".
+        The design intent is that 1 recent start means no storm.
+
+        The correct design: rate path runs when recent_starts is computed (any number
+        of parseable timestamps). If recent_starts < RATE_STORM_TRIP, rate path
+        says "not a storm" (does NOT flag). Then flat-count is NOT used at all when
+        timestamps are available. Flat-count is ONLY the fallback when < 2 parseable
+        timestamps exist (i.e., we can't compute a meaningful rate).
+
+        This means T-2 must NOT hit flat-count (because we have 1 parseable timestamp
+        and can compute recent_starts=1 < 5). The flat-count fallback threshold is
+        "< 2 parseable timestamps" not "recent_starts < trip".
+        """
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 10, 10, 0, 0)
+        # Single daemon started 2h ago with a parseable ISO timestamp
+        text = _daemon_start(ts=(now - timedelta(hours=2)).isoformat())
+        text += "".join(_good_cycle(n=i) for i in range(1, 4))  # 3 productive prunes
+        # 21 error lines across 3 recovered streaks (7 per streak)
+        for streak in range(3):
+            text += "".join(_error_cycle(n=j) for j in range(1, 8))
+        rep = scan_log_text(text)
+        # At base: 21 >= 20 (loop_trip) AND 21 > 3 (productive_prunes) → looping=True (FP)
+        # After fix: recent_starts=1 < RATE_STORM_TRIP=5 → rate says "not a storm";
+        #            since we have >=1 parseable timestamp, flat-count fallback does NOT run
+        self.assertFalse(rep.looping,
+                         "a single daemon with scattered recovered errors must NOT be "
+                         "flagged — 1 daemon-start within the rate window is not a storm")
+
+    def test_spread_out_restarts_not_flagged_T3(self):
+        """T-3 (AC-2b): 6 restarts 4h apart across a day must NOT flag as a storm.
+
+        All 6 have parseable timestamps; total daemon_starts=6 > STORM_TRIP=5.
+        But recent_starts within the 1h window = 1 (only the last one).
+        Must NOT be flagged by rate path (not a storm in the temporal sense).
+        """
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 10, 20, 0, 0)
+        parts = []
+        for i in range(6):
+            ts = (now - timedelta(hours=(5 - i) * 4)).isoformat()  # T-20h, T-16h, ..., T-0h
+            parts.append(_daemon_start(ts=ts))
+            parts.append(_error_cycle(n=1))  # one error per gen
+        text = "".join(parts)
+        rep = scan_log_text(text)
+        self.assertFalse(rep.looping,
+                         "spread-out restarts (4h apart) are not a storm — "
+                         "recent_starts within 1h window must be 1, not 6")
+
+    def test_real_fixture_unchanged_T4(self):
+        """T-4 (AC-3): real f641174c fixture must still NOT be flagged after the fix.
+
+        The fixture has 1 daemon-start with a parseable ISO timestamp.
+        recent_starts=1 < RATE_STORM_TRIP=5 → rate path does not flag.
+        Flat-count fallback does not run (>=1 parseable timestamp).
+        The futile-prune path owns this fixture (10 futile < 20 trip → NOT flagged).
+        """
+        text = (FIXTURES / "f641174c_reload_loop.log").read_text(encoding="utf-8")
+        rep = scan_log_text(text)
+        self.assertFalse(rep.looping,
+                         "f641174c real fixture: single K-exit run must remain NOT flagged")
+
+    def test_no_timestamp_fallback_to_flat_count_T5(self):
+        """T-5 (edge): log with no ISO timestamp in daemon-start header falls back to flat-count.
+
+        "--- Guard daemon started ---" (no "at <ISO>" part) → 0 parseable timestamps
+        → < 2 parseable timestamps → flat-count fallback runs.
+        25 error lines, 0 productive prunes → flat-count fires → looping=True.
+        """
+        # Daemon-start line WITHOUT the "at <ISO>" part
+        text = "--- Guard daemon started ---\nCWD: /x\n\n"
+        text += "".join(_error_cycle(n=j) for j in range(1, 26))  # 25 error lines
+        rep = scan_log_text(text)
+        self.assertTrue(rep.looping,
+                        "no-timestamp log must fall back to flat-count and flag 25 errors")
+
+    def test_mixed_timestamps_anchor_uses_latest_parseable_T6(self):
+        """T-6 (edge): if latest daemon-start has no ISO, anchor uses prior parseable ts.
+
+        Gen 1 at T-2h (parseable), Gen 2 at T-30min (parseable),
+        Gen 3 with no 'at <ISO>' suffix (None timestamp) → anchor=Gen 2 ts.
+        We need 5 daemon-starts within 1h. Use 5 starts close together + 1 no-ISO.
+        """
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 10, 20, 0, 0)
+        parts = []
+        # 5 parseable starts within 30 min
+        for i in range(5):
+            ts = (now - timedelta(minutes=30 - i * 5)).isoformat()
+            parts.append(_daemon_start(ts=ts))
+            parts.append(_error_cycle(n=1))
+        # 1 no-ISO start at the very end (will be the latest in text position)
+        parts.append("--- Guard daemon started ---\nCWD: /x\n\n")
+        parts.append(_error_cycle(n=1))
+        text = "".join(parts)
+        rep = scan_log_text(text)
+        # Anchor = latest parseable = T-0min (5th parseable start)
+        # recent_starts = all 5 parseable starts within 30min <= 3600s → 5 >= 5 → storm
+        self.assertTrue(rep.looping,
+                        "with mixed timestamps, anchor uses latest parseable; "
+                        "5 starts within 1h must flag as a storm")
+        self.assertIn("storm", rep.reason)
+
+
 if __name__ == "__main__":
     unittest.main()
