@@ -622,5 +622,98 @@ class TestC7EdgeCases(unittest.TestCase):
                         "5 starts including the boundary one must trigger storm detection")
 
 
+class TestC7DiagnosticAccuracy(unittest.TestCase):
+    """R3-1 + R3-3: rate-path reason accuracy and PATH A/B asymmetry characterization.
+
+    R3-1 (MED): a modern-format futile-prune storm (≥RATE_STORM_TRIP ISO starts,
+    zero cycle_errors) hits PATH A and returns looping=True, but the reason says
+    "error respawn storm" — wrong with 0 errors, and the accurate futile-prune
+    diagnosis is masked (the futile-prune branch never runs because PATH A returns
+    first). Fix: reason must be CAUSE-NEUTRAL ("respawn storm") and include the
+    futile count alongside the error/escalation signals.
+
+    R3-3 (characterization): a mixed-gen log (≥1 no-ISO start + 1 ISO start +
+    ≥loop_trip errors + 0 escalations) → looping=False (PATH A suppresses PATH B
+    the moment ANY timestamp parses). The SAME log with the ISO start stripped
+    (pure old-format, 0 parseable timestamps) → looping=True via PATH B.
+    Documents the known, scoped limitation so a future change is immediately visible.
+    """
+
+    def test_futile_prune_storm_reason_is_cause_neutral(self):
+        """R3-1 RED→GREEN: futile-prune modern storm reason must not say "error".
+
+        Build: 5 rapid ISO restarts within 30min, each generating futile prune cycles
+        but ZERO cycle_errors. PATH A fires (recent_starts=5 >= RATE_STORM_TRIP=5)
+        and returns looping=True. At HEAD the reason reads "error respawn storm"
+        (misleading with 0 errors). After fix: reason omits "error" from the storm
+        label and includes the futile-cycle count.
+
+        RED-at-HEAD evidence: assertNotIn("error respawn", rep.reason) FAILS because
+        reason = "5 guard restarts within a 60min window — error respawn storm …".
+        """
+        now = datetime(2026, 6, 10, 20, 0, 0)
+        parts = []
+        for i in range(5):
+            ts = (now - timedelta(minutes=30 - i * 5)).isoformat()
+            parts.append(_daemon_start(ts=ts))
+            # Each gen accrues futile prune cycles but NO error lines
+            parts.extend(_futile_cycle(n=j) for j in range(1, 4))  # 3 futile/gen
+        text = "".join(parts)
+        rep = scan_log_text(text)
+        # Precondition: PATH A must have fired
+        self.assertTrue(rep.looping,
+                        "5 rapid ISO-timestamped starts must trigger PATH A storm")
+        self.assertEqual(rep.cycle_errors, 0,
+                         "precondition: no error lines in this fixture")
+        self.assertGreater(rep.futile_cycles, 0,
+                           "precondition: futile prune cycles present")
+        # The storm reason must be cause-neutral (no bare "error" labeling the storm)
+        self.assertNotIn("error respawn", rep.reason,
+                         "reason must not say 'error respawn' when cycle_errors == 0; "
+                         "storm label must be cause-neutral (e.g. 'respawn storm')")
+        # And the reason must include the futile count so the operator gets actionable info
+        self.assertIn(str(rep.futile_cycles), rep.reason,
+                      "reason must include the futile cycle count for operator diagnosis")
+
+    def test_path_ab_asymmetry_characterization(self):
+        """R3-3 (characterization — documents a known scoped residual, not a bug).
+
+        Mixed-gen log: old-format start (no ISO) + modern start (1 ISO) +
+        ≥loop_trip errors + 0 escalations + 0 prunes.
+
+        PATH A is authoritative as soon as ANY timestamp parses. With recent_starts=1
+        < RATE_STORM_TRIP=5 and no escalation, PATH A does NOT flag — and PATH B is
+        suppressed. Result: looping=False.
+
+        The SAME log with the ISO start stripped (pure no-timestamp format, 0 parseable)
+        → recent_starts=0 → PATH B runs → cycle_errors=25 >= 20 AND 25 > 0 productive
+        → looping=True.
+
+        This asymmetry is a documented scoped limitation (see PR body + TODO.md):
+        PATH B is suppressed whenever ≥1 timestamp parses, including mixed-gen logs.
+        A non-escalated inert daemon on such a log is NOT flagged.
+        """
+        errors = "".join(_error_cycle(n=j) for j in range(1, 26))  # 25 errors, 0 escalations
+
+        # Mixed-gen: one no-ISO start + one ISO start
+        old_start = "--- Guard daemon started ---\nCWD: /x\n\n"
+        iso_start = _daemon_start(ts="2026-06-10T10:00:00")
+        mixed_text = old_start + iso_start + errors
+
+        rep_mixed = scan_log_text(mixed_text)
+        # PATH A is authoritative (1 parseable ts); recent_starts=1 < RATE_STORM_TRIP;
+        # 0 escalations → escalation gate does not fire → looping=False
+        self.assertFalse(rep_mixed.looping,
+                         "mixed-gen log (1 ISO start + no-ISO start, no escalation): "
+                         "PATH A suppresses PATH B — looping=False (known scoped residual)")
+
+        # Pure old-format: same errors, no ISO start → 0 parseable → PATH B runs
+        pure_old_text = old_start + errors
+        rep_old = scan_log_text(pure_old_text)
+        self.assertTrue(rep_old.looping,
+                        "pure old-format log (no ISO timestamps, 25 errors, 0 productive prunes): "
+                        "PATH B must flag → looping=True")
+
+
 if __name__ == "__main__":
     unittest.main()
