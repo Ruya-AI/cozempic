@@ -250,8 +250,8 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
         if rep.recent_starts >= RATE_STORM_TRIP:
             rep.looping = True
             rep.reason = (
-                f"{rep.recent_starts} guard restarts in the last "
-                f"{RATE_WINDOW_S // 60}min — error respawn storm (rate-based); "
+                f"{rep.recent_starts} guard restarts within a "
+                f"{RATE_WINDOW_S // 60}min window — error respawn storm (rate-based); "
                 f"{rep.cycle_errors} per-cycle errors / "
                 f"{rep.cycle_escalations} escalations"
             )
