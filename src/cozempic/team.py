@@ -133,11 +133,21 @@ class TeamState:
             return ""
         try:
             from .digest import _sanitize_for_injection
-            return _sanitize_for_injection(str(text))
+            s = _sanitize_for_injection(str(text))
         except Exception:
             # Fail safe: at minimum collapse newlines so injection can't add lines.
             import re as _re
-            return _re.sub(r"\s+", " ", str(text)).strip()
+            s = _re.sub(r"\s+", " ", str(text)).strip()
+        # Replace any LONE SURROGATE (from a surrogateescape-decoded non-UTF-8 transcript
+        # byte) with U+FFFD so the rendered checkpoint is clean UTF-8 (R15): a surrogate
+        # in the markdown made the STRICT checkpoint write/read raise UnicodeEncode/Decode
+        # — the R14 surrogatepass write merely RELOCATED that crash to read_team_checkpoint
+        # / the PostCompact hook. Sanitizing at this single render chokepoint keeps the
+        # file strict-UTF-8 clean for both cozempic AND Claude Code's own reader, with no
+        # WTF-8 round-trip. A lone surrogate has no display value anyway.
+        if any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+            s = "".join("�" if 0xD800 <= ord(c) <= 0xDFFF else c for c in s)
+        return s
 
     def to_markdown(self) -> str:
         """Render team state as markdown for checkpoint file."""
@@ -1184,12 +1194,13 @@ def write_team_checkpoint(state: TeamState, project_dir: Path | None = None) -> 
     # atomic_write_text (ynaamane review #5): a SIGKILL/OOM mid-write would otherwise
     # leave a PARTIAL checkpoint that PostCompact reads back as recovery state. Every
     # other shared-state writer is atomic (temp + os.replace); this one was the holdout.
-    # errors="surrogatepass": team fields are extracted from transcript content decoded
-    # with surrogateescape, so to_markdown() can carry a lone surrogate from a non-UTF-8
-    # byte; a strict encode would raise UnicodeEncodeError mid-write (R14). surrogatepass
-    # encodes any surrogate (WTF-8) so the checkpoint write never crashes.
+    # Strict UTF-8 is safe now (R15): _san replaces lone surrogates with U+FFFD at the
+    # render chokepoint, so to_markdown() is clean UTF-8 — no UnicodeEncodeError on
+    # write and no WTF-8 for the reader (cozempic OR Claude Code) to choke on. (The R14
+    # errors="surrogatepass" write was reverted because it only RELOCATED the crash to
+    # the strict read in read_team_checkpoint / the PostCompact hook.)
     from .helpers import atomic_write_text
-    atomic_write_text(path, state.to_markdown(), errors="surrogatepass")
+    atomic_write_text(path, state.to_markdown())
     return path
 
 
@@ -1223,7 +1234,17 @@ def read_team_checkpoint(
 
     for path in candidates:
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
+            try:
+                # errors="surrogatepass": tolerate a STALE checkpoint written by the
+                # short-lived R14 surrogatepass code (WTF-8 bytes on disk) so the
+                # PostCompact hook degrades gracefully instead of crashing on a strict
+                # UnicodeDecodeError (R15). New writes are clean UTF-8 (_san strips
+                # surrogates), so this only matters for a pre-existing file.
+                content = path.read_text(encoding="utf-8", errors="surrogatepass").strip()
+            except (OSError, ValueError):
+                # Unreadable / undecodable checkpoint — degrade to None rather than
+                # crash the automatic PostCompact hook (which has no try/except).
+                continue
             if content:
                 return content
     return None

@@ -147,6 +147,33 @@ class TestWatchdogErrorStormDiscriminator(unittest.TestCase):
         text = "Guard daemon started\n" + "  Guard: skipping a cycle after an unexpected error (1/5): E\n" * 22
         self.assertTrue(scan_log_text(text).looping)
 
+    def test_R15_storm_with_stray_productive_prune_still_flagged(self):
+        # R15 FN: the total_prune_cycles==0 gate let an error storm escape if ANY stray
+        # productive prune line survived in the tail. The errors-outnumber-productive-
+        # prunes rule flags it (130 errors >> 1 prune).
+        from cozempic.watchdog import scan_log_text
+        gen = ("--- Guard daemon started ---\n"
+               + "  Guard: skipping a cycle after an unexpected error (1/5): E\n" * 5
+               + "  Guard cycle-error escalation: 5 consecutive cycle errors\n")
+        stray = "  Pruned: 210,000 tokens freed (38.0%)\n"
+        self.assertTrue(scan_log_text(stray + gen * 26).looping)
+
+    def test_R15_healthy_idle_multi_restart_not_flagged(self):
+        # R15 FP: a healthy idle guard (short sessions, 0 prunes, 0 errors) with several
+        # restarts must NOT be flagged (the daemon_starts-only trigger false-flagged it).
+        from cozempic.watchdog import scan_log_text
+        text = "--- Guard daemon started ---\nCWD: /x\n  Read-only — live session not rewritten\n" * 6
+        self.assertFalse(scan_log_text(text).looping)
+
+    def test_R15_healthy_busy_with_transient_errors_not_flagged(self):
+        # A long healthy daemon: many productive prunes, a few transient errors that do
+        # NOT outnumber the prunes -> not flagged.
+        from cozempic.watchdog import scan_log_text
+        text = ("--- Guard daemon started ---\n"
+                + "  Pruned: 12,345 tokens freed (48.0%)\n" * 50
+                + "  Guard: skipping a cycle after an unexpected error (1/5): E\n" * 20)
+        self.assertFalse(scan_log_text(text).looping)
+
 
 class TestAtomicCheckpoint(unittest.TestCase):
     """#5: write_team_checkpoint writes atomically (no partial file)."""

@@ -138,46 +138,35 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
         rep.max_backoff_s = max(backoffs)
     rep.has_exit = bool(_EXIT_RE.search(text))
 
-    # C7: erroring/inert-guard signature. Flag a daemon that keeps hitting per-cycle
-    # exceptions — either spinning (many skip lines) or respawn-cycling on a
-    # deterministic error (escalation markers).
-    #
-    # The discriminator is NO PRODUCTIVE PRUNE in the whole tail (ynaamane #7 + R14):
-    #  - A HEALTHY guard — even one in a respawn-prone cwd whose tail carries STALE
-    #    escalation lines from long-dead generations — has total_prune_cycles > 0
-    #    (it IS pruning), so it is NEVER flagged. This fixes the ynaamane #7
-    #    false-positive WITHOUT generation-scoping.
-    #  - Generation-scoping (the first attempt at #7) was WRONG: it let a
-    #    deterministic-ERROR respawn storm ESCAPE, because each generation logs only
-    #    GUARD_CYCLE_ERROR_EXIT(=5) error lines + 1 escalation before sys.exit(1)
-    #    (both below the current-gen thresholds), so no single generation ever trips
-    #    (R14). Counting whole-log, gated on zero productive prunes, catches the storm
-    #    (many escalations / restarts across generations, 0 prunes) again.
-    # The futile-PRUNE storm (f641174c: many near-0% prune lines) has prunes > 0, so it
-    # is caught by the separate futile-dominance branch below, not here.
+    # C7: erroring/inert-guard signature — the guard is erroring MORE than it is
+    # productively pruning. Discriminator (R15, after three weaker attempts each leaked):
+    #   cycle_errors >= loop_trip  AND  cycle_errors > productive_prunes
+    # where productive_prunes = total_prune_cycles - futile_cycles (prunes that actually
+    # freed space). This is robust in BOTH directions on a flat append-mode log:
+    #  - HEALTHY busy guard (many productive prunes, occasional transient error):
+    #    cycle_errors <= productive_prunes -> NOT flagged.
+    #  - HEALTHY IDLE guard (short sessions, 0 prunes, 0 errors, several restarts):
+    #    cycle_errors (0) < loop_trip -> NOT flagged (the daemon_starts-only trigger of
+    #    the prior attempt false-flagged this — R15 FP).
+    #  - HEALTHY fresh gen + a couple of STALE escalations from dead gens (~10 errors):
+    #    < loop_trip -> NOT flagged (R15 FP).
+    #  - ERROR respawn storm, even WITH a stray early productive prune line in the tail
+    #    (the R15 FN that defeated the total_prune_cycles==0 gate): many errors greatly
+    #    outnumber the lone productive prune -> flagged.
+    #  - single INERT generation (>= loop_trip errors, 0 prunes) -> flagged.
+    # The futile-PRUNE storm (f641174c: many <1%-freed prunes, ~0 errors) has
+    # productive_prunes near 0 but cycle_errors near 0 too, so it is owned by the
+    # separate futile-dominance branch below (which keeps the "respawn storm" reason).
     rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
     rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
-    # Gate on ZERO prune lines at all (erroring INSTEAD of pruning). A guard that
-    # produces ANY prune line — even a futile one — is handled by the futile-dominance
-    # branch below (which owns the "respawn storm" reason); this branch is only for the
-    # NO-prune error shape. total_prune_cycles == 0 (whole-log) cleanly excludes a
-    # HEALTHY guard that is pruning, even one whose tail carries stale escalations from
-    # dead generations (the ynaamane #7 false-positive) — so no generation-scoping is
-    # needed (and generation-scoping is what let the multi-generation 5-error/1-escalation
-    # respawn storm ESCAPE in R14, since each generation exits below the thresholds).
-    # With 0 prunes, flag: >= STORM_TRIP restarts (a respawn storm caught even at the
-    # just-respawned instant), >= 2 escalations across generations, or a single inert
-    # generation erroring >= loop_trip times.
-    if rep.total_prune_cycles == 0 and (
-            rep.cycle_escalations >= 2
-            or rep.cycle_errors >= loop_trip
-            or rep.daemon_starts >= STORM_TRIP):
+    _productive_prunes = rep.total_prune_cycles - rep.futile_cycles
+    if rep.cycle_errors >= loop_trip and rep.cycle_errors > _productive_prunes:
         rep.looping = True
         rep.reason = (
             f"{rep.cycle_errors} per-cycle errors / {rep.cycle_escalations} escalations / "
-            f"{rep.daemon_starts} restarts with 0 prune cycles — guard is erroring instead of "
-            f"pruning (inert or respawn-cycling on a deterministic failure); "
-            f"investigate the logged exception"
+            f"{rep.daemon_starts} restarts vs {_productive_prunes} space-freeing prunes "
+            f"— guard is erroring more than it is productively pruning (inert or "
+            f"respawn-cycling on a deterministic failure); investigate the logged exception"
         )
         return rep
 
