@@ -89,9 +89,20 @@ _PRUNED_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _BACKOFF_RE = re.compile(r"back-off \(next sleep:\s*(\d+)s", re.IGNORECASE)
+# Line-anchored to prevent mid-line forged "Guard daemon started at <ISO>" substrings
+# (e.g. inside a "Team '<attacker-name>' state preserved" log line) from registering
+# as daemon-start markers — same defence class as the _PRUNED_RE anchor (C7 log-injection
+# that the newline-only _log_safe scrub doesn't cover). The real guard format is
+# "--- Guard daemon started at <ISO> ---" which starts a new line; the leading "--- "
+# (dashes + space) must be matched explicitly. Optional leading whitespace covers
+# any compact variant. The pattern covers both forms:
+#   ^---\s*Guard daemon started …   (real format with dashes)
+#   ^\s*Guard daemon started …       (whitespace-only prefix variant)
+# A mid-line occurrence like "Team 'Guard daemon started at T' state preserved"
+# cannot match because "Team '" is neither dashes nor whitespace at line-start.
 _DAEMON_START_RE = re.compile(
-    r"Guard daemon started(?:\s+at\s+([\d\-T:.]+))?",
-    re.IGNORECASE,
+    r"^(?:---\s*|\s*)Guard daemon started(?:\s+at\s+([\d\-T:.Z+-]+))?",
+    re.IGNORECASE | re.MULTILINE,
 )
 # Circuit-breaker / daemon-exit markers (recorded for diagnostics — NOT treated
 # as proof of health: the real f641174c storm K-exited 21x and still looped).
@@ -137,11 +148,22 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     exit as proof of health — each daemon in a respawn storm DID K-exit, yet the
     SessionStart hook kept respawning onto an unprunable session.
 
-    **C7 error-storm path (rate-based)**: flags ``looping`` when >= ``RATE_STORM_TRIP``
-    daemon restarts fall within ``RATE_WINDOW_S`` seconds of each other (as measured
-    from ISO timestamps on daemon-start header lines). Rate-first: when parseable
-    timestamps are available, the rate verdict is authoritative — the older flat-count
-    fallback only runs for logs that lack ISO timestamps (old daemon versions).
+    **C7 error-storm path (rate-based)**: when ≥1 parseable ISO timestamp exists in
+    daemon-start header lines, PATH A is authoritative. Two sub-verdicts:
+
+    * **Storm** (``recent_starts >= RATE_STORM_TRIP``): the maximum number of daemon
+      restarts that fall within ANY ``RATE_WINDOW_S``-second sliding window reaches the
+      trip threshold. Uses a sliding-window algorithm (sort + per-point count) so a
+      single outlier timestamp (forged future or far-past) forms its own window of size 1
+      and cannot mask a genuine restart cluster.
+    * **Inert/escalating** (``recent_starts < RATE_STORM_TRIP`` but
+      ``cycle_escalations >= 1`` and ``cycle_errors >= loop_trip`` and
+      ``cycle_errors > productive_prunes``): a single daemon hit a deterministic failure,
+      accumulated many per-cycle errors, and exited via the C2 escalation path. Not a
+      storm but genuinely stuck.
+
+    When no parseable timestamps exist, the older flat-count fallback (PATH B) runs
+    unchanged — zero regression for old-format logs.
     """
     rep = LoopReport()
     futile = 0
@@ -159,26 +181,38 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
 
     # Parse daemon-start markers and attempt to extract ISO timestamps from each.
     # The capture group is optional — lines without "at <ISO>" yield group(1)=None.
+    # Tz-aware timestamps (guard emits naive local time via datetime.now().isoformat(),
+    # so a tz-aware result means a forged/unexpected format) are treated as None: mixing
+    # tz-aware + naive datetimes in comparisons raises TypeError.
     for m in _DAEMON_START_RE.finditer(text):
         rep.daemon_starts += 1
         raw_ts = m.group(1)
-        try:
-            rep.daemon_start_times.append(
-                datetime.fromisoformat(raw_ts) if raw_ts is not None else None
-            )
-        except ValueError:
-            rep.daemon_start_times.append(None)
+        dt: datetime | None = None
+        if raw_ts is not None:
+            try:
+                parsed = datetime.fromisoformat(raw_ts)
+                dt = parsed if parsed.tzinfo is None else None
+            except ValueError:
+                dt = None
+        rep.daemon_start_times.append(dt)
 
-    # Compute recent_starts: count of daemon restarts whose ISO timestamp falls
-    # within RATE_WINDOW_S seconds of the most recent parseable timestamp (anchor).
-    # If no parseable timestamps exist, recent_starts stays 0 and the rate path
-    # is bypassed entirely — the flat-count fallback handles old-format logs.
+    # Compute recent_starts: maximum number of daemon restarts that fall within any
+    # sliding RATE_WINDOW_S-second window of each other. Uses a sort + O(n²) inner
+    # count (n = daemon_starts, typically < 50) rather than max()-anchoring, which
+    # is defeated by a single forged far-future or far-past timestamp inflating the
+    # anchor: a lone outlier forms its own window of size 1 and can't suppress
+    # legitimate clusters.
+    # If no parseable timestamps exist, recent_starts stays 0 → rate path skipped,
+    # flat-count fallback (PATH B) handles old-format logs with no ISO timestamps.
     parseable = [dt for dt in rep.daemon_start_times if dt is not None]
     if parseable:
-        anchor = max(parseable)
-        rep.recent_starts = sum(
-            1 for dt in parseable
-            if (anchor - dt).total_seconds() <= RATE_WINDOW_S
+        sorted_ts = sorted(parseable)
+        rep.recent_starts = max(
+            sum(
+                1 for t2 in sorted_ts
+                if 0 <= (t2 - t1).total_seconds() <= RATE_WINDOW_S
+            )
+            for t1 in sorted_ts
         )
 
     backoffs = [int(s) for s in _BACKOFF_RE.findall(text)]
@@ -223,8 +257,31 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
             )
             return rep
         # recent_starts < RATE_STORM_TRIP with parseable timestamps: not a storm.
-        # The flat-count is suppressed — a single daemon with scattered errors
-        # must not be flagged just because its prune lines scrolled out of the tail.
+        # Check for the inert/escalating-single-daemon case: a daemon that hit a
+        # deterministic failure, emitted ≥loop_trip per-cycle errors, and exited
+        # via the C2 escalation path (cycle_escalations ≥ 1) for operator respawn.
+        # This is NOT a respawn storm (recent_starts is small) but IS genuinely
+        # stuck — the escalation proves it tried and failed repeatedly, not just
+        # a transient blip that recovered. Without this gate, PATH A's flat-count
+        # suppression would mask single-gen inert daemons.
+        #
+        # DEFERRED RESIDUAL: a daemon that errors ≥loop_trip times but NEVER
+        # escalates (C2 escalation path was disabled or the loop exited via a
+        # different path) is not caught by this discriminator. That shape is rare
+        # (C2 escalation fires before K=loop_trip in normal operation) and is
+        # already handled by PATH B for no-timestamp logs. Tracking in TODO.md.
+        if (
+            rep.cycle_escalations >= 1
+            and rep.cycle_errors >= loop_trip
+            and rep.cycle_errors > _productive_prunes
+        ):
+            rep.looping = True
+            rep.reason = (
+                f"inert/erroring guard (escalated): {rep.cycle_errors} per-cycle errors / "
+                f"{rep.cycle_escalations} escalations vs {_productive_prunes} productive prunes "
+                f"— genuinely stuck (not a recovered transient)"
+            )
+            return rep
     else:
         # PATH B: flat-count fallback — no parseable timestamps (old log format).
         # Original R15 discriminator: erroring more than productively pruning.
