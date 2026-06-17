@@ -24,6 +24,7 @@ from unittest import mock
 from cozempic.watchdog import (
     scan_log_text, scan_guard_logs,
     FUTILE_PCT_FLOOR, LOOP_TRIP_DEFAULT, BACKOFF_CAP_S, STORM_TRIP,
+    RATE_WINDOW_S, RATE_STORM_TRIP,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "guard_logs"
@@ -362,35 +363,10 @@ class TestC7RateWindow(unittest.TestCase):
     def test_scattered_errors_not_flagged_T2(self):
         """T-2 (AC-2a): single daemon, 21 scattered recovered errors, must NOT flag.
 
-        At base (flat-count): 21 >= 20 (loop_trip) AND 21 > 3 (productive_prunes)
-        → looping=True (FP). After the rate-window fix, recent_starts=1 <
-        RATE_STORM_TRIP=5 → rate path skips, flat-count doesn't fire because
-        we never reach the flat-count unless timestamps are absent or < 2.
-
-        Wait — the design is rate-FIRST: if recent_starts < trip, rate path skips
-        and falls through to flat-count. This means T-2 actually STILL hits the
-        flat-count. So the fix only resolves the FP if the rate path changes
-        behavior here. The rate-first approach alone doesn't fix T-2 unless the
-        rate path overrides or the flat-count is only used as fallback for
-        insufficient timestamps (< 2 parseable starts). RE-READ the design:
-
-        The fallback condition is: "if FEWER THAN 2 daemon-start timestamps parse,
-        fall through to the existing flat-count logic". With 1 daemon-start that
-        HAS a parseable timestamp, we have exactly 1 parseable timestamp.
-        1 < 2 → we ARE in the fallback zone → flat-count runs.
-
-        But the handoff says: "recent_starts=1 < RATE_STORM_TRIP=5 → not flagged".
-        The design intent is that 1 recent start means no storm.
-
-        The correct design: rate path runs when recent_starts is computed (any number
-        of parseable timestamps). If recent_starts < RATE_STORM_TRIP, rate path
-        says "not a storm" (does NOT flag). Then flat-count is NOT used at all when
-        timestamps are available. Flat-count is ONLY the fallback when < 2 parseable
-        timestamps exist (i.e., we can't compute a meaningful rate).
-
-        This means T-2 must NOT hit flat-count (because we have 1 parseable timestamp
-        and can compute recent_starts=1 < 5). The flat-count fallback threshold is
-        "< 2 parseable timestamps" not "recent_starts < trip".
+        At base (flat-count): cycle_errors=21 >= loop_trip=20 AND 21 > 3 (productive)
+        → looping=True (FP). After the rate-window fix, the single parseable ISO
+        timestamp activates PATH A (rate-based): recent_starts=1 < RATE_STORM_TRIP=5
+        → rate path is authoritative and returns not-a-storm, suppressing flat-count.
         """
         from datetime import datetime, timedelta
         now = datetime(2026, 6, 10, 10, 0, 0)
