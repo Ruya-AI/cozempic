@@ -157,6 +157,19 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     # The futile-PRUNE storm (f641174c: many <1%-freed prunes, ~0 errors) has
     # productive_prunes near 0 but cycle_errors near 0 too, so it is owned by the
     # separate futile-dominance branch below (which keeps the "respawn storm" reason).
+    #
+    # KNOWN RESIDUAL (accepted, REPORT-ONLY; tracked follow-up = a rate-based redesign):
+    # because this counts over a flat 256KB append-mode tail with no recency/rate
+    # awareness, two edge cases survive — (FN) a CURRENT error-storm can be masked if
+    # stale productive-prune lines from an earlier dead generation still in the window
+    # outnumber the errors; (FP) a long healthy daemon that self-recovered >= loop_trip
+    # SCATTERED transient errors (counter reset each time, never escalated) with its
+    # productive prunes scrolled out of the window can be flagged. Both are bounded:
+    # this is a REPORT-ONLY monitor (--fix is manual + guard-identity-gated), the
+    # daemon's OWN circuit-breaker self-arrests real error-storms, and the well-tested
+    # futile-PRUNE loop detection (the real f641174c incident shape) is unaffected. The
+    # durable fix is to parse the per-line timestamps and key the verdict on RESTART
+    # RATE within a recent window — deferred to a follow-up (not blocking PR #138).
     rep.cycle_errors = len(_CYCLE_ERR_RE.findall(text))
     rep.cycle_escalations = len(_CYCLE_ESCALATION_RE.findall(text))
     _productive_prunes = rep.total_prune_cycles - rep.futile_cycles
