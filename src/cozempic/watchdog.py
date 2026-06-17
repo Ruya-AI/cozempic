@@ -162,12 +162,11 @@ def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
     for m in _DAEMON_START_RE.finditer(text):
         rep.daemon_starts += 1
         raw_ts = m.group(1)
-        if raw_ts is not None:
-            try:
-                rep.daemon_start_times.append(datetime.fromisoformat(raw_ts))
-            except ValueError:
-                rep.daemon_start_times.append(None)
-        else:
+        try:
+            rep.daemon_start_times.append(
+                datetime.fromisoformat(raw_ts) if raw_ts is not None else None
+            )
+        except ValueError:
             rep.daemon_start_times.append(None)
 
     # Compute recent_starts: count of daemon restarts whose ISO timestamp falls

@@ -17,6 +17,7 @@ futile-churn DOMINANCE, exit or no exit.
 
 import signal
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -56,6 +57,16 @@ def _respawn_storm(runs=23, per_run=10):
         out.append("  [15:43:58] Guard powerless against live-context dominance "
                     f"({per_run} consecutive 0-byte HARD prunes). Exiting.\n")
     return "".join(out)
+
+
+def _error_cycle(n=1):
+    """One guard error-skip line (no timestamp, matches _CYCLE_ERR_RE)."""
+    return f"  Guard: skipping a cycle after an unexpected error ({n}/5): RuntimeError(boom)\n"
+
+
+def _escalation():
+    """One guard cycle-error escalation line (matches _CYCLE_ESCALATION_RE)."""
+    return "  Guard cycle-error escalation: 5 consecutive cycle errors (0 deferred) — exiting for respawn (last: RuntimeError(boom)).\n"
 
 
 class TestRealFixture(unittest.TestCase):
@@ -304,16 +315,6 @@ class TestFixIdentityGate(unittest.TestCase):
         self.assertEqual(killed.get("sig"), signal.SIGTERM)
 
 
-def _error_cycle(n=1):
-    """One guard error-skip line (no timestamp, matches _CYCLE_ERR_RE)."""
-    return f"  Guard: skipping a cycle after an unexpected error ({n}/5): RuntimeError(boom)\n"
-
-
-def _escalation():
-    """One guard cycle-error escalation line (matches _CYCLE_ESCALATION_RE)."""
-    return "  Guard cycle-error escalation: 5 consecutive cycle errors (0 deferred) — exiting for respawn (last: RuntimeError(boom)).\n"
-
-
 class TestC7RateWindow(unittest.TestCase):
     """Rate-based storm detection: the rate-window path must fire before the flat-count.
 
@@ -335,7 +336,6 @@ class TestC7RateWindow(unittest.TestCase):
         The flat-count FN arises because productive_prunes (35) > cycle_errors (25),
         so the C7 branch doesn't fire. The rate path must fire first.
         """
-        from datetime import datetime, timedelta
         now = datetime(2026, 6, 10, 20, 0, 0)
         # Gen 1: healthy, dead — 35 productive prune cycles, started 11h ago
         gen1_ts = (now - timedelta(hours=11)).isoformat()
@@ -368,7 +368,6 @@ class TestC7RateWindow(unittest.TestCase):
         timestamp activates PATH A (rate-based): recent_starts=1 < RATE_STORM_TRIP=5
         → rate path is authoritative and returns not-a-storm, suppressing flat-count.
         """
-        from datetime import datetime, timedelta
         now = datetime(2026, 6, 10, 10, 0, 0)
         # Single daemon started 2h ago with a parseable ISO timestamp
         text = _daemon_start(ts=(now - timedelta(hours=2)).isoformat())
@@ -391,7 +390,6 @@ class TestC7RateWindow(unittest.TestCase):
         But recent_starts within the 1h window = 1 (only the last one).
         Must NOT be flagged by rate path (not a storm in the temporal sense).
         """
-        from datetime import datetime, timedelta
         now = datetime(2026, 6, 10, 20, 0, 0)
         parts = []
         for i in range(6):
@@ -421,7 +419,7 @@ class TestC7RateWindow(unittest.TestCase):
         """T-5 (edge): log with no ISO timestamp in daemon-start header falls back to flat-count.
 
         "--- Guard daemon started ---" (no "at <ISO>" part) → 0 parseable timestamps
-        → < 2 parseable timestamps → flat-count fallback runs.
+        → flat-count fallback runs (PATH B).
         25 error lines, 0 productive prunes → flat-count fires → looping=True.
         """
         # Daemon-start line WITHOUT the "at <ISO>" part
@@ -438,7 +436,6 @@ class TestC7RateWindow(unittest.TestCase):
         Gen 3 with no 'at <ISO>' suffix (None timestamp) → anchor=Gen 2 ts.
         We need 5 daemon-starts within 1h. Use 5 starts close together + 1 no-ISO.
         """
-        from datetime import datetime, timedelta
         now = datetime(2026, 6, 10, 20, 0, 0)
         parts = []
         # 5 parseable starts within 30 min
