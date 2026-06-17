@@ -134,7 +134,7 @@ class LoopReport:
     reason: str = ""
     recent_pcts: list = field(default_factory=list)
     daemon_start_times: list = field(default_factory=list)  # datetime | None per start
-    recent_starts: int = 0  # starts within RATE_WINDOW_S of the anchor timestamp
+    recent_starts: int = 0  # max restarts in any RATE_WINDOW_S-second sliding window
 
 
 def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
