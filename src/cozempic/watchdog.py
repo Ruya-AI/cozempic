@@ -127,16 +127,21 @@ class LoopReport:
 
 
 def scan_log_text(text: str, loop_trip: int = LOOP_TRIP_DEFAULT) -> LoopReport:
-    """Detect futile reload-churn in one guard log's text (pure).
+    """Detect guard reload-churn or error-storm in one guard log's text (pure).
 
-    Flags ``looping`` when the log shows >= ``loop_trip`` futile prune cycles
-    (<1% freed) AND those dominate the prune cycles (>= ``FUTILE_DOMINANCE``).
-    Crucially this does NOT treat a circuit-breaker exit as proof of health —
-    the real f641174c failure was a RESPAWN STORM in which each daemon DID
-    K-exit, so "saw an exit line" is recorded for diagnostics but never clears
-    the verdict. The agents-active deferral path emits read-only-checkpoint lines
-    (not "Pruned: …"), so a busy-but-healthy session accrues no futile prune
-    cycles and is never flagged.
+    Two detection paths:
+
+    **Futile-prune path**: flags ``looping`` when >= ``loop_trip`` futile prune
+    cycles (<1% freed) dominate all prune cycles (>= ``FUTILE_DOMINANCE``). This
+    is the f641174c respawn-storm shape. Crucially does NOT treat a circuit-breaker
+    exit as proof of health — each daemon in a respawn storm DID K-exit, yet the
+    SessionStart hook kept respawning onto an unprunable session.
+
+    **C7 error-storm path (rate-based)**: flags ``looping`` when >= ``RATE_STORM_TRIP``
+    daemon restarts fall within ``RATE_WINDOW_S`` seconds of each other (as measured
+    from ISO timestamps on daemon-start header lines). Rate-first: when parseable
+    timestamps are available, the rate verdict is authoritative — the older flat-count
+    fallback only runs for logs that lack ISO timestamps (old daemon versions).
     """
     rep = LoopReport()
     futile = 0
