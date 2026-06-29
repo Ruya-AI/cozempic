@@ -85,6 +85,21 @@ Install cozempic (any method above), then inside Claude Code:
 
 This gives you MCP tools, skills (`/cozempic:diagnose`, `/cozempic:treat`, etc.), and auto-wired hooks.
 
+> **Keep the plugin current — enable marketplace auto-update.** The `COZEMPIC_*` controls above govern the PyPI **package** (the `cozempic` CLI + guard daemon). The Claude Code **plugin** (hooks, skills, MCP server) is versioned separately, and unless auto-update is enabled for its marketplace it stays pinned at whatever version you installed until you run `/plugin` by hand. To keep it current automatically, set `autoUpdate` on the marketplace entry in `~/.claude/settings.json`:
+>
+> ```json
+> {
+>   "extraKnownMarketplaces": {
+>     "cozempic": {
+>       "source": { "source": "github", "repo": "Ruya-AI/cozempic" },
+>       "autoUpdate": true
+>     }
+>   }
+> }
+> ```
+>
+> With `autoUpdate: true`, Claude Code refreshes the marketplace **and its installed plugins** on startup.
+
 ## Quick Start
 
 ```bash
