@@ -32,11 +32,11 @@ Cozempic removes it with **18 composable strategies** across 3 prescription tier
 
 ## Install
 
-Pick your package manager. `uvx`/`pipx`/`npm`/`pip` are the lowest-friction (no Homebrew trust prompt — see the note below):
+Pick your package manager. `uv tool`/`pipx`/`npm`/`pip` are the lowest-friction (no Homebrew trust prompt — see the note below):
 
 ```bash
-# uv / uvx — no install needed, run on demand (recommended)
-uvx cozempic --help
+# uv — persistent install on PATH (recommended); powers the hooks + guard daemon
+uv tool install cozempic
 
 # pipx — isolated user install, always on PATH
 pipx install cozempic
@@ -59,6 +59,8 @@ nix profile install github:Ruya-AI/cozempic?dir=packaging/nix
 AUR (`yay -S cozempic`) and MacPorts (`port install py-cozempic`) submissions are in progress — see [`packaging/README.md`](packaging/README.md) for status and PKGBUILD/Portfile sources.
 
 That's it. Cozempic auto-initializes on first use — hooks are wired globally, guard daemon auto-starts on every Claude Code session. No manual setup needed. Opt out with `COZEMPIC_NO_GLOBAL_INIT=1`.
+
+> **`cozempic` must be on your `PATH`.** The global hooks and guard daemon work by invoking the `cozempic` command — the `SessionStart` hook runs `cozempic guard --daemon` (falling back to `python3 -m cozempic`). A run-on-demand `uvx cozempic` resolves the package in a throwaway environment and installs **no** executable, so it will **not** power the hooks or daemon: the launch fails silently and `/cozempic:doctor` reports `No guard daemon is running` even though `SessionStart` printed `Cozempic: guard active`. Install with one of the on-`PATH` methods above (`uv tool install` / `pipx` / `npm -g` / `pip`) and verify with `command -v cozempic`.
 
 ### Auto-update & how to control it
 
