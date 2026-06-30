@@ -1,8 +1,8 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-150k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.8.38-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-100k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.8.38-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**50,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
+**100,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
 Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloat, keep everything that matters, protect Agent Teams from context loss**.
 
@@ -22,7 +22,7 @@ Cozempic removes it with **18 composable strategies** across 3 prescription tier
 - **compact-summary-collapse** — 85-95% savings by removing pre-compaction messages already in the summary
 - **Agent Teams protection** — checkpoints team state through compaction, reactive overflow recovery
 - **Behavioral digest** — extracts your corrections ("don't do X"), persists them to Claude Code's memory system so they survive compaction
-- **13 doctor checks** — diagnose and auto-fix session corruption, orphaned tool results, zombie teams
+- **15 doctor checks** — diagnose and auto-fix session corruption, orphaned tool results, zombie teams, unresumable sessions
 - **Token-aware diagnostics** — exact token counts from `usage` fields, cache hit rate, context % bar
 - **Auto-detects 1M context** — correct thresholds for both 200K and 1M models
 - **Efficient idle polling** — backs off the poll cadence when the session is quiet and skips redundant no-op checkpoints
@@ -239,8 +239,10 @@ cozempic checkpoint [--show]                Save team state to disk
 cozempic guard [--daemon]                   Start guard (auto-starts via hook)
 cozempic doctor [--fix]                     Check for known issues
 cozempic digest [show|update|clear|flush|recover|inject]
+cozempic dashboard                          Build a static HTML report of your prune savings
 cozempic self-update                        Upgrade to latest version from PyPI
 cozempic formulary                          Show all strategies & prescriptions
+cozempic uninstall [--project|--all|--purge]  Reverse init: unwire hooks + slash command
 ```
 
 ## Hook Integration
