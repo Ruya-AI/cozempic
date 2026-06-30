@@ -604,6 +604,13 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     # discard event ordering and mark a still-working teammate "completed").
     last_send_line: dict[str, int] = {}
     seen_tasks: dict[str, TaskInfo] = {}
+    # TaskCreate's tool INPUT carries no id (the system assigns it and returns it
+    # in the tool_result: "Task #N created"). Map each TaskCreate tool_use_id to
+    # the temp key its task is parked under, so the result handler can re-key it
+    # to the REAL id. Without this, creates were keyed positionally (str(len(...)))
+    # while TaskUpdate keys by the real id → completed tasks render as pending and
+    # phantom blank tasks appear in the recovered checkpoint.
+    taskcreate_uid_to_key: dict[str, str] = {}
 
     # Track tool_use_id -> tool_name for matching results to calls
     tool_use_id_to_name: dict[str, str] = {}
@@ -809,11 +816,22 @@ def extract_team_state(messages: list[Message]) -> TeamState:
 
                 # TaskCreate (shared todo list)
                 elif name == "TaskCreate":
-                    task_id = _sfield(inp, "taskId", "id") or str(len(seen_tasks))
-                    subject = _sfield(inp, "subject", "title")
-                    seen_tasks[task_id] = TaskInfo(
-                        task_id=task_id,
-                        subject=subject,
+                    # The real task id is assigned by the system and appears ONLY
+                    # in the tool_result ("Task #N created"), never in the input.
+                    # Park the task under a temp key tied to this tool_use_id; the
+                    # tool_result handler re-keys it to the real id so a later
+                    # TaskUpdate(taskId=...) lands on the right task.
+                    real_id = _sfield(inp, "taskId", "id")
+                    if real_id:
+                        task_key = real_id
+                    elif tool_use_id:
+                        task_key = f"__pending_create_{tool_use_id}"
+                        taskcreate_uid_to_key[tool_use_id] = task_key
+                    else:
+                        task_key = str(len(seen_tasks))
+                    seen_tasks[task_key] = TaskInfo(
+                        task_id=real_id or task_key,
+                        subject=_sfield(inp, "subject", "title"),
                         status="pending",
                         owner=_sfield(inp, "owner"),
                         description=_sfield(inp, "description"),
@@ -857,6 +875,22 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 if not isinstance(tool_use_id, str):  # dict-key use below
                     tool_use_id = ""
                 tool_name = tool_use_id_to_name.get(tool_use_id, "")
+
+                # TaskCreate result carries the system-assigned id ("Task #N
+                # created"); re-key the parked task from its temp key to the real
+                # id so TaskUpdate completions (which carry the real taskId) land
+                # on it. A reused id (task store reset) overwrites the older
+                # generation, matching the live store which holds only the latest.
+                if tool_name == "TaskCreate":
+                    _tc_temp = taskcreate_uid_to_key.pop(tool_use_id, "")
+                    if _tc_temp and _tc_temp in seen_tasks:
+                        _m_tc = re.search(r"Task\s+#?(\d+)\s+created",
+                                          _extract_block_text(block), re.I)
+                        if _m_tc:
+                            _rid = _m_tc.group(1)
+                            _info = seen_tasks.pop(_tc_temp)
+                            _info.task_id = _rid
+                            seen_tasks[_rid] = _info
 
                 # Task tool result = subagent finished, capture result
                 if tool_name == "Task" or tool_use_id in tool_use_id_to_subagent:
