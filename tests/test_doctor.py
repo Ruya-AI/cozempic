@@ -19,6 +19,7 @@ from cozempic.doctor import (
     check_stale_tmp_artifacts,
     check_zombie_teams,
     fix_claude_json_corruption,
+    fix_oversized_sessions,
     fix_hooks_trust_flag,
     fix_stale_tmp_artifacts,
 )
@@ -524,6 +525,32 @@ class TestOversizedSessions(unittest.TestCase):
         idx_large = result.fix_description.index("large999")
         idx_small = result.fix_description.index("small111")
         self.assertLess(idx_large, idx_small)
+
+
+    def test_fix_description_mentions_doctor_fix_batch(self):
+        sessions = [self._make_session("aabbccdd1122eeff", 80)]
+        with patch("cozempic.doctor.find_sessions", return_value=sessions):
+            result = check_oversized_sessions()
+        self.assertIn("cozempic doctor --fix", result.fix_description)
+
+    def test_fix_oversized_sessions_treats_large_sessions_with_backups(self):
+        sessions = [self._make_session("aabbccdd1122eeff", 80)]
+        with (
+            patch("cozempic.doctor.find_sessions", return_value=sessions),
+            patch("cozempic.session.load_messages", return_value=[{"type": "user"}]) as load_messages,
+            patch("cozempic.executor.run_prescription", return_value=([{"type": "user", "pruned": True}], None)) as run_prescription,
+            patch("cozempic.session.save_messages") as save_messages,
+        ):
+            message = fix_oversized_sessions()
+        self.assertIn("Treated 1 oversized session", message)
+        load_messages.assert_called_once_with("/tmp/fake/aabbccdd1122eeff.jsonl")
+        from cozempic.registry import PRESCRIPTIONS
+        self.assertIs(run_prescription.call_args.args[1], PRESCRIPTIONS["aggressive"])
+        save_messages.assert_called_once_with(
+            "/tmp/fake/aabbccdd1122eeff.jsonl",
+            [{"type": "user", "pruned": True}],
+            create_backup=True,
+        )
 
 
 if __name__ == "__main__":
