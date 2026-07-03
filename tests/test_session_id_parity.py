@@ -51,7 +51,8 @@ def _bash_slug(session_id: str) -> str:
             s = json.load(sys.stdin).get('session_id','').lower()
             print(re.sub(r'[^a-z0-9_-]', '_', s))
         ")
-        GUARD_PID_FILE="/tmp/cozempic_guard_${SESSION_ID:0:12}.pid"
+        SLUG=$(printf '%.12s' "$SESSION_ID")      # POSIX-safe, #168
+        GUARD_PID_FILE="/tmp/cozempic_guard_${SLUG}.pid"
 
     So the bash slug is: ``re.sub(r'[^a-z0-9_-]', '_', s.lower())[:12]``.
     """

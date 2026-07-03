@@ -39,7 +39,11 @@ def _c(args: str) -> str:
 # at the end of every canonical hook command (e.g. "# cozempic-hook-schema=v2")
 # is what `_is_current_cozempic_hook` looks for — old hooks without the current
 # marker are treated as stale and get refreshed on next init.
-HOOK_SCHEMA_VERSION = "v13"
+# v14: replace the bash-only `${SESSION_ID:0:12}` substring expansion with a
+# POSIX-safe `SLUG=$(printf '%.12s' "$SESSION_ID")` so the SessionStart hook no
+# longer aborts with "Bad substitution" under dash (/bin/sh on Debian/Ubuntu),
+# which silently killed the guard-daemon spawn on those systems (#168).
+HOOK_SCHEMA_VERSION = "v14"
 HOOK_SCHEMA_MARKER = f"cozempic-hook-schema={HOOK_SCHEMA_VERSION}"
 
 

@@ -335,20 +335,21 @@ class TestHookSchemaV9(unittest.TestCase):
         daemon spawn runs inside a flock on a dedicated `*.startup-lock`
         file (distinct from the existing hook-level `*.lock`). The two locks
         MUST be distinct files so the daemon-spawn lock doesn't serialize
-        unrelated hook work. Slug source is ``${SESSION_ID:0:12}`` — the
-        bash side uses the permissive ``re.sub`` sanitiser, the same
-        12-char prefix Python now produces via the relaxed regex."""
+        unrelated hook work. Slug source is ``${SLUG}`` (POSIX
+        ``printf '%.12s' "$SESSION_ID"`` — #168) — the bash side uses the
+        permissive ``re.sub`` sanitiser, the same 12-char prefix Python now
+        produces via the relaxed regex."""
         hooks_path = Path(__file__).parent.parent / "src" / "cozempic" / "data" / "hooks.json"
         hooks = json.loads(hooks_path.read_text())
         ss_cmd = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         self.assertIn("GUARD_STARTUP_LOCK=", ss_cmd,
             "Expected a dedicated GUARD_STARTUP_LOCK variable for the "
             "second-layer flock guarding the daemon spawn")
-        self.assertIn("/tmp/cozempic_guard_${SESSION_ID:0:12}.startup-lock", ss_cmd,
-            "GUARD_STARTUP_LOCK path must use ${SESSION_ID:0:12} — first 12 chars "
-            "of the bash-sanitised lowercased session_id. Convergence (C2/Option B) "
-            "is achieved by Python relaxing its regex to match this character set, "
-            "not by bash tightening to match a stricter Python regex.")
+        self.assertIn("/tmp/cozempic_guard_${SLUG}.startup-lock", ss_cmd,
+            "GUARD_STARTUP_LOCK path must use ${SLUG} — the POSIX-safe first 12 "
+            "chars of the bash-sanitised lowercased session_id (#168). Convergence "
+            "(C2/Option B) is achieved by Python relaxing its regex to match this "
+            "character set, not by bash tightening to match a stricter Python regex.")
         # The startup-lock must use a DIFFERENT fd than the outer hook lock
         # (fd 9) — otherwise the inner flock acquire would race the outer.
         self.assertIn("flock -n 8", ss_cmd,
@@ -360,9 +361,9 @@ class TestHookSchemaV9(unittest.TestCase):
         """v8 keeps v7's fast-path invariant: the SessionStart hook must wrap
         the guard --daemon spawn in a `kill -0 $(cat GUARD_PID_FILE)` fast-path
         so a healthy daemon for the current session is NOT respawned. The
-        GUARD_PID_FILE path uses ``${SESSION_ID:0:12}`` (bash-sanitised
-        lowercased session_id, first 12 chars) — Python's relaxed regex
-        produces the same slug for the same input."""
+        GUARD_PID_FILE path uses ``${SLUG}`` (POSIX ``printf '%.12s'`` of the
+        bash-sanitised lowercased session_id, first 12 chars — #168) — Python's
+        relaxed regex produces the same slug for the same input."""
         hooks_path = Path(__file__).parent.parent / "src" / "cozempic" / "data" / "hooks.json"
         hooks = json.loads(hooks_path.read_text())
         ss_cmd = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -373,10 +374,10 @@ class TestHookSchemaV9(unittest.TestCase):
         # Path must match Python's `_pid_file_for_session` convention
         # (/tmp/cozempic_guard_<slug>.pid where <slug> = first 12 chars of
         # the lowercased+sanitised session_id; Python validates same charset).
-        self.assertIn("/tmp/cozempic_guard_${SESSION_ID:0:12}.pid", ss_cmd,
-            "Fast-path PID file path must use ${SESSION_ID:0:12} — first 12 chars "
-            "of the bash-sanitised lowercased session_id, which (post-C2 Option B) "
-            "matches the slug Python computes via the relaxed _SESSION_ID_RE.")
+        self.assertIn("/tmp/cozempic_guard_${SLUG}.pid", ss_cmd,
+            "Fast-path PID file path must use ${SLUG} — the POSIX-safe first 12 "
+            "chars of the bash-sanitised lowercased session_id (#168), which "
+            "(post-C2 Option B) matches the slug Python computes via _SESSION_ID_RE.")
 
     def test_session_id_lowercased(self):
         """The hook MUST lowercase the session_id before sanitising — Python's

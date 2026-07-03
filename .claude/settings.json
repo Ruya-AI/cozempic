@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; HOOK_DATA=$(cat); SESSION_ID=$(echo \"$HOOK_DATA\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json,re; s=json.load(sys.stdin).get('session_id','').lower(); print(re.sub(r'[^a-z0-9_-]','_',s))\" 2>/dev/null); TRANSCRIPT=$(echo \"$HOOK_DATA\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic digest inject ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic digest inject ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; [ -n \"$SESSION_ID\" ] && { STATUS_FILE=\"/tmp/cozempic_reload_${SESSION_ID:0:12}.status\"; if [ -f \"$STATUS_FILE\" ]; then echo \"Cozempic: previous reload may have failed \u2014 $(head -n 3 $STATUS_FILE 2>/dev/null | tail -n 1)\"; rm -f \"$STATUS_FILE\"; fi; }; [ -n \"$SESSION_ID\" ] && (export COZEMPIC_NO_GLOBAL_INIT=1; if command -v flock >/dev/null 2>&1; then flock -n 9 || exit 0; fi; SENTINEL_FILE=\"/tmp/cozempic_reload_${SESSION_ID:0:12}.in-flight\"; if [ -f \"$SENTINEL_FILE\" ] && [ $(( $(date +%s) - $(stat -f %m \"$SENTINEL_FILE\" 2>/dev/null || stat -c %Y \"$SENTINEL_FILE\" 2>/dev/null || echo 0) )) -lt 120 ]; then echo \"Cozempic: reload in flight, skipping guard spawn\"; exit 0; fi; if [ -z \"$COZEMPIC_NO_AUTO_UPDATE\" ] && [ -z \"$COZEMPIC_PIN\" ]; then PRE=$(cozempic --version 2>/dev/null | awk '/^cozempic /{print $2; exit}'); { uv pip install --upgrade cozempic --quiet 2>/dev/null || pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null || python3 -m pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } && POST=$(cozempic --version 2>/dev/null | awk '/^cozempic /{print $2; exit}') && [ -n \"$POST\" ] && [ \"$PRE\" != \"$POST\" ] && { cozempic guard --reload-self ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --reload-self ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; }; fi; GUARD_PID_FILE=\"/tmp/cozempic_guard_${SESSION_ID:0:12}.pid\"; GUARD_STARTUP_LOCK=\"/tmp/cozempic_guard_${SESSION_ID:0:12}.startup-lock\"; if [ -f \"$GUARD_PID_FILE\" ] && kill -0 \"$(head -n 1 \"$GUARD_PID_FILE\" 2>/dev/null)\" 2>/dev/null; then :; elif command -v flock >/dev/null 2>&1; then ( flock -n 8 || exit 0; { cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; ) 8>\"$GUARD_STARTUP_LOCK\"; else { cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; fi; ) 9>\"/tmp/cozempic_hook_${SESSION_ID:0:12}.lock\" >/dev/null 2>&1 & echo 'Cozempic: guard active' # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; HOOK_DATA=$(cat); SESSION_ID=$(echo \"$HOOK_DATA\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json,re; s=json.load(sys.stdin).get('session_id','').lower(); print(re.sub(r'[^a-z0-9_-]','_',s))\" 2>/dev/null); TRANSCRIPT=$(echo \"$HOOK_DATA\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); SLUG=$(printf '%.12s' \"$SESSION_ID\"); { cozempic digest inject ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic digest inject ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; [ -n \"$SESSION_ID\" ] && { STATUS_FILE=\"/tmp/cozempic_reload_${SLUG}.status\"; if [ -f \"$STATUS_FILE\" ]; then echo \"Cozempic: previous reload may have failed \u2014 $(head -n 3 $STATUS_FILE 2>/dev/null | tail -n 1)\"; rm -f \"$STATUS_FILE\"; fi; }; [ -n \"$SESSION_ID\" ] && (export COZEMPIC_NO_GLOBAL_INIT=1; if command -v flock >/dev/null 2>&1; then flock -n 9 || exit 0; fi; SENTINEL_FILE=\"/tmp/cozempic_reload_${SLUG}.in-flight\"; if [ -f \"$SENTINEL_FILE\" ] && [ $(( $(date +%s) - $(stat -f %m \"$SENTINEL_FILE\" 2>/dev/null || stat -c %Y \"$SENTINEL_FILE\" 2>/dev/null || echo 0) )) -lt 120 ]; then echo \"Cozempic: reload in flight, skipping guard spawn\"; exit 0; fi; if [ -z \"$COZEMPIC_NO_AUTO_UPDATE\" ] && [ -z \"$COZEMPIC_PIN\" ]; then PRE=$(cozempic --version 2>/dev/null | awk '/^cozempic /{print $2; exit}'); { uv pip install --upgrade cozempic --quiet 2>/dev/null || pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null || python3 -m pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } && POST=$(cozempic --version 2>/dev/null | awk '/^cozempic /{print $2; exit}') && [ -n \"$POST\" ] && [ \"$PRE\" != \"$POST\" ] && { cozempic guard --reload-self ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --reload-self ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; }; fi; GUARD_PID_FILE=\"/tmp/cozempic_guard_${SLUG}.pid\"; GUARD_STARTUP_LOCK=\"/tmp/cozempic_guard_${SLUG}.startup-lock\"; if [ -f \"$GUARD_PID_FILE\" ] && kill -0 \"$(head -n 1 \"$GUARD_PID_FILE\" 2>/dev/null)\" 2>/dev/null; then :; elif command -v flock >/dev/null 2>&1; then ( flock -n 8 || exit 0; { cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; ) 8>\"$GUARD_STARTUP_LOCK\"; else { cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic guard --daemon ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; fi; ) 9>\"/tmp/cozempic_hook_${SLUG}.lock\" >/dev/null 2>&1 & echo 'Cozempic: guard active' # cozempic-hook-schema=v14"
           }
         ]
       }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true # cozempic-hook-schema=v14"
           }
         ]
       },
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true # cozempic-hook-schema=v14"
           }
         ]
       },
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic remind 2>/dev/null || python3 -m cozempic remind 2>/dev/null; } || true # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic remind 2>/dev/null || python3 -m cozempic remind 2>/dev/null; } || true # cozempic-hook-schema=v14"
           }
         ]
       }
@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; TRANSCRIPT=$(cat | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; { cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; echo 'Cozempic: context checkpointed' # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; TRANSCRIPT=$(cat | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; { cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} 2>/dev/null; } || true; echo 'Cozempic: context checkpointed' # cozempic-hook-schema=v14"
           }
         ]
       }
@@ -102,7 +102,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; HOOK_INPUT=$(cat); TRANSCRIPT=$(printf %s \"$HOOK_INPUT\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic checkpoint >/dev/null 2>&1 || python3 -m cozempic checkpoint >/dev/null 2>&1; } || true; { cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} >/dev/null 2>&1 || python3 -m cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} >/dev/null 2>&1; } || true; printf %s \"$HOOK_INPUT\" | { cozempic nudge 2>/dev/null || python3 -m cozempic nudge 2>/dev/null; } || true; # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; HOOK_INPUT=$(cat); TRANSCRIPT=$(printf %s \"$HOOK_INPUT\" | PYTHONIOENCODING=utf-8 python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic checkpoint >/dev/null 2>&1 || python3 -m cozempic checkpoint >/dev/null 2>&1; } || true; { cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} >/dev/null 2>&1 || python3 -m cozempic digest flush ${TRANSCRIPT:+--session \"$TRANSCRIPT\"} >/dev/null 2>&1; } || true; printf %s \"$HOOK_INPUT\" | { cozempic nudge 2>/dev/null || python3 -m cozempic nudge 2>/dev/null; } || true; # cozempic-hook-schema=v14"
           }
         ]
       }
@@ -122,7 +122,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic post-compact 2>/dev/null || python3 -m cozempic post-compact 2>/dev/null; } || true; { cozempic digest inject 2>/dev/null || python3 -m cozempic digest inject 2>/dev/null; } || true; echo 'Cozempic: context recovered' # cozempic-hook-schema=v13"
+            "command": "export COZEMPIC_NO_AUTO_INIT=1; { cozempic post-compact 2>/dev/null || python3 -m cozempic post-compact 2>/dev/null; } || true; { cozempic digest inject 2>/dev/null || python3 -m cozempic digest inject 2>/dev/null; } || true; echo 'Cozempic: context recovered' # cozempic-hook-schema=v14"
           }
         ]
       }

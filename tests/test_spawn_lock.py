@@ -669,8 +669,9 @@ class TestC2_SlugConvergence(unittest.TestCase):
             s = json.load(sys.stdin).get('session_id','').lower()
             print(re.sub(r'[^a-z0-9_-]', '_', s))
 
-        Then the shell takes ``${SESSION_ID:0:12}`` as the slug. So the
-        composite contract is: lowercase → sub non-``[a-z0-9_-]`` with
+        Then the shell takes ``SLUG=$(printf '%.12s' "$SESSION_ID")`` as the
+        slug (POSIX-safe, #168). So the composite contract is unchanged:
+        lowercase → sub non-``[a-z0-9_-]`` with
         ``_`` → take first 12 chars. Always returns a string (possibly
         empty if input is empty); the shell's ``[ -n "$SESSION_ID" ]``
         gate is what skips the spawn for empty inputs.
