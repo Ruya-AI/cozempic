@@ -110,5 +110,58 @@ class TestTaskListKeying(unittest.TestCase):
                          "superseded generation must not linger")
 
 
+class TestTaskListKeyingTornTranscripts(unittest.TestCase):
+    """Hardening for torn/reordered/reworded transcripts (#167 review nits).
+
+    The re-key depends on the create's tool_result existing AND matching
+    `Task #N created`. When ordering or text drift breaks that, the fix must
+    still not regress: never render a completed task as pending, never leak the
+    internal `__pending_create_<uid>` sentinel, and recover if a good result
+    arrives later.
+    """
+
+    def test_update_before_result_keeps_completed(self):
+        """Out-of-order: TaskUpdate(completed) precedes the create-result.
+
+        The re-key must NOT clobber the authoritative 'completed' with the
+        create's 'pending'; it must backfill the subject onto the real entry.
+        """
+        msgs = [
+            (0, _tool_use("c1", "TaskCreate", {"subject": "Build feature X"}), 100),
+            (1, _tool_use("u1", "TaskUpdate", {"taskId": "1", "status": "completed", "owner": "alice"}), 80),
+            (2, _tool_result("c1", "Task #1 created successfully: Build feature X"), 80),
+        ]
+        state = _extract(msgs)
+        matches = _by_subject(state, "Build feature X")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].status, "completed",
+                         "out-of-order completion must survive the re-key")
+        self.assertEqual(matches[0].owner, "alice", "owner from the update must survive")
+
+    def test_missing_result_no_sentinel_leak(self):
+        """A create whose result was truncated away must not leak the temp key."""
+        msgs = [(0, _tool_use("c1", "TaskCreate", {"subject": "Orphan task"}), 100)]
+        state = _extract(msgs)
+        leaked = [t for t in state.tasks if t.task_id.startswith("__pending_create_")]
+        self.assertEqual(leaked, [], f"internal sentinel must not reach output, got {leaked}")
+        self.assertEqual(_by_subject(state, "Orphan task")[0].status, "pending")
+
+    def test_regex_miss_then_duplicate_result_recovers(self):
+        """A reworded first result must not consume the mapping — a later good
+        (duplicate) result must still recover the real id."""
+        msgs = [
+            (0, _tool_use("c1", "TaskCreate", {"subject": "Retry task"}), 100),
+            (1, _tool_result("c1", "Created task 1 (reworded, no canonical phrase)"), 80),
+            (2, _tool_result("c1", "Task #1 created successfully: Retry task"), 80),
+            (3, _tool_use("u1", "TaskUpdate", {"taskId": "1", "status": "completed"}), 80),
+        ]
+        state = _extract(msgs)
+        matches = _by_subject(state, "Retry task")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].status, "completed",
+                         "duplicate good result must recover the id after a regex miss")
+        self.assertEqual(matches[0].task_id, "1")
+
+
 if __name__ == "__main__":
     unittest.main()

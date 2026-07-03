@@ -882,15 +882,38 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                 # on it. A reused id (task store reset) overwrites the older
                 # generation, matching the live store which holds only the latest.
                 if tool_name == "TaskCreate":
-                    _tc_temp = taskcreate_uid_to_key.pop(tool_use_id, "")
+                    _tc_temp = taskcreate_uid_to_key.get(tool_use_id, "")
                     if _tc_temp and _tc_temp in seen_tasks:
                         _m_tc = re.search(r"Task\s+#?(\d+)\s+created",
                                           _extract_block_text(block), re.I)
                         if _m_tc:
+                            # Consume the mapping ONLY once we've parsed a real id — a
+                            # regex miss (reworded/torn result) leaves it intact so a
+                            # later duplicate result can still recover the id.
+                            taskcreate_uid_to_key.pop(tool_use_id, None)
                             _rid = _m_tc.group(1)
                             _info = seen_tasks.pop(_tc_temp)
-                            _info.task_id = _rid
-                            seen_tasks[_rid] = _info
+                            _existing = seen_tasks.get(_rid)
+                            if _existing is None or _existing.subject:
+                                # Free id, OR a real prior-generation task holds it
+                                # (a store reset reused #N) — latest generation wins:
+                                # install the fresh create. A prior task is identified
+                                # by having a subject (only a real TaskCreate sets one).
+                                _info.task_id = _rid
+                                seen_tasks[_rid] = _info
+                            else:
+                                # The id is held by a SUBJECT-LESS entry: an out-of-order
+                                # TaskUpdate that already recorded THIS create's status
+                                # (torn/reordered transcript). Keep its authoritative
+                                # status/owner — never clobber e.g. "completed" with the
+                                # create's "pending" — and backfill the create's subject/
+                                # description so the recovered row isn't blank.
+                                _existing.task_id = _rid
+                                _existing.subject = _info.subject
+                                if not _existing.description:
+                                    _existing.description = _info.description
+                                if not _existing.owner:
+                                    _existing.owner = _info.owner
 
                 # Task tool result = subagent finished, capture result
                 if tool_name == "Task" or tool_use_id in tool_use_id_to_subagent:
@@ -1116,6 +1139,14 @@ def extract_team_state(messages: list[Message]) -> TeamState:
 
     state.teammates = list(seen_teammates.values())
     state.subagents = list(seen_subagents.values())
+    # A TaskCreate whose result was missing/torn/reworded never got re-keyed, so
+    # its task_id still holds the internal "__pending_create_<uid>" sentinel.
+    # Rewrite those to a clean positional id (matching the pre-#167 convention) so
+    # the sentinel never leaks to JSON consumers (_summary_dict / to_dict). Markdown
+    # already renders by subject+status, so this is display-invisible there.
+    for _i, _t in enumerate(seen_tasks.values()):
+        if _t.task_id.startswith("__pending_create_"):
+            _t.task_id = str(_i)
     state.tasks = list(seen_tasks.values())
     state.config_source = "jsonl" if state.message_count > 0 else ""
 
