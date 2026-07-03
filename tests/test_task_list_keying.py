@@ -162,6 +162,56 @@ class TestTaskListKeyingTornTranscripts(unittest.TestCase):
                          "duplicate good result must recover the id after a regex miss")
         self.assertEqual(matches[0].task_id, "1")
 
+    def test_ooo_update_with_subject_keeps_completed(self):
+        """F1: an out-of-order TaskUpdate that ALSO carries a subject must not be
+        misread as a prior generation — the create-result must keep 'completed',
+        not revert to the create's 'pending'. (Provenance is tracked via
+        from_create, not inferred from the presence of a subject.)"""
+        msgs = [
+            (0, _tool_use("u5", "TaskUpdate",
+                          {"taskId": "5", "status": "completed", "owner": "al", "subject": "finish auth"}), 100),
+            (1, _tool_use("c5", "TaskCreate", {"subject": "finish auth"}), 100),
+            (2, _tool_result("c5", "Task #5 created"), 80),
+        ]
+        state = _extract(msgs)
+        m = _by_subject(state, "finish auth")
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0].status, "completed",
+                         "subject-carrying OOO completion must survive the re-key")
+        self.assertEqual(m[0].owner, "al")
+
+    def test_subjectless_create_reuse_does_not_inherit_completed(self):
+        """F2: a subject-less create that later gets completed, then the same id is
+        reused by a brand-new create, must NOT let the new task inherit the old
+        'completed' status."""
+        msgs = [
+            (0, _tool_use("c1", "TaskCreate", {}), 100),
+            (1, _tool_result("c1", "Task #3 created"), 80),
+            (2, _tool_use("u1", "TaskUpdate", {"taskId": "3", "status": "completed"}), 80),
+            (3, _tool_use("c2", "TaskCreate", {"subject": "gen2 task"}), 100),
+            (4, _tool_result("c2", "Task #3 created"), 80),
+        ]
+        state = _extract(msgs)
+        g2 = _by_subject(state, "gen2 task")
+        self.assertEqual(len(g2), 1)
+        self.assertEqual(g2[0].status, "pending",
+                         "reused-id new generation must not inherit the prior completion")
+
+    def test_sentinel_normalization_no_duplicate_ids(self):
+        """F3: normalizing stranded __pending_create_ sentinels must not mint a
+        task_id that collides with a real re-keyed numeric id."""
+        msgs = [
+            (0, _tool_use("a", "TaskCreate", {"subject": "torn one"}), 100),   # no result
+            (1, _tool_use("b", "TaskCreate", {"subject": "torn two"}), 100),   # no result
+            (2, _tool_use("c", "TaskCreate", {"subject": "real"}), 100),
+            (3, _tool_result("c", "Task #1 created"), 80),
+        ]
+        state = _extract(msgs)
+        ids = [t.task_id for t in state.tasks]
+        self.assertEqual(len(ids), len(set(ids)), f"task_ids must be unique, got {ids}")
+        self.assertNotIn("__pending_create_", "".join(ids), "no sentinel may leak")
+        self.assertEqual(_by_subject(state, "real")[0].task_id, "1", "real task keeps its parsed id")
+
 
 if __name__ == "__main__":
     unittest.main()

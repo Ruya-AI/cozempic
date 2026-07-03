@@ -81,6 +81,11 @@ class TaskInfo:
     status: str = "pending"
     owner: str = ""
     description: str = ""
+    # True once this entry is backed by a real TaskCreate (vs. a placeholder
+    # synthesized from an out-of-order TaskUpdate). Used to classify id-reuse
+    # (real prior generation → overwrite) vs. a subject-less update fragment
+    # (→ merge, keep its authoritative status) without inferring from `subject`.
+    from_create: bool = False
 
 
 @dataclass
@@ -835,6 +840,7 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                         status="pending",
                         owner=_sfield(inp, "owner"),
                         description=_sfield(inp, "description"),
+                        from_create=True,
                     )
 
                 # TaskUpdate (shared todo list)
@@ -894,21 +900,24 @@ def extract_team_state(messages: list[Message]) -> TeamState:
                             _rid = _m_tc.group(1)
                             _info = seen_tasks.pop(_tc_temp)
                             _existing = seen_tasks.get(_rid)
-                            if _existing is None or _existing.subject:
-                                # Free id, OR a real prior-generation task holds it
-                                # (a store reset reused #N) — latest generation wins:
-                                # install the fresh create. A prior task is identified
-                                # by having a subject (only a real TaskCreate sets one).
+                            if _existing is None or _existing.from_create:
+                                # Free id, OR a real prior-generation task already holds
+                                # it (a store reset reused #N) — latest generation wins:
+                                # install the fresh create. `from_create` marks a genuine
+                                # prior TaskCreate (not inferred from `subject`, which an
+                                # out-of-order TaskUpdate can also carry).
                                 _info.task_id = _rid
                                 seen_tasks[_rid] = _info
                             else:
-                                # The id is held by a SUBJECT-LESS entry: an out-of-order
-                                # TaskUpdate that already recorded THIS create's status
-                                # (torn/reordered transcript). Keep its authoritative
-                                # status/owner — never clobber e.g. "completed" with the
-                                # create's "pending" — and backfill the create's subject/
-                                # description so the recovered row isn't blank.
+                                # The id is held by a placeholder synthesized from an
+                                # out-of-order TaskUpdate (torn/reordered transcript).
+                                # Keep its authoritative status/owner — never clobber
+                                # e.g. "completed" with the create's "pending" — and
+                                # backfill the create's subject/description so the row
+                                # isn't blank. It's now backed by a real create, so mark
+                                # it as such for any later same-id reuse.
                                 _existing.task_id = _rid
+                                _existing.from_create = True
                                 _existing.subject = _info.subject
                                 if not _existing.description:
                                     _existing.description = _info.description
@@ -1142,11 +1151,20 @@ def extract_team_state(messages: list[Message]) -> TeamState:
     # A TaskCreate whose result was missing/torn/reworded never got re-keyed, so
     # its task_id still holds the internal "__pending_create_<uid>" sentinel.
     # Rewrite those to a clean positional id (matching the pre-#167 convention) so
-    # the sentinel never leaks to JSON consumers (_summary_dict / to_dict). Markdown
-    # already renders by subject+status, so this is display-invisible there.
-    for _i, _t in enumerate(seen_tasks.values()):
+    # the sentinel never appears in internal state. Markdown renders by
+    # subject+status, so this is display-invisible; the rewrite keeps task_id sane
+    # for any future consumer. Skip ids already taken by a real re-keyed task so we
+    # never mint a duplicate task_id.
+    _used_ids = {_t.task_id for _t in seen_tasks.values()
+                 if not _t.task_id.startswith("__pending_create_")}
+    _next = 0
+    for _t in seen_tasks.values():
         if _t.task_id.startswith("__pending_create_"):
-            _t.task_id = str(_i)
+            while str(_next) in _used_ids:
+                _next += 1
+            _t.task_id = str(_next)
+            _used_ids.add(str(_next))
+            _next += 1
     state.tasks = list(seen_tasks.values())
     state.config_source = "jsonl" if state.message_count > 0 else ""
 

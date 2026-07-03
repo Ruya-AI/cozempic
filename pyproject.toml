@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cozempic"
-version = "1.8.38"
+version = "1.8.39"
 description = "2x the effective context with smart weight-loss for Claude Code — prune bloated sessions, protect agent teams from compaction, monitor token usage with MCP tools"
 readme = "README.md"
 license = "MIT"
@@ -40,3 +40,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 cozempic = ["data/*.md", "data/*.json"]
+
+[tool.pytest.ini_options]
+# Test against the working tree, not a stale installed wheel. Without this, a
+# non-editable `pip install cozempic` in the venv shadows src/ and a bare
+# `pytest` silently runs the OLD code (false green/red). Keep src/ first.
+pythonpath = ["src"]
+testpaths = ["tests"]
