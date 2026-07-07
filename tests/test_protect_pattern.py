@@ -90,12 +90,17 @@ class TestCompileGuards(unittest.TestCase):
     def test_invalid_config_pattern_does_not_block_cli_pattern(self):
         with mock.patch(
             "cozempic.cli.load_config",
-            return_value=SimpleNamespace(protect_patterns=(r"(unclosed",)),
+            return_value=SimpleNamespace(
+                protect_patterns=(r"GOOD_CONFIG", r"(unclosed", r"ALSO_GOOD")
+            ),
         ):
             pats = _compile_protect_patterns_or_exit(
                 Namespace(protect_pattern=[r"FROM_FLAG"])
             )
-        self.assertEqual([pat.pattern for pat in pats], [r"FROM_FLAG"])
+        self.assertEqual(
+            [pat.pattern for pat in pats],
+            [r"GOOD_CONFIG", r"ALSO_GOOD", r"FROM_FLAG"],
+        )
 
 
 class TestMatcherSurfaces(unittest.TestCase):

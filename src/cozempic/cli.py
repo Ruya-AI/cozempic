@@ -354,14 +354,15 @@ def _compile_protect_patterns_or_exit(args):
     cli_raw = list(getattr(args, "protect_pattern", None) or [])
     compiled = []
     seen = set()
-    if cfg_raw:
+    for raw in cfg_raw:
         try:
-            for pat in compile_protect_patterns(cfg_raw):
-                if pat.pattern not in seen:
-                    compiled.append(pat)
-                    seen.add(pat.pattern)
+            pat = compile_protect_patterns([raw])[0]
         except ValueError as e:
-            print(f"  Warning: ignoring config protect_patterns: {e}", file=sys.stderr)
+            print(f"  Warning: ignoring config protect_pattern {raw!r}: {e}", file=sys.stderr)
+            continue
+        if pat.pattern not in seen:
+            compiled.append(pat)
+            seen.add(pat.pattern)
     if not cli_raw:
         return compiled or None
     try:
