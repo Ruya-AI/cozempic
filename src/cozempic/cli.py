@@ -345,16 +345,35 @@ def cmd_diagnose(args):
 
 
 def _compile_protect_patterns_or_exit(args):
-    """Compile --protect-pattern regexes from args, or exit(2) with a clean error.
-    Returns the compiled list, or None when the flag is unused (#122, @eggrollofchaos)."""
-    raw = getattr(args, "protect_pattern", None)
-    if not raw:
-        return None
+    """Compile configured and CLI protect-pattern regexes.
+
+    Config defaults fail soft so a stale ~/.cozempic/config.json cannot kill the
+    daemon. Explicit CLI flags still fail loud with exit(2).
+    """
+    cfg_raw = list(load_config().protect_patterns)
+    cli_raw = list(getattr(args, "protect_pattern", None) or [])
+    compiled = []
+    seen = set()
+    for raw in cfg_raw:
+        try:
+            pat = compile_protect_patterns([raw])[0]
+        except ValueError as e:
+            print(f"  Warning: ignoring config protect_pattern {raw!r}: {e}", file=sys.stderr)
+            continue
+        if pat.pattern not in seen:
+            compiled.append(pat)
+            seen.add(pat.pattern)
+    if not cli_raw:
+        return compiled or None
     try:
-        return compile_protect_patterns(raw)
+        for pat in compile_protect_patterns(cli_raw):
+            if pat.pattern not in seen:
+                compiled.append(pat)
+                seen.add(pat.pattern)
     except ValueError as e:
         print(f"  Error: {e}", file=sys.stderr)
         sys.exit(2)
+    return compiled or None
 
 
 _TIER_NAMES = {"gentle", "standard", "aggressive"}
