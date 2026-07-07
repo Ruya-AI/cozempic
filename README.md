@@ -174,6 +174,14 @@ cozempic guard --daemon
 
 **Token thresholds auto-detect** — 200K and 1M models detected automatically. Override with `COZEMPIC_CONTEXT_WINDOW=200000` for Pro plan.
 
+**Default protected patterns** — put regexes in `~/.cozempic/config.json` so every `treat`, `reload`, and guard cycle protects matching messages without repeating CLI flags:
+
+```json
+{
+  "protect_patterns": ["SPR-", "control-file"]
+}
+```
+
 ## Behavioral Digest
 
 Cozempic extracts your corrections and persists them across compactions:

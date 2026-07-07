@@ -5,6 +5,8 @@ prune-safety defense-in-depth fix (P0-B/C/D port onto v1.8.18 terminate-first):
 
   - ``floor``: per-prune protections — max % of user/assistant messages that
     may drop, last-K turns guaranteed to survive, first-message guarantee.
+  - ``protect_patterns``: default user regexes whose matching message content
+    gets prune immunity.
 
 Precedence: environment variable > ``~/.cozempic/config.json`` > built-in default.
 
@@ -70,6 +72,7 @@ class Config:
     """Top-level cozempic runtime config."""
 
     floor: FloorConfig = field(default_factory=FloorConfig)
+    protect_patterns: tuple[str, ...] = ()
 
 
 # ── Clamping helpers ──────────────────────────────────────────────────────────
@@ -229,6 +232,18 @@ def _resolve_floor_with(file_data: dict[str, Any]) -> FloorConfig:
     )
 
 
+def _resolve_protect_patterns_with(file_data: dict[str, Any]) -> tuple[str, ...]:
+    """Resolve default protect-pattern regex strings from config file data.
+
+    Regex compilation happens at the CLI/guard boundary so explicit CLI flags
+    can still fail loud while bad config defaults fail soft.
+    """
+    raw_patterns = file_data.get("protect_patterns", ())
+    if not isinstance(raw_patterns, list):
+        return ()
+    return tuple(pat for pat in raw_patterns if isinstance(pat, str))
+
+
 def load_config() -> Config:
     """Load the active runtime config (env → file → default).
 
@@ -238,4 +253,7 @@ def load_config() -> Config:
     floor behavior between reads.
     """
     file_data = _read_config_file()
-    return Config(floor=_resolve_floor_with(file_data))
+    return Config(
+        floor=_resolve_floor_with(file_data),
+        protect_patterns=_resolve_protect_patterns_with(file_data),
+    )

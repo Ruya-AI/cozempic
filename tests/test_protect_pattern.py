@@ -12,8 +12,11 @@ from a strategy's removal actions.
 import io
 import unittest
 from contextlib import redirect_stderr
+from argparse import Namespace
+from types import SimpleNamespace
 from unittest import mock
 
+from cozempic.cli import _compile_protect_patterns_or_exit
 from cozempic.helpers import (
     compile_protect_patterns, tag_pattern_matches, strip_pattern_tags, is_protected,
     _msg_text_matches_any, _PATTERN_PROTECTED_KEY,
@@ -55,6 +58,44 @@ class TestCompileGuards(unittest.TestCase):
     def test_none_and_empty(self):
         self.assertEqual(compile_protect_patterns(None), [])
         self.assertEqual(compile_protect_patterns([]), [])
+
+    def test_cli_uses_config_default_patterns(self):
+        with mock.patch(
+            "cozempic.cli.load_config",
+            return_value=SimpleNamespace(protect_patterns=(r"FROM_CONFIG",)),
+        ):
+            pats = _compile_protect_patterns_or_exit(Namespace(protect_pattern=None))
+        self.assertEqual([pat.pattern for pat in pats], [r"FROM_CONFIG"])
+
+    def test_cli_combines_config_default_and_flag_patterns(self):
+        with mock.patch(
+            "cozempic.cli.load_config",
+            return_value=SimpleNamespace(protect_patterns=(r"FROM_CONFIG",)),
+        ):
+            pats = _compile_protect_patterns_or_exit(
+                Namespace(protect_pattern=[r"FROM_FLAG"])
+            )
+        self.assertEqual([pat.pattern for pat in pats], [r"FROM_CONFIG", r"FROM_FLAG"])
+
+    def test_cli_dedupes_config_and_flag_patterns(self):
+        with mock.patch(
+            "cozempic.cli.load_config",
+            return_value=SimpleNamespace(protect_patterns=(r"SAME",)),
+        ):
+            pats = _compile_protect_patterns_or_exit(
+                Namespace(protect_pattern=[r"SAME"])
+            )
+        self.assertEqual([pat.pattern for pat in pats], [r"SAME"])
+
+    def test_invalid_config_pattern_does_not_block_cli_pattern(self):
+        with mock.patch(
+            "cozempic.cli.load_config",
+            return_value=SimpleNamespace(protect_patterns=(r"(unclosed",)),
+        ):
+            pats = _compile_protect_patterns_or_exit(
+                Namespace(protect_pattern=[r"FROM_FLAG"])
+            )
+        self.assertEqual([pat.pattern for pat in pats], [r"FROM_FLAG"])
 
 
 class TestMatcherSurfaces(unittest.TestCase):

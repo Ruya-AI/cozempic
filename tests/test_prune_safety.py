@@ -456,6 +456,23 @@ class TestFloorConfig:
         assert cfg.preserve_last_k_turns == 10
         assert cfg.preserve_first_message is True
 
+    def test_config_default_protect_patterns(self):
+        """Config defaults expose protect_patterns from ~/.cozempic/config.json."""
+        from cozempic.config import Config, _resolve_protect_patterns_with
+
+        result = Config(
+            protect_patterns=_resolve_protect_patterns_with(
+                {"protect_patterns": [r"SPR-", r"control-file", 12]}
+            )
+        )
+        assert result.protect_patterns == (r"SPR-", r"control-file")
+
+    def test_config_default_protect_patterns_non_list_ignored(self):
+        """Invalid config shape must fail soft, not crash guard startup."""
+        from cozempic import config as cfg_mod
+
+        assert cfg_mod._resolve_protect_patterns_with({"protect_patterns": "SPR-"}) == ()
+
     def test_env_var_max_drop_pct(self, monkeypatch):
         """COZEMPIC_FLOOR_MAX_DROP_PCT=0.3 → FloorConfig.max_user_assistant_drop_pct == 0.3."""
         from cozempic import config as cfg_mod
