@@ -152,8 +152,32 @@ def check_oversized_sessions() -> CheckResult:
         name="oversized-sessions",
         status="issue",
         message=f"{len(large)} session(s) over 50MB: {sizes}. These will likely hang on resume.",
-        fix_description=f"Treat each oversized session:\n{cmds}",
+        fix_description=f"Run 'cozempic doctor --fix' to treat all at once, or individually:\n{cmds}",
     )
+
+
+def fix_oversized_sessions() -> str:
+    """Apply aggressive treatment to all sessions over 50MB."""
+    from .session import load_messages, save_messages
+    from .registry import PRESCRIPTIONS
+    from .executor import run_prescription
+
+    sessions = find_sessions()
+    large = [s for s in sessions if s["size"] > 50 * 1024 * 1024]
+    if not large:
+        return "No oversized sessions found."
+
+    treated = 0
+    for sess in large:
+        try:
+            messages = load_messages(sess["path"])
+            pruned, _ = run_prescription(messages, PRESCRIPTIONS["aggressive"], {})
+            save_messages(sess["path"], pruned, create_backup=True)
+            treated += 1
+        except Exception as exc:
+            print(f"  Warning: could not treat {sess['session_id'][:8]}: {exc}")
+
+    return f"Treated {treated} oversized session(s) with aggressive prescription. Backups created."
 
 
 def check_stale_backups() -> CheckResult:
@@ -1489,7 +1513,7 @@ ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("unresumable-session", check_unresumable_session, fix_unresumable_session),
     ("zombie-teams", check_zombie_teams, fix_zombie_teams),
     ("agent-model-mismatch", check_agent_model_mismatch, None),
-    ("oversized-sessions", check_oversized_sessions, None),
+    ("oversized-sessions", check_oversized_sessions, fix_oversized_sessions),
     ("stale-backups", check_stale_backups, fix_stale_backups),
     ("stale-tmp-artifacts", check_stale_tmp_artifacts, fix_stale_tmp_artifacts),
     ("disk-usage", check_disk_usage, None),
