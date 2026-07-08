@@ -16,9 +16,11 @@ from cozempic.doctor import (
     check_hooks_trust_flag,
     check_orphaned_tool_results,
     check_oversized_sessions,
+    check_disk_usage,
     check_stale_tmp_artifacts,
     check_zombie_teams,
     fix_claude_json_corruption,
+    fix_disk_usage,
     fix_hooks_trust_flag,
     fix_stale_tmp_artifacts,
 )
@@ -525,6 +527,61 @@ class TestOversizedSessions(unittest.TestCase):
         idx_small = result.fix_description.index("small111")
         self.assertLess(idx_large, idx_small)
 
+
+class TestDiskUsageFix(unittest.TestCase):
+
+    def _make_session(self, session_id: str, size_mb: int, path: str) -> dict:
+        return {"session_id": session_id, "path": path, "size": size_mb * 1024 * 1024}
+
+    def test_disk_usage_fix_description_counts_only_old_large_sessions(self):
+        sessions = [
+            self._make_session("oldlarge12345678", 600, "/tmp/old-large.jsonl"),
+            self._make_session("recentlarge1234", 8, "/tmp/recent-large.jsonl"),
+            self._make_session("oldsmall12345678", 1, "/tmp/old-small.jsonl"),
+        ]
+
+        def fake_mtime(path):
+            return 0 if path != "/tmp/recent-large.jsonl" else 10_000_000
+
+        with (
+            patch("cozempic.doctor.find_sessions", return_value=sessions),
+            patch("os.path.getmtime", side_effect=fake_mtime),
+            patch("time.time", return_value=10_000_000),
+        ):
+            result = check_disk_usage()
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("1 session(s) >5MB", result.fix_description)
+        self.assertIn("skips recent sessions", result.fix_description)
+
+    def test_fix_disk_usage_treats_only_old_large_sessions_with_backups(self):
+        sessions = [
+            self._make_session("oldlarge12345678", 600, "/tmp/old-large.jsonl"),
+            self._make_session("recentlarge1234", 8, "/tmp/recent-large.jsonl"),
+        ]
+
+        def fake_mtime(path):
+            return 0 if path == "/tmp/old-large.jsonl" else 10_000_000
+
+        with (
+            patch("cozempic.doctor.find_sessions", return_value=sessions),
+            patch("os.path.getmtime", side_effect=fake_mtime),
+            patch("time.time", return_value=10_000_000),
+            patch("cozempic.session.load_messages", return_value=[{"type": "user"}]) as load_messages,
+            patch("cozempic.executor.run_prescription", return_value=([{"type": "user", "pruned": True}], None)) as run_prescription,
+            patch("cozempic.session.save_messages") as save_messages,
+        ):
+            message = fix_disk_usage()
+
+        self.assertIn("Treated 1 session", message)
+        load_messages.assert_called_once_with("/tmp/old-large.jsonl")
+        from cozempic.registry import PRESCRIPTIONS
+        self.assertIs(run_prescription.call_args.args[1], PRESCRIPTIONS["gentle"])
+        save_messages.assert_called_once_with(
+            "/tmp/old-large.jsonl",
+            [{"type": "user", "pruned": True}],
+            create_backup=True,
+        )
 
 if __name__ == "__main__":
     unittest.main()

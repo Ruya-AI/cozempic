@@ -205,8 +205,13 @@ def fix_stale_backups() -> str:
     return f"Deleted {len(bak_files)} backup file(s), freed {total / 1024 / 1024:.1f}MB"
 
 
+_DISK_BLOAT_MIN_BYTES = 5 * 1024 * 1024   # sessions smaller than this aren't worth touching
+_DISK_BLOAT_RECENT_SECS = 7 * 24 * 3600   # skip sessions modified within this window
+
+
 def check_disk_usage() -> CheckResult:
     """Check total Claude session disk usage."""
+    import os, time as _time
     sessions = find_sessions()
     total = sum(s["size"] for s in sessions)
 
@@ -217,11 +222,63 @@ def check_disk_usage() -> CheckResult:
     else:
         status = "issue"
 
+    now = _time.time()
+    candidates = [
+        s for s in sessions
+        if s["size"] >= _DISK_BLOAT_MIN_BYTES
+        and now - os.path.getmtime(s["path"]) >= _DISK_BLOAT_RECENT_SECS
+    ]
+    fix_desc = None
+    if status != "ok":
+        fix_desc = (
+            f"Run 'cozempic doctor --fix' to apply gentle pruning to "
+            f"{len(candidates)} session(s) >{_DISK_BLOAT_MIN_BYTES // (1024*1024)}MB "
+            f"and older than 7 days (skips recent sessions)"
+        )
+
     return CheckResult(
         name="disk-usage",
         status=status,
         message=f"{len(sessions)} sessions using {total / 1024 / 1024:.1f}MB total",
-        fix_description="Run: cozempic treat <session> -rx standard --execute" if status != "ok" else None,
+        fix_description=fix_desc,
+    )
+
+
+def fix_disk_usage() -> str:
+    """Apply gentle pruning to old, bloated sessions — skips recent sessions."""
+    import os, time as _time
+    from .session import load_messages, save_messages
+    from .registry import PRESCRIPTIONS
+    from .executor import run_prescription
+
+    sessions = find_sessions()
+    now = _time.time()
+    candidates = [
+        s for s in sessions
+        if s["size"] >= _DISK_BLOAT_MIN_BYTES
+        and now - os.path.getmtime(s["path"]) >= _DISK_BLOAT_RECENT_SECS
+    ]
+
+    if not candidates:
+        return "No bloated stale sessions found."
+
+    treated = 0
+    skipped = 0
+    for sess in candidates:
+        try:
+            messages = load_messages(sess["path"])
+            pruned, _ = run_prescription(messages, PRESCRIPTIONS["gentle"], {})
+            save_messages(sess["path"], pruned, create_backup=True)
+            treated += 1
+        except Exception as exc:
+            print(f"  Warning: could not treat {sess['session_id'][:8]}: {exc}")
+            skipped += 1
+
+    total_skipped = len(sessions) - len(candidates)
+    return (
+        f"Treated {treated} session(s) with gentle prescription. "
+        f"{total_skipped} session(s) skipped (too small or modified within 7 days). "
+        f"Backups created."
     )
 
 
@@ -1492,7 +1549,7 @@ ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("oversized-sessions", check_oversized_sessions, None),
     ("stale-backups", check_stale_backups, fix_stale_backups),
     ("stale-tmp-artifacts", check_stale_tmp_artifacts, fix_stale_tmp_artifacts),
-    ("disk-usage", check_disk_usage, None),
+    ("disk-usage", check_disk_usage, fix_disk_usage),
 ]
 
 
