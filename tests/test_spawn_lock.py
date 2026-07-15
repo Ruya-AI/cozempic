@@ -447,20 +447,22 @@ class TestFreshClaimProtection(unittest.TestCase):
 
     def test_fresh_dead_pid_is_not_reclaimed(self):
         """A freshly written dead PID is a peer claim, not stale state."""
+        from cozempic import spawn_lock
         from cozempic.spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             pid_file = Path(tmp_dir) / "guard.pid"
             pid_file.write_text("900000\n", encoding="utf-8")
-            fresh_now = pid_file.stat().st_mtime + 1.0
+            fresh_window = spawn_lock._FRESH_PIDFILE_SECONDS
+            fresh_now = pid_file.stat().st_mtime + fresh_window / 2
+            claim = DaemonSpawnClaim("test-session", pid_file)
 
             with (
                 patch("cozempic.spawn_lock._is_process_alive", return_value=False),
                 patch("cozempic.spawn_lock.time.time", return_value=fresh_now),
                 self.assertRaises(DaemonAlreadyStarting) as raised,
             ):
-                with DaemonSpawnClaim("test-session", pid_file):
-                    self.fail("fresh dead PID file was reclaimed")
+                claim.__enter__()
 
         self.assertEqual(raised.exception.holder_pid, 900000)
 
