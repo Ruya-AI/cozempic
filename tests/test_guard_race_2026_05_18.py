@@ -88,12 +88,20 @@ def _race_worker(
         fake_pid = 900_000 + worker_index
         return _DummyProc(fake_pid)
 
+    def _fake_is_process_alive(pid: int) -> bool:
+        """Model the spawned fake guard as alive for the contention check."""
+        return pid > 0
+
     # Mock subprocess.Popen so no real daemon is spawned, and mock
     # find_claude_pid so we don't fail when no Claude is running.
     with (
         _patch("cozempic.guard.subprocess.Popen", side_effect=_fake_popen),
         _patch("cozempic.guard.find_claude_pid", return_value=12345),
         _patch("cozempic.guard._cleanup_legacy_pid"),
+        _patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+        _patch(
+            "cozempic.spawn_lock._is_process_alive", side_effect=_fake_is_process_alive
+        ),
     ):
         # Barrier sync: both children pile up here and release at the same instant
         try:

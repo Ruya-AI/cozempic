@@ -13,6 +13,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -62,10 +63,18 @@ def _race_worker(
             return _DummyProc(900_000 + worker_index)
         return _real_popen(cmd_parts, **kwargs)
 
+    def _fake_is_process_alive(pid: int) -> bool:
+        """Model the spawned fake guard as alive for the contention check."""
+        return pid > 0
+
     with (
         _patch("cozempic.guard.subprocess.Popen", side_effect=_fake_popen),
         _patch("cozempic.guard.find_claude_pid", return_value=12345),
         _patch("cozempic.guard._cleanup_legacy_pid"),
+        _patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+        _patch(
+            "cozempic.spawn_lock._is_process_alive", side_effect=_fake_is_process_alive
+        ),
     ):
         try:
             barrier_handle.wait(timeout=10.0)
@@ -431,6 +440,29 @@ class TestFreshWindowEnvVarClamping(unittest.TestCase):
         from cozempic.spawn_lock import _DEFAULT_FRESH
 
         self.assertEqual(self._reload_with_env(None), _DEFAULT_FRESH)
+
+
+class TestFreshClaimProtection(unittest.TestCase):
+    """The race fixtures must not be the only coverage of fresh claims."""
+
+    def test_fresh_dead_pid_is_not_reclaimed(self):
+        """A freshly written dead PID is a peer claim, not stale state."""
+        from cozempic.spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            pid_file.write_text("900000\n", encoding="utf-8")
+            fresh_now = pid_file.stat().st_mtime + 1.0
+
+            with (
+                patch("cozempic.spawn_lock._is_process_alive", return_value=False),
+                patch("cozempic.spawn_lock.time.time", return_value=fresh_now),
+                self.assertRaises(DaemonAlreadyStarting) as raised,
+            ):
+                with DaemonSpawnClaim("test-session", pid_file):
+                    self.fail("fresh dead PID file was reclaimed")
+
+        self.assertEqual(raised.exception.holder_pid, 900000)
 
 
 class TestSymlinkDefense(unittest.TestCase):
