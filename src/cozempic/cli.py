@@ -2063,10 +2063,10 @@ def _maybe_global_init(argv: list[str]) -> None:
 
     Bail-outs (in order):
       1. COZEMPIC_NO_GLOBAL_INIT=1 in env (also set by --no-global-init)
-      2. Marker file exists (already done once)
-      3. Subcommand is in _AUTO_INIT_SKIP_CMDS
-      4. ~/.claude/ doesn't exist (Claude Code not installed yet)
-      5. Cozempic hooks are already in ~/.claude/settings.json (e.g. plugin
+      2. Subcommand is in _AUTO_INIT_SKIP_CMDS
+      3. ~/.claude/ doesn't exist (Claude Code not installed yet)
+      4. Marker exists and no Cozempic hooks are present (the user declined)
+      5. Cozempic hooks are already current in ~/.claude/settings.json (e.g. plugin
          marketplace install)
 
     Otherwise: writes hooks (skip slash command — project-level only) and
@@ -2074,8 +2074,6 @@ def _maybe_global_init(argv: list[str]) -> None:
     we never ask again on this machine.
     """
     if os.environ.get("COZEMPIC_NO_GLOBAL_INIT"):
-        return
-    if _GLOBAL_INIT_MARKER.exists():
         return
 
     # --help / -h are pure-info, never trigger init
@@ -2097,6 +2095,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if not home_claude.exists():
         return  # Claude Code not yet installed — defer until it is
 
+    marker_exists = _GLOBAL_INIT_MARKER.exists()
     if _project_is_cozempic_current(home_claude):
         # Already wired (probably via plugin marketplace install). Mark as done.
         try:
@@ -2105,10 +2104,17 @@ def _maybe_global_init(argv: list[str]) -> None:
             pass
         return
 
+    if marker_exists and not _project_has_cozempic_hooks(home_claude):
+        # A marker without hooks records a prior explicit decline. Do not turn a
+        # future package upgrade into an unsolicited first install.
+        return
+
     # Ask the user interactively when both stdin and stderr are TTYs (real terminal).
     # Fall back to silent auto-install for non-interactive contexts (CI, pipelines,
     # Claude Code subprocess invocations) so we never hang waiting for input.
-    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    # Existing but stale hooks already establish consent; refresh them without
+    # prompting so an automatic package update also advances the hook schema.
+    interactive = not marker_exists and sys.stdin.isatty() and sys.stderr.isatty()
 
     if interactive:
         try:
@@ -2215,10 +2221,23 @@ def _project_is_cozempic_current(claude_dir: Path) -> bool:
     query. If one file is current and another has stale cozempic hooks, we
     return False so wire_hooks is called and refreshes the stale one.
     """
+    found, current = _project_cozempic_hook_state(claude_dir)
+    return found and current
+
+
+def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
+    """Return whether either global settings file contains Cozempic hooks."""
+    found, _ = _project_cozempic_hook_state(claude_dir)
+    return found
+
+
+def _project_cozempic_hook_state(claude_dir: Path) -> tuple[bool, bool]:
+    """Return ``(has_cozempic_hooks, all_cozempic_hooks_are_current)``."""
     import json as _json
     from .init import _is_cozempic_command, HOOK_SCHEMA_MARKER
 
     any_cozempic_found = False
+    any_stale_cozempic_found = False
     for name in ("settings.json", "settings.local.json"):
         p = claude_dir / name
         if not p.exists():
@@ -2248,9 +2267,9 @@ def _project_is_cozempic_current(claude_dir: Path) -> bool:
                     # Any non-current cozempic hook (missing or stale marker)
                     # means a refresh is due.
                     if HOOK_SCHEMA_MARKER not in cmd:
-                        return False
+                        any_stale_cozempic_found = True
 
-    return any_cozempic_found
+    return any_cozempic_found, not any_stale_cozempic_found
 
 
 def _maybe_auto_init(argv: list[str]) -> None:

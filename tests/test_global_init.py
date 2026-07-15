@@ -16,6 +16,20 @@ class TestGlobalAutoInit(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _write_stale_global_hook(self, claude_dir):
+        settings = claude_dir / "settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "cozempic guard --daemon # cozempic-hook-schema=v10",
+                    }],
+                }],
+            },
+        }))
+
     def test_skipped_when_env_set(self):
         from cozempic import cli
         with tempfile.TemporaryDirectory() as tmp:
@@ -41,6 +55,32 @@ class TestGlobalAutoInit(unittest.TestCase):
                         with mock.patch.object(cli, "run_init") as ri:
                             cli._maybe_global_init(["list"])
                             ri.assert_not_called()
+
+    def test_refreshes_stale_hooks_when_marker_exists(self):
+        """A prior global install must refresh after the package schema changes."""
+        from cozempic import cli
+        from cozempic.init import HOOK_SCHEMA_MARKER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            home_claude = self._stub_home_claude(tmp)
+            self._write_stale_global_hook(home_claude)
+            marker = self._stub_marker(tmp)
+            marker.touch()
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+                with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                    with mock.patch.object(cli.Path, "home", return_value=home):
+                        with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                            with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                                with mock.patch("builtins.input") as prompt:
+                                    cli._maybe_global_init(["list"])
+
+            prompt.assert_not_called()
+            settings = json.loads((home_claude / "settings.json").read_text())
+            command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertIn(HOOK_SCHEMA_MARKER, command)
 
     def test_skipped_when_no_claude_dir(self):
         from cozempic import cli
