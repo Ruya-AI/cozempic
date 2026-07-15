@@ -30,6 +30,36 @@ class TestGlobalAutoInit(unittest.TestCase):
             },
         }))
 
+    def _write_current_global_hook(self, claude_dir):
+        from cozempic.init import HOOK_SCHEMA_MARKER
+
+        settings = claude_dir / "settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": f"cozempic guard --daemon # {HOOK_SCHEMA_MARKER}",
+                    }],
+                }],
+            },
+        }))
+
+    def _write_stale_local_hook(self, claude_dir):
+        settings = claude_dir / "settings.local.json"
+        settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "cozempic guard --daemon # cozempic-hook-schema=v10",
+                    }],
+                }],
+            },
+        }))
+
     def test_skipped_when_env_set(self):
         from cozempic import cli
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,6 +111,43 @@ class TestGlobalAutoInit(unittest.TestCase):
             settings = json.loads((home_claude / "settings.json").read_text())
             command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             self.assertIn(HOOK_SCHEMA_MARKER, command)
+
+    def test_marker_does_not_rewire_for_stale_local_hook(self):
+        """Global init must ignore settings.local.json it does not manage."""
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            home_claude = self._stub_home_claude(tmp)
+            self._write_stale_local_hook(home_claude)
+            marker = self._stub_marker(tmp)
+            marker.touch()
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+                with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                    with mock.patch.object(cli.Path, "home", return_value=home):
+                        with mock.patch.object(cli, "run_init") as run_init:
+                            cli._maybe_global_init(["list"])
+
+            run_init.assert_not_called()
+            self.assertFalse((home_claude / "settings.json").exists())
+
+    def test_current_global_hook_ignores_stale_local_hook(self):
+        """An unmanaged local stale hook cannot make global wiring stale."""
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            home_claude = self._stub_home_claude(tmp)
+            self._write_current_global_hook(home_claude)
+            self._write_stale_local_hook(home_claude)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli, "run_init") as run_init:
+                    cli._maybe_global_init(["list"])
+
+            run_init.assert_not_called()
 
     def test_skipped_when_no_claude_dir(self):
         from cozempic import cli
@@ -359,6 +426,53 @@ class TestStaleHookRefresh(unittest.TestCase):
             self.assertEqual(cmds[0], "export MY_SETUP=1")
             # Last cmd is the second user cmd (still at end)
             self.assertEqual(cmds[-1], "echo 'session started' >> /tmp/user.log")
+
+    def test_duplicate_matcher_entries_are_consolidated(self):
+        """A stale duplicate cannot survive beside a current canonical hook."""
+        from cozempic.init import HOOK_SCHEMA_MARKER, _is_cozempic_command, wire_hooks
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            settings_path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "",
+                            "hooks": [{
+                                "type": "command",
+                                "command": f"cozempic guard --daemon # {HOOK_SCHEMA_MARKER}",
+                            }],
+                        },
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "cozempic guard --daemon # cozempic-hook-schema=v10",
+                                },
+                                {"type": "command", "command": "echo keep-me"},
+                            ],
+                        },
+                    ],
+                },
+            }))
+
+            result = wire_hooks(tmp)
+            after = json.loads(settings_path.read_text())
+            commands = [
+                hook["command"]
+                for entry in after["hooks"]["SessionStart"]
+                for hook in entry["hooks"]
+            ]
+            cozempic_commands = [
+                command for command in commands if _is_cozempic_command(command)
+            ]
+
+            self.assertIn("SessionStart[]", result["updated"])
+            self.assertEqual(len(cozempic_commands), 1)
+            self.assertIn(HOOK_SCHEMA_MARKER, cozempic_commands[0])
+            self.assertIn("echo keep-me", commands)
 
     def test_current_schema_hook_is_skipped(self):
         """wire_hooks on an already-current settings.json must not touch it."""

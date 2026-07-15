@@ -2213,63 +2213,29 @@ def _maybe_global_init(argv: list[str]) -> None:
 def _project_is_cozempic_current(claude_dir: Path) -> bool:
     """Predicate: "should we leave this settings dir alone?"
 
-    Returns True iff the settings files (settings.json + settings.local.json)
-    already have cozempic hooks AT THE CURRENT SCHEMA VERSION and none are
-    stale. Returns False when refresh OR initial install is needed.
+    Returns True iff ``settings.json`` has Cozempic hooks at the current schema
+    version and none are stale. It intentionally excludes settings.local.json:
+    global init and uninstall mutate settings.json only, so local settings must
+    not override an explicit global decline or uninstall.
 
-    NOTE: This is a "do nothing" predicate, not a "has any cozempic config"
-    query. If one file is current and another has stale cozempic hooks, we
-    return False so wire_hooks is called and refreshes the stale one.
+    NOTE: This is a "do nothing" predicate, not a "has any Cozempic config"
+    query. A stale managed hook returns False so wire_hooks refreshes it.
     """
     found, current = _project_cozempic_hook_state(claude_dir)
     return found and current
 
 
 def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
-    """Return whether either global settings file contains Cozempic hooks."""
+    """Return whether the managed settings.json contains Cozempic hooks."""
     found, _ = _project_cozempic_hook_state(claude_dir)
     return found
 
 
 def _project_cozempic_hook_state(claude_dir: Path) -> tuple[bool, bool]:
-    """Return ``(has_cozempic_hooks, all_cozempic_hooks_are_current)``."""
-    import json as _json
-    from .init import _is_cozempic_command, HOOK_SCHEMA_MARKER
+    """Return managed settings.json's ``(has_hooks, all_current)`` state."""
+    from .init import cozempic_hook_schema_state
 
-    any_cozempic_found = False
-    any_stale_cozempic_found = False
-    for name in ("settings.json", "settings.local.json"):
-        p = claude_dir / name
-        if not p.exists():
-            continue
-        try:
-            data = _json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-
-        hooks = data.get("hooks", {}) or {}
-        if not isinstance(hooks, dict):
-            continue
-
-        for entries in hooks.values():
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if not isinstance(h, dict):
-                        continue
-                    cmd = str(h.get("command", ""))
-                    if not _is_cozempic_command(cmd):
-                        continue
-                    any_cozempic_found = True
-                    # Any non-current cozempic hook (missing or stale marker)
-                    # means a refresh is due.
-                    if HOOK_SCHEMA_MARKER not in cmd:
-                        any_stale_cozempic_found = True
-
-    return any_cozempic_found, not any_stale_cozempic_found
+    return cozempic_hook_schema_state(claude_dir / "settings.json")
 
 
 def _maybe_auto_init(argv: list[str]) -> None:

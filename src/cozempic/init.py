@@ -136,6 +136,38 @@ def _entry_has_current_cozempic_hook(hook_entry: dict) -> bool:
     return False
 
 
+def cozempic_hook_schema_state(settings_path: Path) -> tuple[bool, bool]:
+    """Return whether ``settings_path`` has Cozempic hooks and all are current."""
+    try:
+        settings = _load_settings(settings_path)
+    except (OSError, json.JSONDecodeError):
+        return False, True
+
+    hooks = settings.get("hooks", {}) or {}
+    if not isinstance(hooks, dict):
+        return False, True
+
+    found = False
+    stale = False
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks", []) or []:
+                if not isinstance(hook, dict):
+                    continue
+                command = str(hook.get("command", ""))
+                if not _is_cozempic_command(command):
+                    continue
+                found = True
+                if not _is_current_cozempic_command(command):
+                    stale = True
+
+    return found, not stale
+
+
 def has_current_schema(settings: dict) -> bool:
     """Return True if the settings dict has at least one current-schema
     cozempic hook across any event. Used by cli auto-init to avoid refresh
@@ -419,51 +451,73 @@ def wire_hooks(project_dir: str) -> dict:
                 matcher = new_entry.get("matcher", "")
                 display = new_entry.get("matcher", "(all)")
 
-                # Find the cozempic-installed entry with the same matcher (if any).
-                # Mixed entries (cozempic + user command in the same hooks-list)
-                # are preserved — we only replace the cozempic commands within.
-                our_entry_idx = None
+                # Find every Cozempic entry with this matcher. Canonical hooks
+                # have one entry per matcher, but older installs can contain
+                # duplicates. Keep one canonical command set while preserving
+                # user commands in every matching entry.
+                our_entry_idxs = []
                 for idx, existing_entry in enumerate(existing):
                     if existing_entry.get("matcher", "") != matcher:
                         continue
                     if _is_cozempic_hook(existing_entry):
-                        our_entry_idx = idx
-                        break
+                        our_entry_idxs.append(idx)
 
-                if our_entry_idx is None:
+                if not our_entry_idxs:
                     existing.append(new_entry)
                     added.append(f"{event_name}[{display}]")
                     continue
 
-                # Check if existing is at current schema
-                our_entry = existing[our_entry_idx]
-                if _entry_has_current_cozempic_hook(our_entry):
-                    skipped.append(f"{event_name}[{display}]")
-                    continue
-
-                # STALE — refresh. Replace cozempic commands IN PLACE (preserve
-                # original position of user-authored commands in the list).
-                old_hooks = our_entry.get("hooks", []) or []
+                # Refresh the first matching entry unless every one of its
+                # Cozempic commands is current. Replace commands in place so
+                # user-authored commands retain their original order.
+                primary_idx = our_entry_idxs[0]
+                primary = existing[primary_idx]
+                primary_hooks = primary.get("hooks", []) or []
+                primary_current = all(
+                    _is_current_cozempic_command(h.get("command", ""))
+                    for h in primary_hooks
+                    if isinstance(h, dict)
+                    and _is_cozempic_command(h.get("command", ""))
+                )
                 canonical_new = list(new_entry.get("hooks", []))
-                new_hooks: list = []
-                canonical_inserted = False
-                for h in old_hooks:
-                    if _is_cozempic_command(h.get("command", "")):
-                        # Splice in the new canonical commands at the position
-                        # of the FIRST stale cozempic command; drop the rest.
-                        if not canonical_inserted:
-                            new_hooks.extend(canonical_new)
-                            canonical_inserted = True
-                        # else: this stale cozempic command is skipped
+                changed = len(our_entry_idxs) > 1
+                if not primary_current:
+                    new_hooks: list = []
+                    canonical_inserted = False
+                    for hook in primary_hooks:
+                        if isinstance(hook, dict) and _is_cozempic_command(
+                            hook.get("command", "")
+                        ):
+                            if not canonical_inserted:
+                                new_hooks.extend(canonical_new)
+                                canonical_inserted = True
+                        else:
+                            new_hooks.append(hook)
+                    primary["hooks"] = new_hooks
+                    changed = True
+
+                # Strip duplicate Cozempic commands from later entries. Work
+                # backwards so dropping an empty entry cannot shift an index we
+                # have yet to process.
+                for duplicate_idx in reversed(our_entry_idxs[1:]):
+                    duplicate = existing[duplicate_idx]
+                    kept_hooks = [
+                        hook
+                        for hook in duplicate.get("hooks", []) or []
+                        if not (
+                            isinstance(hook, dict)
+                            and _is_cozempic_command(hook.get("command", ""))
+                        )
+                    ]
+                    if kept_hooks:
+                        duplicate["hooks"] = kept_hooks
                     else:
-                        new_hooks.append(h)
-                if not canonical_inserted:
-                    # Defensive: shouldn't happen (we only entered refresh path
-                    # because a stale cozempic command exists), but fall back
-                    # to appending.
-                    new_hooks.extend(canonical_new)
-                our_entry["hooks"] = new_hooks
-                updated.append(f"{event_name}[{display}]")
+                        del existing[duplicate_idx]
+
+                if changed:
+                    updated.append(f"{event_name}[{display}]")
+                else:
+                    skipped.append(f"{event_name}[{display}]")
 
             hooks[event_name] = existing
 
@@ -615,22 +669,8 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
 
 
 def _settings_has_cozempic_hooks(path: Path) -> bool:
-    try:
-        settings = _load_settings(path)
-    except (OSError, json.JSONDecodeError):
-        return False
-    hooks = settings.get("hooks", {})
-    if not isinstance(hooks, dict):
-        return False
-    for entries in hooks.values():
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, dict):
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
-                        return True
-    return False
+    found, _ = cozempic_hook_schema_state(path)
+    return found
 
 
 def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
