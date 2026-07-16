@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -136,36 +137,72 @@ def _entry_has_current_cozempic_hook(hook_entry: dict) -> bool:
     return False
 
 
-def cozempic_hook_schema_state(settings_path: Path) -> tuple[bool, bool]:
-    """Return whether ``settings_path`` has Cozempic hooks and all are current."""
-    try:
-        settings = _load_settings(settings_path)
-    except (OSError, json.JSONDecodeError):
-        return False, True
+@dataclass(frozen=True)
+class CozempicHookSchemaState:
+    """Managed-hook state for one or more Claude settings files."""
 
+    found: bool
+    current: bool
+    error: str | None = None
+
+
+def _iter_entry_hook_commands(entry: object):
+    if not isinstance(entry, dict):
+        return
+    for hook in entry.get("hooks", []) or []:
+        if isinstance(hook, dict):
+            command = hook.get("command")
+            if isinstance(command, str):
+                yield command
+
+
+def _iter_hook_commands(settings: dict):
     hooks = settings.get("hooks", {}) or {}
     if not isinstance(hooks, dict):
-        return False, True
-
-    found = False
-    stale = False
+        return
     for entries in hooks.values():
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            for hook in entry.get("hooks", []) or []:
-                if not isinstance(hook, dict):
-                    continue
-                command = str(hook.get("command", ""))
-                if not _is_cozempic_command(command):
-                    continue
-                found = True
-                if not _is_current_cozempic_command(command):
-                    stale = True
+        if isinstance(entries, list):
+            for entry in entries:
+                yield from _iter_entry_hook_commands(entry)
 
-    return found, not stale
+
+def _hook_schema_state(settings: dict) -> CozempicHookSchemaState:
+    commands = [
+        command for command in _iter_hook_commands(settings)
+        if _is_cozempic_command(command)
+    ]
+    return CozempicHookSchemaState(
+        found=bool(commands),
+        current=all(_is_current_cozempic_command(command) for command in commands),
+    )
+
+
+def cozempic_hook_schema_state(settings_path: Path) -> CozempicHookSchemaState:
+    """Return managed-hook state for ``settings_path`` without masking errors."""
+    try:
+        settings = _load_settings(settings_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return CozempicHookSchemaState(
+            found=False,
+            current=False,
+            error=f"could not parse {settings_path}: {exc}",
+        )
+    return _hook_schema_state(settings)
+
+
+def cozempic_hook_schema_state_for_paths(
+    settings_paths: tuple[Path, ...],
+) -> CozempicHookSchemaState:
+    """Return combined state for settings files that jointly affect a project."""
+    found = False
+    current = True
+    for settings_path in settings_paths:
+        state = cozempic_hook_schema_state(settings_path)
+        if state.error:
+            return state
+        found = found or state.found
+        current = current and state.current
+    return CozempicHookSchemaState(found=found, current=current)
 
 
 def has_current_schema(settings: dict) -> bool:
@@ -669,8 +706,7 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
 
 
 def _settings_has_cozempic_hooks(path: Path) -> bool:
-    found, _ = cozempic_hook_schema_state(path)
-    return found
+    return cozempic_hook_schema_state(path).found
 
 
 def run_uninstall(scope: str = "global", purge: bool = False) -> dict:

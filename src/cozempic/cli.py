@@ -2096,7 +2096,16 @@ def _maybe_global_init(argv: list[str]) -> None:
         return  # Claude Code not yet installed — defer until it is
 
     marker_exists = _GLOBAL_INIT_MARKER.exists()
-    if _project_is_cozempic_current(home_claude):
+    hook_state = _managed_cozempic_hook_state(home_claude)
+    if hook_state.error:
+        print(
+            f"  Cozempic: global init FAILED — {hook_state.error}. "
+            "Fix ~/.claude/settings.json, then run `cozempic init --global`.",
+            file=sys.stderr,
+        )
+        return
+
+    if hook_state.found and hook_state.current:
         # Already wired (probably via plugin marketplace install). Mark as done.
         try:
             _GLOBAL_INIT_MARKER.touch()
@@ -2104,7 +2113,7 @@ def _maybe_global_init(argv: list[str]) -> None:
             pass
         return
 
-    if marker_exists and not _project_has_cozempic_hooks(home_claude):
+    if marker_exists and not hook_state.found:
         # A marker without hooks records a prior explicit decline. Do not turn a
         # future package upgrade into an unsolicited first install.
         return
@@ -2114,7 +2123,12 @@ def _maybe_global_init(argv: list[str]) -> None:
     # Claude Code subprocess invocations) so we never hang waiting for input.
     # Existing but stale hooks already establish consent; refresh them without
     # prompting so an automatic package update also advances the hook schema.
-    interactive = not marker_exists and sys.stdin.isatty() and sys.stderr.isatty()
+    interactive = (
+        not marker_exists
+        and not hook_state.found
+        and sys.stdin.isatty()
+        and sys.stderr.isatty()
+    )
 
     if interactive:
         try:
@@ -2213,29 +2227,30 @@ def _maybe_global_init(argv: list[str]) -> None:
 def _project_is_cozempic_current(claude_dir: Path) -> bool:
     """Predicate: "should we leave this settings dir alone?"
 
-    Returns True iff ``settings.json`` has Cozempic hooks at the current schema
-    version and none are stale. It intentionally excludes settings.local.json:
-    global init and uninstall mutate settings.json only, so local settings must
-    not override an explicit global decline or uninstall.
+    Returns True iff the project's effective settings files have Cozempic hooks
+    at the current schema version and none are stale.
 
     NOTE: This is a "do nothing" predicate, not a "has any Cozempic config"
     query. A stale managed hook returns False so wire_hooks refreshes it.
     """
-    found, current = _project_cozempic_hook_state(claude_dir)
-    return found and current
+    state = _project_cozempic_hook_state(claude_dir)
+    return state.found and state.current
 
 
-def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
-    """Return whether the managed settings.json contains Cozempic hooks."""
-    found, _ = _project_cozempic_hook_state(claude_dir)
-    return found
-
-
-def _project_cozempic_hook_state(claude_dir: Path) -> tuple[bool, bool]:
-    """Return managed settings.json's ``(has_hooks, all_current)`` state."""
+def _managed_cozempic_hook_state(claude_dir: Path):
+    """Return state for the settings.json that global init and uninstall manage."""
     from .init import cozempic_hook_schema_state
 
     return cozempic_hook_schema_state(claude_dir / "settings.json")
+
+
+def _project_cozempic_hook_state(claude_dir: Path):
+    """Return combined state for the project's effective Claude settings files."""
+    from .init import cozempic_hook_schema_state_for_paths
+
+    return cozempic_hook_schema_state_for_paths(
+        (claude_dir / "settings.json", claude_dir / "settings.local.json")
+    )
 
 
 def _maybe_auto_init(argv: list[str]) -> None:

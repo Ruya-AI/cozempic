@@ -133,6 +133,54 @@ class TestGlobalAutoInit(unittest.TestCase):
             run_init.assert_not_called()
             self.assertFalse((home_claude / "settings.json").exists())
 
+    def test_marker_with_malformed_global_settings_surfaces_error(self):
+        """A marker must not turn unreadable managed settings into a decline."""
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            home_claude = self._stub_home_claude(tmp)
+            (home_claude / "settings.json").write_text("{broken json")
+            marker = self._stub_marker(tmp)
+            marker.touch()
+
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=home):
+                    with mock.patch("sys.stderr") as mock_stderr:
+                        with mock.patch.object(cli, "run_init") as run_init:
+                            cli._maybe_global_init(["list"])
+
+            run_init.assert_not_called()
+            output = "".join(
+                call.args[0] for call in mock_stderr.write.call_args_list if call.args
+            )
+            self.assertIn("global init FAILED", output)
+            self.assertIn("could not parse", output)
+
+    def test_stale_global_hook_establishes_consent_without_prompt(self):
+        """Pre-marker hooks must refresh without a second consent prompt."""
+        from cozempic import cli
+        from cozempic.init import HOOK_SCHEMA_MARKER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            home_claude = self._stub_home_claude(tmp)
+            self._write_stale_global_hook(home_claude)
+            marker = self._stub_marker(tmp)
+
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=home):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                            with mock.patch("builtins.input") as prompt:
+                                cli._maybe_global_init(["list"])
+
+            prompt.assert_not_called()
+            command = json.loads(
+                (home_claude / "settings.json").read_text()
+            )["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertIn(HOOK_SCHEMA_MARKER, command)
+
     def test_current_global_hook_ignores_stale_local_hook(self):
         """An unmanaged local stale hook cannot make global wiring stale."""
         from cozempic import cli

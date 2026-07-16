@@ -1,6 +1,5 @@
 """Tests for _maybe_auto_init() skipping local init when global hooks are current."""
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,10 +15,10 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
         (project / ".claude").mkdir(parents=True)
         return project
 
-    def _write_current_hooks(self, claude_dir):
+    def _write_current_hooks(self, claude_dir, filename="settings.json"):
         """Write a settings.json with current-schema cozempic hooks."""
         from cozempic.init import HOOK_SCHEMA_MARKER
-        settings = claude_dir / "settings.json"
+        settings = claude_dir / filename
         settings.write_text(json.dumps({
             "hooks": {
                 "SessionStart": [{
@@ -80,6 +79,21 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                     with mock.patch.object(cli, "run_init", return_value={"hooks": {"added": ["SessionStart[]"], "updated": []}}) as ri:
                         cli._maybe_auto_init(["list"])
                         ri.assert_called_once()
+
+    def test_skips_when_project_local_hooks_current(self):
+        """A current local hook must not be duplicated into settings.json."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            self._write_current_hooks(project / ".claude", "settings.local.json")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
 
     def test_fires_when_global_hooks_stale(self):
         """Global hooks stale (old schema) -> local auto-init should fire."""
