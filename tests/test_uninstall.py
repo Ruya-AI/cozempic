@@ -168,6 +168,17 @@ class TestRunUninstall(_Base):
 
 
 class TestPreviewAndDryRun(_Base):
+    def test_purge_uses_bounded_confirmation(self):
+        from cozempic import cli
+
+        with patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
+                patch.object(cz_init, "run_uninstall") as run_uninstall:
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=True, dry_run=False)
+            )
+        prompt.assert_called_once_with("  Continue? [y/N] ", timeout=30, default="n")
+        run_uninstall.assert_not_called()
+
     def test_preview_reports_without_mutating(self):
         sp = self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
