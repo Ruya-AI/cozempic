@@ -152,6 +152,19 @@ class TestRunUninstall(_Base):
             result = cz_init.run_uninstall("global", purge=True)
         self.assertIn("Purge failed", result["errors"][0])
 
+    def test_purge_is_skipped_when_global_hook_cleanup_fails(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["purged"], [])
+        self.assertTrue(data_dir.exists())
+
     def test_uninstall_write_failure_is_reported(self):
         self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]

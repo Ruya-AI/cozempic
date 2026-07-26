@@ -846,7 +846,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     Removes hooks (per scope), the global slash command (global/all), the remind
     counter, and — with global/all purge — the ~/.cozempic data dir + savings ledger.
     On successful global/all cleanup, leaves the global-init marker as the auto-init
-    opt-out so init does not silently re-wire (explicit `cozempic init` still works).
+    opt-out; successful project/all cleanup similarly leaves the project opt-out.
+    Explicit `cozempic init` still works in either case.
     """
     targets_by_scope = {
         "global": [(str(Path.home()), path) for path in _global_settings_paths()],
@@ -907,7 +908,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         except OSError as exc:
             result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
 
-    if purge and scope in ("global", "all"):
+    if purge and scope in ("global", "all") and not global_cleanup_failed:
         import shutil as _sh
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             try:

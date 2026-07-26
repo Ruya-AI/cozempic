@@ -295,7 +295,10 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             project = self._make_project(tmp)
             stderr = io.StringIO()
             result = {
-                "hooks": {"added": [], "updated": [], "repaired": False},
+                "hooks": {
+                    "added": [], "updated": [], "repaired": False,
+                    "warnings": ["Could not clear project uninstall marker: permission denied"],
+                },
                 "local_cleanup": {"error": "could not parse settings.local.json"},
             }
             with mock.patch.object(cli.Path, "cwd", return_value=project), \
@@ -305,6 +308,7 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                     mock.patch.object(cli.sys, "stderr", stderr):
                 cli._maybe_auto_init(["list"])
             self.assertIn("local settings cleanup FAILED", stderr.getvalue())
+            self.assertIn("Could not clear project uninstall marker", stderr.getvalue())
 
     def test_global_uninstall_opt_out_blocks_project_auto_init(self):
         from cozempic import cli

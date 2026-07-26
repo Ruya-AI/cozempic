@@ -2420,6 +2420,9 @@ def _maybe_auto_init(argv: list[str]) -> None:
             file=sys.stderr,
         )
 
+    for warning in hooks_result.get("warnings", []) or []:
+        print(f"  Cozempic: {warning}", file=sys.stderr)
+
     local_cleanup = result.get("local_cleanup")
     if local_cleanup:
         if local_cleanup.get("error"):
