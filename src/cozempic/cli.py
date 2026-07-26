@@ -1254,7 +1254,7 @@ def cmd_uninstall(args):
             print(f"    - {h['settings_path']}: {', '.join(h['removed'])}"
                   + (f"  (backup: {h['backup_path']})" if h.get("backup_path") else ""))
         elif h.get("error"):
-            print(f"    - ERROR: {h['error']}")
+            print(f"    - {h.get('settings_path') or '(unknown)'}: ERROR — {h['error']}")
     sc = result.get("slash_command")
     if sc and sc.get("removed"):
         print(f"  Removed slash command: {sc['path']}"
@@ -1265,9 +1265,11 @@ def cmd_uninstall(args):
         print(f"  Slash command: ERROR — {sc['error']}")
     if result.get("purged"):
         print(f"  Purged data: {', '.join(result['purged'])}")
-    reported_hook_errors = {h.get("error") for h in result["hooks"] if h.get("error")}
+    reported_errors = {h.get("error") for h in result["hooks"] if h.get("error")}
+    if sc and sc.get("error"):
+        reported_errors.add(sc["error"])
     for error in result.get("errors", []):
-        if error not in reported_hook_errors:
+        if error not in reported_errors:
             print(f"  ERROR: {error}")
     if result.get("opt_out_set"):
         print("  Auto-init disabled. Re-run `cozempic init` to reinstall.")

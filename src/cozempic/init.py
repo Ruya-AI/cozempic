@@ -916,7 +916,7 @@ def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict
                 "removed": [],
                 "settings_path": str(path),
                 "backup_path": None,
-                "error": f"could not parse settings.json: {exc}",
+                "error": f"could not parse {path}: {exc}",
             }
 
         hooks = settings.get("hooks", {})
