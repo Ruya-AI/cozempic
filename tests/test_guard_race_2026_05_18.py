@@ -105,7 +105,7 @@ def _race_worker(
     ):
         # Barrier sync: both children pile up here and release at the same instant
         try:
-            barrier_handle.wait(timeout=5.0)
+            barrier_handle.wait(timeout=10.0)
         except Exception as e:  # BrokenBarrierError or timeout
             result_queue.put(
                 {"error": f"barrier failed: {e!r}", "worker": worker_index}
@@ -143,11 +143,13 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
 
         self.pid_path = _pid_file_for_session(self.SESSION_ID)
         self.pid_path.unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
         self.log_path.unlink(missing_ok=True)
 
     def tearDown(self):
         self.pid_path.unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path.unlink(missing_ok=True)
 
     def _race_once(self) -> list[dict]:
@@ -155,6 +157,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
         # On macOS the default start method is spawn; force it explicitly so
         # the test is platform-deterministic.
         ctx = mp.get_context("spawn")
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
 
         barrier = ctx.Barrier(2)
         result_queue = ctx.Queue()
@@ -205,6 +208,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
         for it in range(self.ITERATIONS):
             # Clean state before each race
             self.pid_path.unlink(missing_ok=True)
+            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             results = self._race_once()

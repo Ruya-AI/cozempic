@@ -48,13 +48,8 @@ def _race_worker(
 
     def _fake_popen(cmd_parts, **kwargs):
         # Fake ONLY the daemon-spawn Popen (python -m cozempic.cli guard).
-        # Every other subprocess use — notably the `ps` identity probe inside
-        # _is_cozempic_guard_process, which subprocess.run drives via
-        # `with Popen(...) as p: p.communicate()` — must run for real; the
-        # global Popen patch otherwise hands `ps` a _DummyProc with no
-        # __enter__/communicate, raising AttributeError and turning every
-        # loser worker into an 'undefined' outcome (the deterministically-dead
-        # gate this test is supposed to be).
+        # Every other subprocess use must run for real. This is defensive
+        # against future changes that remove the current identity-probe mocks.
         parts = cmd_parts if isinstance(cmd_parts, (list, tuple)) else [cmd_parts]
         is_daemon_spawn = any("cozempic.cli" in str(p) for p in parts) or (
             any("cozempic" in str(p) for p in parts) and any(str(p) == "guard" for p in parts)
@@ -106,11 +101,13 @@ class TestThreeProcessContention(unittest.TestCase):
 
         self.pid_path = _pid_file_for_session(self.SESSION_ID)
         self.pid_path.unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
         self.log_path.unlink(missing_ok=True)
 
     def tearDown(self):
         self.pid_path.unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path.unlink(missing_ok=True)
 
     def test_three_process_contention(self):
@@ -123,6 +120,7 @@ class TestThreeProcessContention(unittest.TestCase):
         failures = []
         for it in range(ITERATIONS):
             self.pid_path.unlink(missing_ok=True)
+            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(N)
@@ -188,6 +186,7 @@ class TestV4TenProcessContention(unittest.TestCase):
 
         self.pid_path = _pid_file_for_session(self.SESSION_ID)
         self.pid_path.unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
         self.log_path.unlink(missing_ok=True)
 
@@ -203,6 +202,7 @@ class TestV4TenProcessContention(unittest.TestCase):
         failures = []
         for it in range(self.ITERATIONS):
             self.pid_path.unlink(missing_ok=True)
+            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(self.N)
@@ -465,6 +465,41 @@ class TestFreshClaimProtection(unittest.TestCase):
                 claim.__enter__()
 
         self.assertEqual(raised.exception.holder_pid, 900000)
+
+    def test_write_failure_removes_claim_file(self):
+        """A failed claim write cannot strand a fresh-looking pidfile."""
+        from cozempic.spawn_lock import DaemonSpawnClaim
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            claim = DaemonSpawnClaim("test-session", pid_file)
+            with (
+                patch("cozempic.spawn_lock.os.write", side_effect=OSError("disk full")),
+                self.assertRaises(OSError),
+            ):
+                claim.__enter__()
+            self.assertFalse(pid_file.exists())
+
+    def test_guard_returns_claim_oserror_without_crashing(self):
+        """A claim I/O failure is a failed start, not a SessionStart traceback."""
+        from cozempic.guard import start_guard_daemon
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch(
+                    "cozempic.spawn_lock.DaemonSpawnClaim.__enter__",
+                    side_effect=OSError("disk full"),
+                ),
+            ):
+                result = start_guard_daemon(
+                    cwd=tmp_dir,
+                    session_id="abcd1234-5678-9abc-def0-2026051811aa",
+                    threshold_tokens=1000,
+                )
+        self.assertFalse(result["started"])
+        self.assertIn("pidfile claim", result["reason"])
 
 
 class TestSymlinkDefense(unittest.TestCase):
@@ -734,8 +769,7 @@ class TestC2_SlugConvergence(unittest.TestCase):
         name = p.name
         prefix = "cozempic_guard_"
         suffix = ".pid"
-        self_assert_invariant = name.startswith(prefix) and name.endswith(suffix)
-        assert self_assert_invariant, f"unexpected pid path shape: {name!r}"
+        assert name.startswith(prefix) and name.endswith(suffix), f"unexpected pid path shape: {name!r}"
         return name[len(prefix) : -len(suffix)]
 
     # ─────────────────────────────────────────────────────────────────────

@@ -3632,6 +3632,15 @@ def start_guard_daemon(
             "log_file": None,
             "already_running": True,
         }
+    except OSError as exc:
+        return {
+            "started": False,
+            "reason": f"pidfile claim: {exc}",
+            "pid": None,
+            "pid_file": str(pid_path),
+            "log_file": None,
+            "already_running": False,
+        }
 
     try:
         # Build the guard command

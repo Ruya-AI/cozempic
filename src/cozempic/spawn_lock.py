@@ -369,6 +369,12 @@ class DaemonSpawnClaim:
                 f"{INIT_SPAWN_PARENT}\n"
             )
             os.write(fd, payload.encode("utf-8"))
+        except Exception:
+            try:
+                self.pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         finally:
             os.close(fd)
         self.owned = True
