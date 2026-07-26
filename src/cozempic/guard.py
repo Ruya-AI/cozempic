@@ -28,6 +28,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import _subprocess as _sp
+
 # P0-B: imported at module level so guard_prune_cycle can catch the exception
 # without an inner try/except that masks import errors during testing.
 # safety.py is a new module (this PR); the import is always available once
@@ -1415,7 +1417,7 @@ def _detect_interactive(claude_pid: int | None) -> bool:
     if not claude_pid:
         return True
     try:
-        out = subprocess.run(
+        out = _sp.run(
             ["ps", "-o", "tty=", "-p", str(claude_pid)],
             capture_output=True, text=True, timeout=3,
         ).stdout.strip()
@@ -2033,7 +2035,7 @@ def _is_cozempic_watcher_process(pid: int) -> bool:
     Guards against false positives from pgrep substring matching.
     """
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True, timeout=3, check=False,
         )
@@ -2053,7 +2055,7 @@ def _cleanup_stale_watchers() -> None:
     detection. They linger as zombie processes waiting for Claude to exit.
     """
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["pgrep", "-f", "cozempic.*resumed Claude"],
             capture_output=True, text=True, timeout=5,
         )
@@ -2098,7 +2100,7 @@ def _detect_claude_flags(pid: int) -> str:
     # Fallback: ps -o args= + shlex.split (loses space-boundary info on macOS).
     if not parts:
         try:
-            result = subprocess.run(
+            result = _sp.run(
                 ["ps", "-p", str(pid), "-o", "args="],
                 capture_output=True, text=True, timeout=5,
             )
@@ -2294,7 +2296,7 @@ def _terminate_and_resume(
         print(f"  tmux detected — sending /exit and auto-resuming in same pane...")
 
         # Send /exit to Claude
-        subprocess.run(
+        _sp.run(
             ["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
             capture_output=True, timeout=5,
         )
@@ -2315,7 +2317,7 @@ def _terminate_and_resume(
             write_pruned()
 
         # Resume in same pane
-        subprocess.run(
+        _sp.run(
             ["tmux", "send-keys", *(["-t", pane] if pane else []),
              f"cd {shell_quote(project_dir)} && {resume_cmd}", "Enter"],
             capture_output=True, timeout=5,
@@ -2344,7 +2346,7 @@ def _terminate_and_resume(
         screen_session = os.environ.get("STY", "")
         print(f"  screen detected — sending /exit and auto-resuming...")
 
-        subprocess.run(
+        _sp.run(
             ["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
             capture_output=True, timeout=5,
         )
@@ -2360,7 +2362,7 @@ def _terminate_and_resume(
         if write_pruned is not None and not _pid_is_alive(claude_pid):
             write_pruned()
 
-        subprocess.run(
+        _sp.run(
             ["screen", "-S", screen_session, "-X", "stuff",
              f"cd {shell_quote(project_dir)} && {resume_cmd}\n"],
             capture_output=True, timeout=5,
@@ -2378,7 +2380,7 @@ def _terminate_and_resume(
     try:
         if system == "Windows":
             if _is_claude_process(claude_pid, session_path=session_path):
-                subprocess.call(["taskkill", "/PID", str(claude_pid)],
+                _sp.call(["taskkill", "/PID", str(claude_pid)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             if _is_claude_process(claude_pid, session_path=session_path):
@@ -2390,7 +2392,7 @@ def _terminate_and_resume(
         try:
             if system == "Windows":
                 if _is_claude_process(claude_pid, session_path=session_path):
-                    subprocess.call(["taskkill", "/F", "/PID", str(claude_pid)],
+                    _sp.call(["taskkill", "/F", "/PID", str(claude_pid)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 if _is_claude_process(claude_pid, session_path=session_path):
@@ -2592,12 +2594,15 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
 
     if system == "Windows":
         # PowerShell-native watcher (the bash watcher_script above is POSIX-only
-        # and would never run on Windows). DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP
-        # so it outlives this process; no start_new_session (POSIX-only kwarg).
+        # and would never run on Windows). CREATE_NEW_PROCESS_GROUP so it outlives
+        # this process; no start_new_session (POSIX-only kwarg). We do NOT pass
+        # DETACHED_PROCESS: it is mutually exclusive with the CREATE_NO_WINDOW
+        # that _sp.popen adds, and combining them makes a console window flash.
+        # CREATE_NEW_PROCESS_GROUP + non-inheritable DEVNULL stdio is enough to
+        # detach the watcher.
         _flags = 0
-        _flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
         _flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        subprocess.Popen(
+        _sp.popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", windows_ps_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2605,7 +2610,7 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
             creationflags=_flags,
         )
     else:
-        subprocess.Popen(
+        _sp.popen(
             ["bash", "-c", watcher_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3706,14 +3711,16 @@ def start_guard_daemon(
                     "env": env,
                 }
                 if os.name == "nt":
-                    popen_kwargs["creationflags"] = (
-                        subprocess.DETACHED_PROCESS
-                        | subprocess.CREATE_NEW_PROCESS_GROUP
-                        | subprocess.CREATE_NO_WINDOW
-                    )
+                    # DETACHED_PROCESS and CREATE_NO_WINDOW are mutually exclusive
+                    # (Win32); passing both makes a console window flash. Use
+                    # CREATE_NEW_PROCESS_GROUP only here — _sp.popen adds
+                    # CREATE_NO_WINDOW — which, with non-inheritable stdio (the log
+                    # file / DEVNULL), still detaches the daemon so it outlives the
+                    # parent.
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 else:
                     popen_kwargs["start_new_session"] = True
-                proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                proc = _sp.popen(cmd_parts, **popen_kwargs)
             finally:
                 lf.close()
 
@@ -3842,7 +3849,7 @@ def _is_cozempic_guard_process(pid: int) -> bool:
     match unrelated things like `vim /tmp/cozempic_guard_notes.md`.
     """
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True, timeout=3, check=False,
         )
@@ -3872,7 +3879,7 @@ def _is_cozempic_guard_process(pid: int) -> bool:
         # no daemon), which is strictly safer than signaling the wrong one.
         # TypeError covers the test-only case where a Popen mock returns a
         # bare object that doesn't support the ctx-manager protocol
-        # subprocess.run uses internally; production callers never hit it,
+        # _sp.run uses internally; production callers never hit it,
         # but any unhandled exception here would propagate to the
         # non-interactive SessionStart hook surface — fail closed.
         return False
@@ -3915,7 +3922,7 @@ def _get_pid_start_time_linux(pid: int) -> float | None:
 def _get_pid_start_time_macos(pid: int) -> float | None:
     """macOS: parse ps -o lstart= output. 1-second resolution; LC_ALL=C for locale safety."""
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
             capture_output=True, text=True, timeout=2.0, check=False,
             env={**os.environ, "LC_ALL": "C"},
@@ -4038,7 +4045,7 @@ def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:
     if platform.system() == "Windows":
         return _is_claude_process_windows(pid)
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True, timeout=3, check=False,
         )
@@ -4076,7 +4083,7 @@ def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:
 def _is_claude_process_windows(pid: int) -> bool:
     """Windows-specific helper: probe via tasklist /FO CSV."""
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=5, check=False,
         )

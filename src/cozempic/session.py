@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from . import _subprocess as _sp
 from .helpers import _pid_is_alive as _pid_alive
 from .types import Message
 
@@ -302,7 +303,7 @@ def find_claude_pid() -> int | None:
     try:
         pid = os.getpid()
         for _ in range(10):
-            result = subprocess.run(
+            result = _sp.run(
                 ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
                 capture_output=True, text=True,
             )
@@ -335,7 +336,7 @@ def _session_id_from_process() -> str | None:
         return None
 
     try:
-        result = subprocess.run(
+        result = _sp.run(
             ["lsof", "-p", str(claude_pid)],
             capture_output=True, text=True, timeout=5,
         )
