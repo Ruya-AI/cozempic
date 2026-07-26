@@ -546,6 +546,38 @@ class TestFreshClaimProtection(unittest.TestCase):
             pid_path.unlink(missing_ok=True)
             tmp_path.unlink(missing_ok=True)
 
+    def test_stale_pid_tmp_is_reclaimed_before_spawn(self):
+        """A reservation left by a killed parent must not block restart forever."""
+        from cozempic import spawn_lock
+        from cozempic.guard import _pid_file_for_session, start_guard_daemon
+
+        session_id = "beef1234-5678-9abc-def0-2026051811aa"
+        pid_path = _pid_file_for_session(session_id)
+        tmp_path = pid_path.with_suffix(".pid.tmp")
+        pid_path.unlink(missing_ok=True)
+        tmp_path.write_text("stale\n", encoding="utf-8")
+        stale_at = time.time() - spawn_lock._FRESH_PIDFILE_SECONDS - 1
+        os.utime(tmp_path, (stale_at, stale_at))
+
+        class _DummyProc:
+            pid = 987654
+
+        try:
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard.find_claude_pid", return_value=12345),
+                patch("cozempic.guard.subprocess.Popen", return_value=_DummyProc()) as popen,
+            ):
+                result = start_guard_daemon(
+                    cwd=tempfile.gettempdir(), session_id=session_id, threshold_tokens=1000
+                )
+            self.assertTrue(result["started"])
+            popen.assert_called_once()
+        finally:
+            pid_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+
 
 class TestStaleClaimContention(unittest.TestCase):
     """A stale PID file still admits exactly one cross-process claimant."""

@@ -3718,16 +3718,24 @@ def start_guard_daemon(
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
-                # Reserve the publication path before spawning. A pre-existing
-                # temp file must fail before a detached child can be orphaned.
+                # Reserve the publication path before spawning. A fresh temp
+                # file may belong to a peer; an old regular file is a crashed
+                # spawn reservation and can be reclaimed safely.
                 tmp_path = pid_path.with_suffix(".pid.tmp")
+                from .spawn_lock import _FRESH_PIDFILE_SECONDS
+                if tmp_path.exists() and not tmp_path.is_symlink():
+                    try:
+                        if time.time() - tmp_path.stat().st_mtime >= _FRESH_PIDFILE_SECONDS:
+                            tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 _tmp_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                 if hasattr(os, "O_NOFOLLOW"):
                     _tmp_flags |= os.O_NOFOLLOW
                 _tmp_fd = os.open(str(tmp_path), _tmp_flags, 0o600)
                 try:
                     proc = subprocess.Popen(cmd_parts, **popen_kwargs)
-                except Exception:
+                except BaseException:
                     os.close(_tmp_fd)
                     tmp_path.unlink(missing_ok=True)
                     raise
@@ -3802,7 +3810,7 @@ def start_guard_daemon(
                     # Some filesystems (network FS, tmpfs on certain
                     # kernels) reject directory fsync — best-effort.
                     pass
-            except Exception:
+            except BaseException:
                 # Unlink any partial .pid.tmp we may have created so a
                 # retry can succeed. unlink is symlink-safe (operates on
                 # the directory entry, not the symlink target).
