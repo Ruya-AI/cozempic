@@ -43,6 +43,29 @@ class TestReloadSelfDaemon(unittest.TestCase):
         self.assertIsNone(result.get("new_pid"))
         self.assertIn("no daemon", result["reason"].lower())
 
+    def test_retry_preserves_orphaned_pid_from_first_spawn(self):
+        from cozempic.guard import reload_self_daemon
+
+        session_id = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "guard.pid"
+            first = {"started": False, "already_running": False, "orphaned_pid": 111}
+            second = {"started": True, "already_running": False, "pid": 222, "log_file": "guard.log"}
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=123),
+                patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+                patch("cozempic.guard._pid_file_for_session", return_value=pid_path),
+                patch("cozempic.guard._wait_for_exit", return_value=True),
+                patch("cozempic.guard.os.kill"),
+                patch("cozempic.guard.time.sleep"),
+                patch("cozempic.guard.start_guard_daemon", side_effect=[first, second]),
+            ):
+                result = reload_self_daemon(cwd=tmpdir, session_id=session_id)
+
+        self.assertTrue(result["reloaded"])
+        self.assertEqual(result["new_pid"], 222)
+        self.assertEqual(result["orphaned_pid"], 111)
+
 
 class TestGuardDaemonPidHandoff(unittest.TestCase):
     def test_start_guard_daemon_passes_explicit_claude_pid_to_child(self):
@@ -83,6 +106,31 @@ class TestGuardDaemonPidHandoff(unittest.TestCase):
             self.assertTrue(result["started"])
             self.assertIn("--claude-pid", captured["cmd_parts"])
             self.assertIn("9999", captured["cmd_parts"])
+
+    def test_start_guard_daemon_reclaims_fresh_leftover_publication_temp(self):
+        from cozempic import guard
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
+            tmp = Path(tmpdir)
+
+            class DummyProc:
+                pid = 4242
+
+            with (
+                patch("cozempic.guard._guard_tmp_root", return_value=tmp),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard.find_claude_pid", return_value=9999),
+                patch("cozempic.guard.subprocess.Popen", return_value=DummyProc()),
+            ):
+                pid_path = guard._pid_file_for_session(session_id)
+                tmp_path = pid_path.with_suffix(".pid.tmp")
+                tmp_path.write_text("leftover reservation")
+                result = guard.start_guard_daemon(cwd=tmpdir, session_id=session_id)
+
+            self.assertTrue(result["started"])
+            self.assertFalse(tmp_path.exists())
 
 
 if __name__ == "__main__":

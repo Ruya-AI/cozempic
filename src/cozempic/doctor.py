@@ -7,6 +7,7 @@ config bugs, oversized sessions, stale backups, and disk usage.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import tempfile
@@ -248,6 +249,9 @@ _PROTECTED_TMP_NAMES = frozenset({
     "cozempic_reload.log",
 })
 _PROTECTED_TMP_PREFIXES = ("cozempic_breaker_",)
+# A doctor run is an operator cleanup action, not a live spawn contender. Give
+# a slow daemon publication ample time to finish before considering its temp file.
+_DOCTOR_PID_TMP_STALE_SECONDS = 60
 
 
 def _is_protected_tmp_artifact(name: str) -> bool:
@@ -290,23 +294,26 @@ def _is_lock_held(lock_path: Path) -> bool:
     except ImportError:
         return True
     try:
-        fd = open(lock_path, "a+")
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(lock_path), flags)
     except OSError:
         # Can't open — leave the file alone.
         return True
     try:
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
             return True
         # Acquired — lock was orphaned. Release before returning.
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
         return False
     finally:
-        fd.close()
+        os.close(fd)
 
 
 def _glob_tmp_artifacts(pattern: str) -> list[Path]:
@@ -361,11 +368,10 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
             live_slugs.add(slug)
         else:
             stale_pids.append(pid_path)
-    from .spawn_lock import _FRESH_PIDFILE_SECONDS
     stale_temps = [
         path for path in _glob_tmp_artifacts("cozempic_guard_*.pid.tmp")
         if not _is_protected_tmp_artifact(path.name)
-        and _is_stale_tmp_artifact(path, _FRESH_PIDFILE_SECONDS)
+        and _is_stale_tmp_artifact(path, _DOCTOR_PID_TMP_STALE_SECONDS)
     ]
 
     for log_path in _glob_tmp_artifacts("cozempic_guard_*.log"):
@@ -378,7 +384,6 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
 
     orphan_locks = [
         *_unheld_lock_artifacts("cozempic_hook_*.lock"),
-        *_unheld_lock_artifacts("cozempic_guard_*.pid.reclaim-lock"),
     ]
 
     return stale_pids, stale_temps, orphan_logs, orphan_locks

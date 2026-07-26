@@ -402,14 +402,25 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         self.assertIn("log", result.message.lower())
 
     def test_stale_pid_tmp_is_reported_and_removed(self):
+        from cozempic.doctor import _DOCTOR_PID_TMP_STALE_SECONDS
+
         temp_path = self.tmpdir / "cozempic_guard_staletmp-04.pid.tmp"
         temp_path.write_text("reserved\n")
-        stale_at = time.time() - 10
+        stale_at = time.time() - _DOCTOR_PID_TMP_STALE_SECONDS - 1
         os.utime(temp_path, (stale_at, stale_at))
         result = check_stale_tmp_artifacts()
         self.assertIn("pid.tmp", result.message)
         fix_stale_tmp_artifacts()
         self.assertFalse(temp_path.exists())
+
+    def test_recent_pid_tmp_is_not_reclaimed_during_doctor_fix(self):
+        temp_path = self.tmpdir / "cozempic_guard_slowspawn-04.pid.tmp"
+        temp_path.write_text("reserved\n")
+        stale_at = time.time() - 10
+        os.utime(temp_path, (stale_at, stale_at))
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        fix_stale_tmp_artifacts()
+        self.assertTrue(temp_path.exists())
 
     def test_pid_tmp_symlink_is_reported_and_removed(self):
         victim = self.tmpdir / "victim.txt"
@@ -435,6 +446,15 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         with patch("cozempic.doctor._is_lock_held", return_value=True):
             result = check_stale_tmp_artifacts()
         self.assertEqual(result.status, "ok")
+
+    def test_hook_lock_symlink_does_not_touch_its_target(self):
+        victim = self.tmpdir / "victim.txt"
+        lock_path = self.tmpdir / "cozempic_hook_symlink-06.lock"
+        os.symlink(victim, lock_path)
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        self.assertFalse(victim.exists())
+        fix_stale_tmp_artifacts()
+        self.assertTrue(lock_path.is_symlink())
 
     def test_garbage_pid_content_is_treated_as_stale(self):
         """Non-integer .pid file content must not crash — treat as stale."""

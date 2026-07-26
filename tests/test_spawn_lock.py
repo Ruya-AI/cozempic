@@ -508,7 +508,7 @@ class TestFreshClaimProtection(unittest.TestCase):
         self.assertIn("pidfile claim", result["reason"])
 
     def _start_with_pid_tmp(self, *, stale: bool):
-        """Start against a fresh or stale publication reservation."""
+        """Start against a fresh or stale leftover publication reservation."""
         from cozempic import spawn_lock
         from cozempic.guard import _pid_file_for_session, start_guard_daemon
 
@@ -539,12 +539,11 @@ class TestFreshClaimProtection(unittest.TestCase):
             pid_path.unlink(missing_ok=True)
             tmp_path.unlink(missing_ok=True)
 
-    def test_pid_tmp_conflict_prevents_spawn(self):
-        """A fresh publication temp file must fail before creating a child."""
+    def test_fresh_pid_tmp_is_reclaimed_after_exclusive_claim(self):
+        """An exclusive PID claimant may reclaim any leftover publication temp."""
         result, popen = self._start_with_pid_tmp(stale=False)
-        self.assertFalse(result["started"])
-        self.assertIn("pidfile", result["reason"])
-        popen.assert_not_called()
+        self.assertTrue(result["started"])
+        popen.assert_called_once()
 
     def test_stale_pid_tmp_is_reclaimed_before_spawn(self):
         """A reservation left by a killed parent must not block restart forever."""
@@ -597,9 +596,9 @@ class TestSymlinkDefense(unittest.TestCase):
     which:
       - rejects symlinks with ``OSError`` (ELOOP on Linux, EEXIST on macOS
         since O_EXCL fires first when the path exists at all)
-      - rejects pre-existing regular files too (orphan ``.pid.tmp`` from
-        a crashed prior spawn)
-      - leaves the victim file untouched in both cases
+      - reclaims a pre-existing regular publication temp only after winning
+        the exclusive PID claim
+      - leaves the symlink target untouched
     """
 
     SESSION_ID = "ca7ec0de-1234-5678-9abc-2026051811f0"

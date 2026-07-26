@@ -3718,19 +3718,11 @@ def start_guard_daemon(
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
-                # Reserve the publication path before spawning. A fresh temp
-                # file may belong to a peer; an old regular file is a crashed
-                # spawn reservation and can be reclaimed safely.
+                # The exclusive PID claim above means any leftover publication
+                # temp belongs to a previous failed spawn, never a live peer.
                 tmp_path = pid_path.with_suffix(".pid.tmp")
-                from .spawn_lock import _FRESH_PIDFILE_SECONDS
-                if tmp_path.is_symlink():
+                if tmp_path.is_symlink() or tmp_path.exists():
                     tmp_path.unlink(missing_ok=True)
-                elif tmp_path.exists():
-                    try:
-                        if time.time() - tmp_path.stat().st_mtime >= _FRESH_PIDFILE_SECONDS:
-                            tmp_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
                 _tmp_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                 if hasattr(os, "O_NOFOLLOW"):
                     _tmp_flags |= os.O_NOFOLLOW
@@ -3754,10 +3746,9 @@ def start_guard_daemon(
             # O_NOFOLLOW) instead of Path.write_text. The default write_text
             # follows symlinks — an attacker who pre-plants the .pid.tmp
             # path as a symlink to ~/.zshrc or ~/.ssh/authorized_keys would
-            # have the file overwritten with the PID number. O_EXCL also
-            # surfaces orphan .pid.tmp files (from a prior SIGKILLed spawn)
-            # as a FileExistsError instead of silently truncating them,
-            # which closes a re-attack window in CRIT C3.
+            # have the file overwritten with the PID number. Leftovers are
+            # reclaimed only after this process owns the PID-file claim, and
+            # O_EXCL closes the unlink-to-open re-attack window.
             # CRIT C3 fix: catch ANY exception (not just OSError) around
             # the write+rename block. A SIGINT/InterruptedError or other
             # non-OSError between write_text and rename used to leak the
@@ -4269,6 +4260,7 @@ def reload_self_daemon(
         protect_patterns=protect_patterns,
     )
     result = start_guard_daemon(**daemon_args)
+    orphaned_pid = result.get("orphaned_pid")
     if not result.get("started") and not result.get("already_running"):
         time.sleep(1)
         # Only clear a pid file we know is stale (pointing at a dead pid).
@@ -4292,6 +4284,7 @@ def reload_self_daemon(
         except (ValueError, OSError):
             pid_path.unlink(missing_ok=True)
         result = start_guard_daemon(**daemon_args)
+        orphaned_pid = orphaned_pid or result.get("orphaned_pid")
 
     reloaded = bool(result.get("started") or result.get("already_running"))
     if reloaded:
@@ -4304,6 +4297,7 @@ def reload_self_daemon(
         "old_pid": old_pid,
         "new_pid": result.get("pid"),
         "log_file": result.get("log_file"),
+        "orphaned_pid": orphaned_pid,
         "reason": reason,
     }
 

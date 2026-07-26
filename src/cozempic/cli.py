@@ -1045,6 +1045,11 @@ def cmd_guard(args):
             print(f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})")
         else:
             print(f"  Guard reload skipped: {result.get('reason')}")
+        if result.get("orphaned_pid"):
+            print(
+                f"  Guard warning: PID {result['orphaned_pid']} may still be running; stop it manually.",
+                file=sys.stderr,
+            )
         return
 
     if args.daemon:
