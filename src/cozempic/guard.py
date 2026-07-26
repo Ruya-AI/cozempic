@@ -1886,7 +1886,7 @@ def guard_prune_cycle(
             _write_holder["error"] = "conflict"
             print(f"  [{_now()}] Deferred prune write skipped — {exc}", file=sys.stderr)
             _repair_after_terminate()
-        except OSError as exc:
+        except (OSError, KeyboardInterrupt) as exc:
             _write_holder["error"] = "oserror"
             # Disk-full / EIO / permission at the post-kill write instant. The
             # write is atomic (save_messages leaves the original intact on any

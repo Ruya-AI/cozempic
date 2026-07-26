@@ -411,13 +411,13 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         fix_stale_tmp_artifacts()
         self.assertFalse(temp_path.exists())
 
-    def test_orphan_lock_is_stale_when_not_held(self):
-        """A .lock file that can be acquired with LOCK_EX|LOCK_NB is orphaned."""
-        self._make_lock_file("oldhook-05")
+    def test_hook_lock_is_protected_when_not_held(self):
+        """A hook mutex remains protected between brief flock acquisitions."""
+        lock_path = self._make_lock_file("oldhook-05")
         with patch("cozempic.doctor._is_lock_held", return_value=False):
             result = check_stale_tmp_artifacts()
-        self.assertIn(result.status, ("warning", "issue"))
-        self.assertIn("lock", result.message.lower())
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(lock_path.exists())
 
     def test_held_lock_is_not_stale(self):
         """A .lock file currently held by another process must be preserved."""
@@ -473,6 +473,15 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         with patch("cozempic.doctor._is_lock_held", return_value=True):
             fix_stale_tmp_artifacts()
         self.assertTrue(lock_path.exists())
+
+    def test_fix_preserves_mutex_files(self):
+        hook_lock = self._make_lock_file("persistent-hook-22")
+        reclaim_lock = self.tmpdir / "cozempic_guard_persistent-22.pid.reclaim-lock"
+        reclaim_lock.write_text("")
+        with patch("cozempic.doctor._is_lock_held", return_value=False):
+            fix_stale_tmp_artifacts()
+        self.assertTrue(hook_lock.exists())
+        self.assertTrue(reclaim_lock.exists())
 
     def test_fix_preserves_global_files(self):
         guard_log = self.tmpdir / "cozempic_guard.log"

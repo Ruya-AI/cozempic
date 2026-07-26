@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,9 +19,8 @@ from .session import find_sessions, get_claude_dir, get_claude_json_path
 
 # Directory where cozempic writes runtime artifacts (.pid / .log / .lock files).
 # Exposed as a module-level constant so tests can redirect it to a tmpdir
-# without monkeypatching every glob call. Always points at POSIX /tmp today;
-# a future Windows port would swap this for tempfile.gettempdir().
-_TMP_DIR = Path("/tmp")
+# without monkeypatching every glob call.
+_TMP_DIR = Path(tempfile.gettempdir()) if platform.system() == "Windows" else Path("/tmp")
 
 
 @dataclass
@@ -246,14 +246,16 @@ _PROTECTED_TMP_NAMES = frozenset({
     "cozempic_guard.log",
     "cozempic_reload.log",
 })
-_PROTECTED_TMP_PREFIXES = ("cozempic_breaker_",)
+_PROTECTED_TMP_PREFIXES = ("cozempic_breaker_", "cozempic_hook_")
 
 
 def _is_protected_tmp_artifact(name: str) -> bool:
     """True if the file is an intentionally-persistent global artifact."""
     if name in _PROTECTED_TMP_NAMES:
         return True
-    return any(name.startswith(p) for p in _PROTECTED_TMP_PREFIXES)
+    return name.endswith(".pid.reclaim-lock") or any(
+        name.startswith(prefix) for prefix in _PROTECTED_TMP_PREFIXES
+    )
 
 
 def _is_live_guard_pid(pid: int) -> bool:
@@ -335,7 +337,6 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     Never returns a file listed in `_is_protected_tmp_artifact`.
     """
     stale_pids: list[Path] = []
-    stale_temps: list[Path] = []
     orphan_logs: list[Path] = []
     orphan_locks: list[Path] = []
 
