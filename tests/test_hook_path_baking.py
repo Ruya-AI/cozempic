@@ -108,6 +108,13 @@ class TestResolveAndBake(unittest.TestCase):
             settings = json.loads(path.read_text())
             self.assertTrue(any(isinstance(entry, dict) for entry in settings["hooks"]["SessionStart"]))
 
+    def test_hook_state_tolerates_truthy_non_list_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": 5}]}}')
+            self.assertFalse(cz.cozempic_hook_schema_state(path).error)
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):

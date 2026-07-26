@@ -1232,6 +1232,9 @@ def cmd_uninstall(args):
 
     if purge:
         print("  --purge will DELETE your savings ledger + receipts (~/.cozempic). This is irreversible.")
+        if not sys.stdin.isatty():
+            print("  Aborted (no interactive confirmation).\n")
+            return
         if _prompt_with_timeout("  Continue? [y/N] ", timeout=30, default="n") != "y":
             print("  Aborted.\n")
             return

@@ -81,14 +81,20 @@ COZEMPIC_HOOKS = _load_canonical_hooks()
 
 # ─── Core logic ──────────────────────────────────────────────────────────────
 
+def _hooks_list(entry: object) -> list:
+    """Return a hook entry's commands only when its container is a list."""
+    if not isinstance(entry, dict):
+        return []
+    hooks = entry.get("hooks", [])
+    return hooks if isinstance(hooks, list) else []
+
+
 def _is_cozempic_hook(hook_entry: object) -> bool:
     """Return True if this entry contains AT LEAST ONE cozempic-installed
     command. See `_is_cozempic_command` for per-command granularity used by
     uninstall (which must preserve user-authored commands in mixed entries).
     """
-    if not isinstance(hook_entry, dict):
-        return False
-    for h in hook_entry.get("hooks", []) or []:
+    for h in _hooks_list(hook_entry):
         if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
             return True
     return False
@@ -133,9 +139,7 @@ def _entry_has_current_cozempic_hook(hook_entry: object) -> bool:
     """Return True if at least one command in this entry matches the current
     schema. Used by `_maybe_auto_init` and `_maybe_global_init` to decide
     whether the project/user needs a refresh."""
-    if not isinstance(hook_entry, dict):
-        return False
-    for h in hook_entry.get("hooks", []) or []:
+    for h in _hooks_list(hook_entry):
         if isinstance(h, dict) and _is_current_cozempic_command(h.get("command", "")):
             return True
     return False
@@ -151,9 +155,7 @@ class CozempicHookSchemaState:
 
 
 def _iter_entry_hook_commands(entry: object):
-    if not isinstance(entry, dict):
-        return
-    for hook in entry.get("hooks", []) or []:
+    for hook in _hooks_list(entry):
         if isinstance(hook, dict):
             command = hook.get("command")
             if isinstance(command, str):
@@ -440,7 +442,7 @@ def _bake_cozempic_path(hooks: dict, abs_python: str) -> dict:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            for h in (entry.get("hooks", []) or []) if isinstance(entry, dict) else []:
+            for h in _hooks_list(entry):
                 cmd = h.get("command") if isinstance(h, dict) else None
                 if isinstance(cmd, str) and "python3 -m cozempic" in cmd:
                     h["command"] = cmd.replace("python3 -m cozempic", f"{q} -m cozempic")
@@ -528,7 +530,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                 # user-authored commands retain their original order.
                 primary_idx = our_entry_idxs[0]
                 primary = existing[primary_idx]
-                primary_hooks = primary.get("hooks", []) or []
+                primary_hooks = _hooks_list(primary)
                 primary_current = all(
                     _is_current_cozempic_command(h.get("command", ""))
                     for h in primary_hooks
@@ -559,7 +561,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                     duplicate = existing[duplicate_idx]
                     kept_hooks = [
                         hook
-                        for hook in duplicate.get("hooks", []) or []
+                        for hook in _hooks_list(duplicate)
                         if not (
                             isinstance(hook, dict)
                             and _is_cozempic_command(hook.get("command", ""))
@@ -862,7 +864,7 @@ def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict
                     new_entries.append(entry)
                     continue
 
-                old_inner = entry.get("hooks", []) or []
+                old_inner = _hooks_list(entry)
                 kept_inner = [
                     h for h in old_inner
                     if not (isinstance(h, dict) and _is_cozempic_command(h.get("command", "")))

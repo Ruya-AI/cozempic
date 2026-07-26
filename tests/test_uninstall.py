@@ -171,13 +171,22 @@ class TestPreviewAndDryRun(_Base):
     def test_purge_uses_bounded_confirmation(self):
         from cozempic import cli
 
-        with patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
+        with patch.object(cli.sys.stdin, "isatty", return_value=True), \
+                patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
                 patch.object(cz_init, "run_uninstall") as run_uninstall:
             cli.cmd_uninstall(
                 argparse.Namespace(project=False, all=False, purge=True, dry_run=False)
             )
         prompt.assert_called_once_with("  Continue? [y/N] ", timeout=30, default="n")
         run_uninstall.assert_not_called()
+
+    def test_purge_requires_interactive_confirmation(self):
+        from cozempic import cli
+
+        with patch.object(cli.sys.stdin, "isatty", return_value=False), \
+                patch.object(cli, "_prompt_with_timeout") as prompt:
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=False))
+        prompt.assert_not_called()
 
     def test_preview_reports_without_mutating(self):
         sp = self._write_global_settings(_settings_with({
