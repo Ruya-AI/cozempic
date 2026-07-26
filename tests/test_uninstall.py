@@ -57,6 +57,28 @@ class _Base(unittest.TestCase):
 
 
 class TestRunUninstall(_Base):
+    def test_project_uninstall_blocks_auto_init_until_explicit_init(self):
+        from cozempic import cli
+
+        project = self.home / "project"
+        (project / ".claude").mkdir(parents=True)
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            cz_init.run_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        marker = project / ".claude" / ".cozempic_uninstalled"
+        self.assertTrue(marker.exists())
+
+        with patch.object(cli.Path, "cwd", return_value=project):
+            with patch.object(cli, "run_init") as auto_init:
+                cli._maybe_auto_init(["list"])
+                auto_init.assert_not_called()
+
+        cz_init.run_init(str(project), skip_slash=True)
+        self.assertFalse(marker.exists())
+
     def test_removes_global_hooks_and_slash(self):
         self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]

@@ -88,6 +88,16 @@ class TestResolveAndBake(unittest.TestCase):
             self.assertIn("JSON object", cz.wire_hooks(tmp)["error"])
             self.assertIn("JSON object", cz.uninstall_hooks(tmp)["error"])
 
+    def test_null_hook_containers_are_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": null}}')
+            result = cz.wire_hooks(tmp)
+            self.assertFalse(result.get("error"))
+            settings = json.loads(path.read_text())
+            self.assertIsInstance(settings["hooks"]["SessionStart"], list)
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):
