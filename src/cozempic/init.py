@@ -237,6 +237,11 @@ def _settings_path(project_dir: str) -> Path:
     return Path(project_dir) / ".claude" / "settings.json"
 
 
+def _project_settings_paths(project_dir: str) -> list[Path]:
+    settings = _settings_path(project_dir)
+    return [settings, settings.with_name("settings.local.json")]
+
+
 def project_uninstall_marker(project_dir: str) -> Path:
     return Path(project_dir) / ".claude" / ".cozempic_uninstalled"
 
@@ -745,8 +750,8 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
     scopes = {
         "global": [_global_settings_path()],
-        "project": [_settings_path(".")],
-        "all": [_global_settings_path(), _settings_path(".")],
+        "project": _project_settings_paths("."),
+        "all": [_global_settings_path(), *_project_settings_paths(".")],
     }.get(scope, [_global_settings_path()])
     hook_targets = []
     errors = []
@@ -787,8 +792,9 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """
     targets = {
         "global": [(str(Path.home()), _global_settings_path())],
-        "project": [(".", None)],
-        "all": [(str(Path.home()), _global_settings_path()), (".", None)],
+        "project": [(".", path) for path in _project_settings_paths(".")],
+        "all": [(str(Path.home()), _global_settings_path())]
+        + [(".", path) for path in _project_settings_paths(".")],
     }.get(scope, [(str(Path.home()), _global_settings_path())])
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
                     "remind_counter_removed": False, "purged": [], "opt_out_set": False,
