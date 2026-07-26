@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import tempfile
@@ -120,6 +121,21 @@ class TestRunUninstall(_Base):
         self.assertTrue(res["remind_counter_removed"])
         self.assertFalse((self.home / ".cozempic_remind_counter").exists())
 
+    def test_surfaces_malformed_global_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        result = cz_init.run_uninstall("global")
+        self.assertTrue(result["errors"])
+
+        from cozempic import cli
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=False, dry_run=False)
+            )
+        self.assertIn("ERROR", output.getvalue())
+
 
 class TestPreviewAndDryRun(_Base):
     def test_preview_reports_without_mutating(self):
@@ -141,6 +157,13 @@ class TestPreviewAndDryRun(_Base):
         cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=True))
         self.assertEqual(sp.read_text(), before)
         self.assertFalse((self.home / ".cozempic_global_initialized").exists())  # no opt-out write either
+
+    def test_preview_reports_malformed_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        preview = cz_init.preview_uninstall("global")
+        self.assertTrue(preview["errors"])
 
 
 class TestOptOutHolds(_Base):

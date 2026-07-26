@@ -405,7 +405,8 @@ def _resolve_cozempic_python() -> tuple[str, bool]:
     # Degrade to a real `python3` if sys.executable is empty (exotic frozen
     # interpreters) so the baked fallback is never an empty command.
     exe = sys.executable or shutil.which("python3") or "python3"
-    ephemeral = any(m in exe for m in (
+    normalized_exe = exe.replace("\\", "/")
+    ephemeral = any(m in normalized_exe for m in (
         "/.cache/uv/", "/cache/uv/", "/environments-v", "/uv-run", "/tmp/", "/var/folders/",
     ))
     return exe, ephemeral
@@ -435,8 +436,8 @@ def _bake_cozempic_path(hooks: dict, abs_python: str) -> dict:
     return out
 
 
-def wire_hooks(project_dir: str) -> dict:
-    """Add cozempic checkpoint hooks to .claude/settings.json.
+def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
+    """Add cozempic checkpoint hooks to a project's settings.json.
 
     Idempotent within a schema version. Detects STALE cozempic hooks
     (installed by an older cozempic whose schema marker is absent/old) and
@@ -449,7 +450,7 @@ def wire_hooks(project_dir: str) -> dict:
       skipped  — list of hook events already at current schema
       settings_path, backup_path
     """
-    path = _settings_path(project_dir)
+    path = settings_path or _settings_path(project_dir)
 
     if not COZEMPIC_HOOKS:
         return {
@@ -610,12 +611,18 @@ def install_slash_command(project_dir: str) -> dict:
     return {"installed": True, "path": str(target), "already_existed": already_existed, "updated": already_existed}
 
 
-def run_init(project_dir: str, skip_slash: bool = False) -> dict:
+def run_init(
+    project_dir: str,
+    skip_slash: bool = False,
+    settings_path: Path | None = None,
+) -> dict:
     """Full init: wire hooks + install slash command.
+
+    ``settings_path`` lets global init target Claude's configured profile.
 
     Returns combined result dict.
     """
-    hook_result = wire_hooks(project_dir)
+    hook_result = wire_hooks(project_dir, settings_path=settings_path)
     slash_result = {"installed": False, "path": None, "already_existed": False}
 
     if not skip_slash:
@@ -639,6 +646,11 @@ _REMIND_COUNTER = Path.home() / ".cozempic_remind_counter"
 def _global_slash_path() -> Path:
     from .session import get_claude_dir
     return get_claude_dir() / "commands" / "cozempic.md"
+
+
+def _global_settings_path() -> Path:
+    from .session import get_claude_dir
+    return get_claude_dir() / "settings.json"
 
 
 def _slash_is_ours(content: str) -> bool:
@@ -682,12 +694,18 @@ def uninstall_slash_command() -> dict:
 
 def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
-    scopes = {"global": [str(Path.home())], "project": ["."],
-              "all": [str(Path.home()), "."]}.get(scope, [str(Path.home())])
+    scopes = {
+        "global": [_global_settings_path()],
+        "project": [_settings_path(".")],
+        "all": [_global_settings_path(), _settings_path(".")],
+    }.get(scope, [_global_settings_path()])
     hook_targets = []
-    for d in scopes:
-        p = _settings_path(d)
-        if p.exists() and _settings_has_cozempic_hooks(p):
+    errors = []
+    for p in scopes:
+        state = cozempic_hook_schema_state(p)
+        if state.error:
+            errors.append(state.error)
+        elif state.found:
             hook_targets.append(str(p))
     slash = _global_slash_path()
     slash_present = False
@@ -702,7 +720,8 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
             if p.exists():
                 data.append(str(p))
     return {"hooks_in": hook_targets, "slash_command": slash_present,
-            "remind_counter": _REMIND_COUNTER.exists(), "purge_data": data}
+            "remind_counter": _REMIND_COUNTER.exists(), "purge_data": data,
+            "errors": errors}
 
 
 def _settings_has_cozempic_hooks(path: Path) -> bool:
@@ -717,13 +736,20 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     leaves the global-init marker in place as the auto-init opt-out, so init does
     not silently re-wire on the next run (explicit `cozempic init` still works).
     """
-    dirs = {"global": [str(Path.home())], "project": ["."],
-            "all": [str(Path.home()), "."]}.get(scope, [str(Path.home())])
+    targets = {
+        "global": [(str(Path.home()), _global_settings_path())],
+        "project": [(".", None)],
+        "all": [(str(Path.home()), _global_settings_path()), (".", None)],
+    }.get(scope, [(str(Path.home()), _global_settings_path())])
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
-                    "remind_counter_removed": False, "purged": [], "opt_out_set": False}
+                    "remind_counter_removed": False, "purged": [], "opt_out_set": False,
+                    "errors": []}
 
-    for d in dirs:
-        result["hooks"].append(uninstall_hooks(d))
+    for directory, settings_path in targets:
+        hook_result = uninstall_hooks(directory, settings_path=settings_path)
+        result["hooks"].append(hook_result)
+        if hook_result.get("error"):
+            result["errors"].append(hook_result["error"])
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()
@@ -757,7 +783,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     return result
 
 
-def uninstall_hooks(project_dir: str) -> dict:
+def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
     """Remove cozempic-installed hooks from a settings.json. Idempotent.
 
     Surgical — removes only cozempic commands, preserving any user-authored
@@ -766,7 +792,7 @@ def uninstall_hooks(project_dir: str) -> dict:
 
     Returns: {removed: list[str], settings_path: str | None, backup_path: str | None}
     """
-    path = _settings_path(project_dir)
+    path = settings_path or _settings_path(project_dir)
     if not path.exists():
         return {"removed": [], "settings_path": None, "backup_path": None}
 

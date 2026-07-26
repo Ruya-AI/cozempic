@@ -8,6 +8,18 @@ from unittest import mock
 
 
 class TestGlobalAutoInit(unittest.TestCase):
+    def setUp(self):
+        # These legacy tests model the default profile; dedicated tests below
+        # cover CLAUDE_CONFIG_DIR explicitly.
+        self._config_patch = mock.patch(
+            "cozempic.session.get_claude_dir",
+            side_effect=lambda: Path.home() / ".claude",
+        )
+        self._config_patch.start()
+
+    def tearDown(self):
+        self._config_patch.stop()
+
     def _stub_marker(self, tmpdir):
         return Path(tmpdir) / ".cozempic_global_initialized"
 
@@ -303,6 +315,24 @@ class TestGlobalAutoInit(unittest.TestCase):
                             cli._maybe_global_init([help_flag])
                     self.assertFalse((Path(tmp) / ".claude" / "settings.json").exists())
                     self.assertFalse(marker.exists())
+
+    def test_global_init_honors_config_dir(self):
+        """Global hooks belong to Claude's configured profile, not ~/.claude."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            profile = Path(tmp) / "profile"
+            profile.mkdir()
+            marker = self._stub_marker(tmp)
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=home):
+                    with mock.patch(
+                        "cozempic.session.get_claude_dir", return_value=profile
+                    ):
+                        with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
+                            cli._maybe_global_init(["list"])
+            self.assertTrue((profile / "settings.json").exists())
+            self.assertFalse((home / ".claude" / "settings.json").exists())
 
 
 class TestUninstallHooks(unittest.TestCase):
@@ -636,6 +666,30 @@ class TestGlobalInitFailure(unittest.TestCase):
                                 cli._maybe_global_init(["list"])
             self.assertFalse(marker.exists(), "failure must not become an opt-out")
             self.assertEqual(run_init.call_count, 2)
+
+    def test_explicit_global_init_error_does_not_mark_declined(self):
+        from cozempic import cli
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            profile = Path(tmp) / "profile"
+            profile.mkdir()
+            marker = Path(tmp) / ".cozempic_global_initialized"
+            (profile / "settings.json").write_text("{broken json")
+            args = argparse.Namespace(
+                uninstall_global=False,
+                global_install=True,
+                cwd=None,
+                no_slash_command=True,
+            )
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=home):
+                    with mock.patch(
+                        "cozempic.session.get_claude_dir", return_value=profile
+                    ):
+                        cli.cmd_init(args)
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

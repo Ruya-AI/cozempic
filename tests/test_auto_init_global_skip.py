@@ -9,6 +9,16 @@ from unittest import mock
 class TestAutoInitGlobalSkip(unittest.TestCase):
     """_maybe_auto_init() must skip local init when global hooks are current."""
 
+    def setUp(self):
+        self._config_patch = mock.patch(
+            "cozempic.session.get_claude_dir",
+            side_effect=lambda: Path.home() / ".claude",
+        )
+        self._config_patch.start()
+
+    def tearDown(self):
+        self._config_patch.stop()
+
     def _make_project(self, tmpdir):
         """Create a fake project with .claude/ dir under tmpdir."""
         project = Path(tmpdir) / "myproject"
@@ -234,14 +244,33 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             # cwd IS the home dir -- home_claude == claude_dir
             with mock.patch.object(cli.Path, "home", return_value=home):
                 with mock.patch.object(cli.Path, "cwd", return_value=home):
-                    # Return False so the local check falls through to run_init.
+                    # Return an empty local state so the local check falls through to run_init.
                     # If the guard were missing, the global-skip branch would fire
                     # (real hooks ARE current) and return early -- run_init would
                     # never be called. So run_init being called proves the guard works.
-                    with mock.patch.object(cli, "_project_is_cozempic_current", return_value=False):
+                    with mock.patch.object(
+                        cli,
+                        "_project_cozempic_hook_state",
+                        return_value=mock.Mock(found=False, current=False, error=None),
+                    ):
                         with mock.patch.object(cli, "run_init", return_value={"hooks": {"added": ["SessionStart[]"], "updated": []}}) as ri:
                             cli._maybe_auto_init(["list"])
                             ri.assert_called_once()
+
+    def test_skips_when_project_settings_are_malformed(self):
+        """A broken local settings file must not be overwritten by auto-init."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            (project / ".claude" / "settings.local.json").write_text("{broken json")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as run_init:
+                        cli._maybe_auto_init(["list"])
+                        run_init.assert_not_called()
 
 
 if __name__ == "__main__":

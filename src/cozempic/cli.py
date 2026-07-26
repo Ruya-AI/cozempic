@@ -1204,7 +1204,7 @@ def cmd_doctor(args):
 def cmd_uninstall(args):
     """Reverse `cozempic init` — remove hooks, the slash command, and markers.
 
-    Default scope is GLOBAL (~/.claude). Keeps the user's data (savings ledger,
+    Default scope is Claude's configured global directory. Keeps the user's data (savings ledger,
     receipts) unless --purge. Sets the auto-init opt-out so init won't re-wire.
     """
     from .init import preview_uninstall, run_uninstall
@@ -1223,6 +1223,8 @@ def cmd_uninstall(args):
         print(f"    Slash command (~/.claude/commands/cozempic.md): "
               f"{'remove' if prev['slash_command'] else '(not present / not ours)'}")
         print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
+        for error in prev.get("errors", []):
+            print(f"    Hooks: ERROR — {error}")
         if purge:
             print(f"    Purge data: {prev['purge_data'] or '(none)'}")
         print()
@@ -1240,11 +1242,14 @@ def cmd_uninstall(args):
 
     result = run_uninstall(scope, purge)
     n_hooks = sum(len(h.get("removed", [])) for h in result["hooks"])
-    print(f"  Removed {n_hooks} hook(s) across {len(result['hooks'])} settings file(s).")
+    successful_settings = [h for h in result["hooks"] if not h.get("error")]
+    print(f"  Removed {n_hooks} hook(s) across {len(successful_settings)} settings file(s).")
     for h in result["hooks"]:
         if h.get("removed"):
             print(f"    - {h['settings_path']}: {', '.join(h['removed'])}"
                   + (f"  (backup: {h['backup_path']})" if h.get("backup_path") else ""))
+        elif h.get("error"):
+            print(f"    - ERROR: {h['error']}")
     sc = result.get("slash_command")
     if sc and sc.get("removed"):
         print(f"  Removed slash command: {sc['path']}"
@@ -1264,10 +1269,13 @@ def cmd_init(args):
         # Deprecated alias → `cozempic uninstall --global`.
         print("  Note: `init --uninstall-global` is deprecated; use `cozempic uninstall`.", file=sys.stderr)
         from .init import uninstall_hooks
-        result = uninstall_hooks(str(Path.home()))
+        global_settings = _global_claude_dir() / "settings.json"
+        result = uninstall_hooks(str(Path.home()), settings_path=global_settings)
         print("\n  COZEMPIC INIT — UNINSTALL GLOBAL")
         print("  ═══════════════════════════════════════════════════════════════════")
-        if result.get("removed"):
+        if result.get("error"):
+            print(f"  Hooks: ERROR — {result['error']}")
+        elif result.get("removed"):
             print(f"  Removed {len(result['removed'])} hook(s) from {result['settings_path']}")
             for h in result["removed"]:
                 print(f"    - {h}")
@@ -1275,17 +1283,19 @@ def cmd_init(args):
                 print(f"  Backup: {result['backup_path']}")
         else:
             print("  No cozempic hooks found in ~/.claude/settings.json — nothing to remove.")
-        # Mark as opted-out so global auto-init doesn't re-fire
-        try:
-            _GLOBAL_INIT_MARKER.touch()
-        except OSError:
-            pass
+        if not result.get("error"):
+            # Mark as opted-out so global auto-init doesn't re-fire.
+            try:
+                _GLOBAL_INIT_MARKER.touch()
+            except OSError:
+                pass
         print()
         return
 
     if getattr(args, "global_install", False):
         project_dir = str(Path.home())
-        scope_label = "GLOBAL (~/.claude/)"
+        global_settings = _global_claude_dir() / "settings.json"
+        scope_label = f"GLOBAL ({global_settings.parent}/)"
     else:
         project_dir = args.cwd or os.getcwd()
         scope_label = f"Project: {project_dir}"
@@ -1295,13 +1305,11 @@ def cmd_init(args):
     print(f"  {scope_label}")
     print()
 
-    result = run_init(project_dir, skip_slash=args.no_slash_command)
-    if getattr(args, "global_install", False):
-        # Mark as initialized so global auto-init doesn't re-fire
-        try:
-            _GLOBAL_INIT_MARKER.touch()
-        except OSError:
-            pass
+    result = run_init(
+        project_dir,
+        skip_slash=args.no_slash_command,
+        settings_path=global_settings if getattr(args, "global_install", False) else None,
+    )
 
     # Report hooks
     hooks = result["hooks"]
@@ -1322,6 +1330,13 @@ def cmd_init(args):
     if hooks["skipped"]:
         for h in hooks["skipped"]:
             print(f"    ~ {h} (current, skipped)")
+
+    if getattr(args, "global_install", False) and not hooks.get("error"):
+        # A failed install must remain retryable instead of looking like a decline.
+        try:
+            _GLOBAL_INIT_MARKER.touch()
+        except OSError:
+            pass
 
     # #158: if cozempic is running from a throwaway env (uvx / uv run), the path
     # baked into the hooks won't exist next session, so the guard daemon can't
@@ -2057,16 +2072,16 @@ def _prompt_with_timeout(msg: str, timeout: int = 30, default: str = "n") -> str
 
 
 def _maybe_global_init(argv: list[str]) -> None:
-    """Wire cozempic into ~/.claude/settings.json on first cozempic invocation
+    """Wire cozempic into Claude's configured global settings on first invocation
     on this machine — guarantees protection for every Claude Code session in
     every project, including projects the user has never run cozempic in.
 
     Bail-outs (in order):
       1. COZEMPIC_NO_GLOBAL_INIT=1 in env (also set by --no-global-init)
       2. Subcommand is in _AUTO_INIT_SKIP_CMDS
-      3. ~/.claude/ doesn't exist (Claude Code not installed yet)
+      3. Claude's configured global directory doesn't exist yet
       4. Marker exists and no Cozempic hooks are present (the user declined)
-      5. Cozempic hooks are already current in ~/.claude/settings.json (e.g. plugin
+      5. Cozempic hooks are already current in Claude's global settings (e.g. plugin
          marketplace install)
 
     Otherwise: writes hooks (skip slash command — project-level only) and
@@ -2091,7 +2106,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if cmd is None and not is_version_check:
         return
 
-    home_claude = Path.home() / ".claude"
+    home_claude = _global_claude_dir()
     if not home_claude.exists():
         return  # Claude Code not yet installed — defer until it is
 
@@ -2100,7 +2115,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if hook_state.error:
         print(
             f"  Cozempic: global init FAILED — {hook_state.error}. "
-            "Fix ~/.claude/settings.json, then run `cozempic init --global`.",
+            f"Fix {home_claude / 'settings.json'}, then run `cozempic init --global`.",
             file=sys.stderr,
         )
         return
@@ -2137,7 +2152,7 @@ def _maybe_global_init(argv: list[str]) -> None:
                 file=sys.stderr,
             )
             print(
-                "  Wires hooks into ~/.claude/settings.json. Reverse any time with "
+                "  Wires hooks into Claude's global settings. Reverse any time with "
                 "`cozempic init --uninstall-global`.",
                 file=sys.stderr,
             )
@@ -2159,7 +2174,11 @@ def _maybe_global_init(argv: list[str]) -> None:
             return
 
     try:
-        result = run_init(str(Path.home()), skip_slash=True)
+        result = run_init(
+            str(Path.home()),
+            skip_slash=True,
+            settings_path=home_claude / "settings.json",
+        )
     except Exception as exc:
         print(
             f"  Cozempic: global init failed ({exc}). Run `cozempic init --global` manually "
@@ -2236,6 +2255,11 @@ def _managed_cozempic_hook_state(claude_dir: Path):
     return cozempic_hook_schema_state(claude_dir / "settings.json")
 
 
+def _global_claude_dir() -> Path:
+    from .session import get_claude_dir
+    return get_claude_dir()
+
+
 def _project_cozempic_hook_state(claude_dir: Path):
     """Return combined state for the project's effective Claude settings files."""
     from .init import cozempic_hook_schema_state_for_paths
@@ -2272,13 +2296,13 @@ def _maybe_auto_init(argv: list[str]) -> None:
     # Skip local init when global hooks are already current (avoids double-firing).
     # Guard: if cwd IS the home dir, home_claude == claude_dir -- fall through
     # to the normal local check instead.
-    home_claude = Path.home() / ".claude"
+    home_claude = _global_claude_dir()
     if home_claude != claude_dir:
         global_state = _managed_cozempic_hook_state(home_claude)
         if global_state.error:
             print(
                 f"  Cozempic: auto-init skipped ({global_state.error}). "
-                "Fix ~/.claude/settings.json, then run `cozempic init --global`.",
+                f"Fix {home_claude / 'settings.json'}, then run `cozempic init --global`.",
                 file=sys.stderr,
             )
             return
@@ -2293,7 +2317,15 @@ def _maybe_auto_init(argv: list[str]) -> None:
                 )
             return
 
-    if _project_is_cozempic_current(claude_dir):
+    project_state = _project_cozempic_hook_state(claude_dir)
+    if project_state.error:
+        print(
+            f"  Cozempic: auto-init skipped ({project_state.error}). "
+            "Fix the project settings, then run `cozempic init`.",
+            file=sys.stderr,
+        )
+        return
+    if project_state.found and project_state.current:
         return  # already initialized
 
     try:

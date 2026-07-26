@@ -54,6 +54,11 @@ class TestResolveAndBake(unittest.TestCase):
                 _, eph = cz._resolve_cozempic_python()
                 self.assertTrue(eph, f"{p} should be ephemeral")
 
+    def test_resolve_flags_windows_uvx_ephemeral(self):
+        with patch("cozempic.init.sys.executable", r"C:\Users\x\.cache\uv\environments-v2\abc\python.exe"):
+            _, ephemeral = cz._resolve_cozempic_python()
+        self.assertTrue(ephemeral)
+
     def test_resolve_degrades_when_sys_executable_empty(self):
         # exotic frozen interpreters can have an empty sys.executable — must NOT
         # return "" (which would bake an empty `'' -m cozempic` no-op command).
