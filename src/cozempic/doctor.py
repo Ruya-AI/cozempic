@@ -247,7 +247,7 @@ _PROTECTED_TMP_NAMES = frozenset({
     "cozempic_guard.log",
     "cozempic_reload.log",
 })
-_PROTECTED_TMP_PREFIXES = ("cozempic_breaker_", "cozempic_hook_")
+_PROTECTED_TMP_PREFIXES = ("cozempic_breaker_",)
 
 
 def _is_protected_tmp_artifact(name: str) -> bool:
@@ -317,6 +317,8 @@ def _glob_tmp_artifacts(pattern: str) -> list[Path]:
 
 
 def _is_stale_tmp_artifact(path: Path, max_age_seconds: float) -> bool:
+    if path.is_symlink():
+        return True
     try:
         return time.time() - path.stat().st_mtime >= max_age_seconds
     except OSError:

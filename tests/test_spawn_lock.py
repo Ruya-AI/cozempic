@@ -637,8 +637,7 @@ class TestSymlinkDefense(unittest.TestCase):
 
     def test_pid_tmp_write_rejects_symlink(self):
         """Attacker pre-plants .pid.tmp as a symlink to a victim file.
-        The post-Popen atomic-rename write path MUST refuse it and leave
-        the victim untouched."""
+        The reservation is removed safely and the victim remains untouched."""
         from unittest.mock import patch
 
         from cozempic.guard import start_guard_daemon
@@ -668,26 +667,12 @@ class TestSymlinkDefense(unittest.TestCase):
                 threshold_tokens=1000,
             )
 
-        # The spawn body raised OSError on the os.open(O_EXCL|O_NOFOLLOW)
-        # and surfaced a structured failure (started=False, reason="pidfile:
-        # ..."). The DaemonSpawnClaim's __exit__ unlinked the parent-PID
-        # claim file we wrote at _claim time (handed_off=False).
-        self.assertFalse(
-            result.get("started"),
-            f"Spawn should have FAILED — symlink defense breached. " f"Got: {result!r}",
-        )
-        self.assertIn(
-            "reason",
-            result,
-            f"Failure path must carry a structured reason; got {result!r}",
-        )
+        self.assertTrue(result.get("started"), f"Spawn did not reclaim the symlink: {result!r}")
         # CRITICAL: the victim file must be untouched.
         self.assertEqual(
             self.victim.read_text(encoding="utf-8"),
             "ORIGINAL\n",
-            "Victim file was overwritten — C1 symlink TOCTOU regression. "
-            "The .pid.tmp write must use O_NOFOLLOW (or fail closed on "
-            "EEXIST when the path already exists, which O_EXCL guarantees).",
+            "Victim file was overwritten while reclaiming the reservation.",
         )
 
     def test_reclaim_lock_rejects_symlink(self):

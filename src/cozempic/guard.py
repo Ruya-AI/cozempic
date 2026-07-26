@@ -3723,7 +3723,9 @@ def start_guard_daemon(
                 # spawn reservation and can be reclaimed safely.
                 tmp_path = pid_path.with_suffix(".pid.tmp")
                 from .spawn_lock import _FRESH_PIDFILE_SECONDS
-                if tmp_path.exists() and not tmp_path.is_symlink():
+                if tmp_path.is_symlink():
+                    tmp_path.unlink(missing_ok=True)
+                elif tmp_path.exists():
                     try:
                         if time.time() - tmp_path.stat().st_mtime >= _FRESH_PIDFILE_SECONDS:
                             tmp_path.unlink(missing_ok=True)
@@ -3817,10 +3819,14 @@ def start_guard_daemon(
                 try:
                     proc.terminate()
                     proc.wait(timeout=5)
+                except ProcessLookupError:
+                    pass
                 except subprocess.TimeoutExpired:
                     try:
                         proc.kill()
                         proc.wait(timeout=5)
+                    except ProcessLookupError:
+                        pass
                     except (AttributeError, OSError, subprocess.TimeoutExpired):
                         orphaned_guard_pid = proc.pid
                 except (AttributeError, OSError):
