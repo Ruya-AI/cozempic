@@ -124,6 +124,16 @@ class TestResolveAndBake(unittest.TestCase):
             hooks = settings["hooks"]["SessionStart"][0]["hooks"]
             self.assertTrue(all(isinstance(hook, dict) for hook in hooks))
 
+    def test_wire_hooks_drops_entries_with_only_invalid_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": ["bad"]}]}}')
+            cz.wire_hooks(tmp)
+            settings = json.loads(path.read_text())
+            entries = settings["hooks"]["SessionStart"]
+            self.assertTrue(all(entry.get("hooks") for entry in entries))
+
     def test_hook_state_tolerates_truthy_non_list_containers(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".claude" / "settings.json"

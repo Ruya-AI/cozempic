@@ -529,8 +529,10 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                 if "hooks" in entry:
                     hooks_list = [hook for hook in entry["hooks"] if isinstance(hook, dict)]
                     if len(hooks_list) != len(entry["hooks"]):
-                        entry = {**entry, "hooks": hooks_list}
                         repaired = True
+                        if not hooks_list:
+                            continue
+                        entry = {**entry, "hooks": hooks_list}
                 valid_existing.append(entry)
             existing = valid_existing
 
@@ -794,10 +796,6 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     return {"hooks_in": hook_targets, "slash_command": slash_present,
             "remind_counter": _REMIND_COUNTER.exists(), "purge_data": data,
             "errors": errors}
-
-
-def _settings_has_cozempic_hooks(path: Path) -> bool:
-    return cozempic_hook_schema_state(path).found
 
 
 def run_uninstall(scope: str = "global", purge: bool = False) -> dict:

@@ -1194,37 +1194,18 @@ def check_cozempic_project_init() -> CheckResult:
             message="Not a Claude project (no .claude/ in cwd) — skipping",
         )
 
-    found = False
-    from .init import _hooks_list, _is_cozempic_command
-    for name in ("settings.json", "settings.local.json"):
-        p = claude_dir / name
-        if not p.exists():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            return CheckResult(
-                name="cozempic-project-init",
-                status="warning",
-                message=f"Could not read {p.name}: settings must be a JSON object",
-            )
-        hooks = data.get("hooks", {}) or {}
-        if not isinstance(hooks, dict):
-            hooks = {}
-        for entries in hooks.values():
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                for h in _hooks_list(entry):
-                    if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
-                        found = True
-                        break
+    from .init import cozempic_hook_schema_state_for_paths
+    state = cozempic_hook_schema_state_for_paths(
+        (claude_dir / "settings.json", claude_dir / "settings.local.json")
+    )
+    if state.error:
+        return CheckResult(
+            name="cozempic-project-init",
+            status="warning",
+            message=state.error,
+        )
 
-    if found:
+    if state.found:
         return CheckResult(
             name="cozempic-project-init",
             status="ok",
@@ -1246,9 +1227,9 @@ def check_cozempic_hooks() -> CheckResult:
     means team state isn't re-injected after native compaction.
     """
     claude_dir = get_claude_dir()
-    settings_path = claude_dir / "settings.json"
-
-    if not settings_path.exists():
+    settings_paths = (claude_dir / "settings.json", claude_dir / "settings.local.json")
+    existing_paths = [path for path in settings_paths if path.exists()]
+    if not existing_paths:
         return CheckResult(
             name="cozempic-hooks",
             status="warning",
@@ -1256,41 +1237,39 @@ def check_cozempic_hooks() -> CheckResult:
             fix_description="Run: cozempic init",
         )
 
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        return CheckResult(
-            name="cozempic-hooks",
-            status="warning",
-            message=f"Could not read settings.json: {e}",
-        )
-
-    if not isinstance(settings, dict):
-        return CheckResult(
-            name="cozempic-hooks",
-            status="warning",
-            message="Could not read settings.json: settings must be a JSON object",
-        )
-
-    hooks = settings.get("hooks", {}) or {}
-    if not isinstance(hooks, dict):
-        hooks = {}
     expected = {"SessionStart", "PreCompact", "PostCompact", "Stop"}
-    missing = []
-
-    for event in expected:
-        entries = hooks.get(event, [])
-        if not isinstance(entries, list):
-            entries = []
-        from .init import _hooks_list, _is_cozempic_command
-        has_cozempic = any(
-            _is_cozempic_command(h.get("command", ""))
-            for entry in entries if isinstance(entry, dict)
-            for h in _hooks_list(entry)
-            if isinstance(h, dict)
-        )
-        if not has_cozempic:
-            missing.append(event)
+    present = set()
+    from .init import _hooks_list, _is_cozempic_command
+    for settings_path in existing_paths:
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            return CheckResult(
+                name="cozempic-hooks",
+                status="warning",
+                message=f"Could not read {settings_path.name}: {e}",
+            )
+        if not isinstance(settings, dict):
+            return CheckResult(
+                name="cozempic-hooks",
+                status="warning",
+                message=f"Could not read {settings_path.name}: settings must be a JSON object",
+            )
+        hooks = settings.get("hooks", {}) or {}
+        if not isinstance(hooks, dict):
+            continue
+        for event in expected:
+            entries = hooks.get(event, [])
+            if not isinstance(entries, list):
+                continue
+            if any(
+                _is_cozempic_command(h.get("command", ""))
+                for entry in entries if isinstance(entry, dict)
+                for h in _hooks_list(entry)
+                if isinstance(h, dict)
+            ):
+                present.add(event)
+    missing = sorted(expected - present)
 
     if not missing:
         return CheckResult(

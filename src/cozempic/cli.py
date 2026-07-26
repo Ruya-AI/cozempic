@@ -2175,7 +2175,7 @@ def _maybe_global_init(argv: list[str]) -> None:
             )
             print(
                 "  Wires hooks into Claude's global settings. Reverse any time with "
-                "`cozempic init --uninstall-global`.",
+                "`cozempic uninstall`.",
                 file=sys.stderr,
             )
             response = _prompt_with_timeout("  Enable? [Y/n] ", timeout=30, default="n")
@@ -2248,7 +2248,7 @@ def _maybe_global_init(argv: list[str]) -> None:
             file=sys.stderr,
         )
         print(
-            "  Disable any time with `cozempic init --uninstall-global` "
+            "  Disable any time with `cozempic uninstall` "
             "or COZEMPIC_NO_GLOBAL_INIT=1.\n",
             file=sys.stderr,
         )
@@ -2256,7 +2256,7 @@ def _maybe_global_init(argv: list[str]) -> None:
         print(
             f"  Cozempic: protecting every Claude Code session globally "
             f"({outcome} in ~/.claude/settings.json). "
-            "Disable with `cozempic init --uninstall-global` or COZEMPIC_NO_GLOBAL_INIT=1.",
+            "Disable with `cozempic uninstall` or COZEMPIC_NO_GLOBAL_INIT=1.",
             file=sys.stderr,
         )
 
