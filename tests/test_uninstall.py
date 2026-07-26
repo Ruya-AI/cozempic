@@ -71,11 +71,12 @@ class TestRunUninstall(_Base):
         previous_cwd = Path.cwd()
         os.chdir(project)
         try:
-            cz_init.run_uninstall("project")
+            result = cz_init.run_uninstall("project")
         finally:
             os.chdir(previous_cwd)
         marker = project / ".claude" / ".cozempic_uninstalled"
         self.assertTrue(marker.exists())
+        self.assertTrue(result["project_opt_out_set"])
         self.assertFalse((self.home / ".cozempic_global_initialized").exists())
 
         with patch.object(cli.Path, "cwd", return_value=project):
@@ -150,6 +151,45 @@ class TestRunUninstall(_Base):
         with patch("shutil.rmtree", side_effect=OSError("permission denied")):
             result = cz_init.run_uninstall("global", purge=True)
         self.assertIn("Purge failed", result["errors"][0])
+
+    def test_cmd_uninstall_prints_non_hook_errors(self):
+        from cozempic import cli
+
+        result = {
+            "hooks": [],
+            "slash_command": None,
+            "purged": [],
+            "opt_out_set": False,
+            "errors": ["Purge failed for /home/example/.cozempic: permission denied"],
+        }
+        output = io.StringIO()
+        with patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=False, dry_run=False)
+            )
+        self.assertIn("ERROR: Purge failed", output.getvalue())
+
+    def test_slash_backup_failure_is_reported_without_removal(self):
+        slash = self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.uninstall_slash_command()
+        self.assertIn("Could not back up", result["error"])
+        self.assertTrue(slash.exists())
+
+    def test_init_marker_cleanup_failure_is_a_warning(self):
+        project = self.home / "project-marker-error"
+        project.mkdir()
+        marker = unittest.mock.Mock()
+        marker.unlink.side_effect = OSError("permission denied")
+        result = None
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            with patch.object(cz_init, "project_uninstall_marker", return_value=marker):
+                result = cz_init.run_init(".", skip_slash=True)
+        finally:
+            os.chdir(previous_cwd)
+        self.assertIn("Could not clear project uninstall marker", result["hooks"]["warnings"][0])
 
     def test_no_purge_keeps_data(self):
         (self.home / ".cozempic").mkdir()

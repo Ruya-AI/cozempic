@@ -1259,10 +1259,18 @@ def cmd_uninstall(args):
               + (f"  (backup: {sc['backup_path']})" if sc.get("backup_path") else ""))
     elif sc and sc.get("skipped_foreign"):
         print(f"  Left {sc['path']} in place (not a cozempic command).")
+    elif sc and sc.get("error"):
+        print(f"  Slash command: ERROR — {sc['error']}")
     if result.get("purged"):
         print(f"  Purged data: {', '.join(result['purged'])}")
+    reported_hook_errors = {h.get("error") for h in result["hooks"] if h.get("error")}
+    for error in result.get("errors", []):
+        if error not in reported_hook_errors:
+            print(f"  ERROR: {error}")
     if result.get("opt_out_set"):
         print("  Auto-init disabled. Re-run `cozempic init` to reinstall.")
+    if result.get("project_opt_out_set"):
+        print("  Project auto-init disabled. Re-run `cozempic init` to reinstall.")
     print()
 
 
@@ -1288,10 +1296,7 @@ def cmd_init(args):
             print("  No cozempic hooks found in ~/.claude/settings.json — nothing to remove.")
         if not result.get("error"):
             # Mark as opted-out so global auto-init doesn't re-fire.
-            try:
-                _global_init_marker().touch()
-            except OSError:
-                pass
+            _persist_global_init_marker()
         print()
         return
 
@@ -1335,6 +1340,8 @@ def cmd_init(args):
     if hooks["skipped"]:
         for h in hooks["skipped"]:
             print(f"    ~ {h} (current, skipped)")
+    for warning in hooks.get("warnings", []):
+        print(f"  Hooks: WARNING — {warning}")
 
     local_cleanup = result.get("local_cleanup")
     if local_cleanup:
@@ -1348,10 +1355,7 @@ def cmd_init(args):
 
     if getattr(args, "global_install", False) and not hooks.get("error"):
         # A failed install must remain retryable instead of looking like a decline.
-        try:
-            _global_init_marker().touch()
-        except OSError:
-            pass
+        _persist_global_init_marker()
 
     # #158: if cozempic is running from a throwaway env (uvx / uv run), the path
     # baked into the hooks won't exist next session, so the guard daemon can't

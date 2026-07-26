@@ -684,7 +684,12 @@ def run_init(
         local_settings = _settings_path(project_dir).with_name("settings.local.json")
         if local_settings.exists():
             local_cleanup = uninstall_hooks(project_dir, settings_path=local_settings)
-        project_uninstall_marker(project_dir).unlink(missing_ok=True)
+        try:
+            project_uninstall_marker(project_dir).unlink(missing_ok=True)
+        except OSError as exc:
+            hook_result.setdefault("warnings", []).append(
+                f"Could not clear project uninstall marker: {exc}"
+            )
     slash_result = {"installed": False, "path": None, "already_existed": False}
 
     if not skip_slash:
@@ -745,16 +750,24 @@ def uninstall_slash_command() -> dict:
     cozempic.md is never deleted. Backs it up (.md.bak) first. Idempotent;
     never raises destructively.
 
-    Returns: {removed: bool, path: str|None, backup_path: str|None, skipped_foreign: bool}
+    Returns: {removed: bool, path: str|None, backup_path: str|None,
+              skipped_foreign: bool, error: str|None}
     """
     target = _global_slash_path()
-    out = {"removed": False, "path": str(target), "backup_path": None, "skipped_foreign": False}
+    out = {
+        "removed": False,
+        "path": str(target),
+        "backup_path": None,
+        "skipped_foreign": False,
+        "error": None,
+    }
     if not target.exists():
         out["path"] = None
         return out
     try:
         content = target.read_text(encoding="utf-8", errors="surrogateescape")
-    except OSError:
+    except OSError as exc:
+        out["error"] = f"Could not read slash command: {exc}"
         return out
     if not _slash_is_ours(content):
         out["skipped_foreign"] = True
@@ -763,13 +776,14 @@ def uninstall_slash_command() -> dict:
         backup = target.with_suffix(".md.bak")
         shutil.copy2(target, backup)
         out["backup_path"] = str(backup)
-    except OSError:
-        pass
+    except OSError as exc:
+        out["error"] = f"Could not back up slash command: {exc}"
+        return out
     try:
         target.unlink()
         out["removed"] = True
-    except OSError:
-        pass
+    except OSError as exc:
+        out["error"] = f"Could not remove slash command: {exc}"
     return out
 
 
@@ -821,6 +835,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     }.get(scope, [(str(Path.home()), _global_settings_path())])
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
                     "remind_counter_removed": False, "purged": [], "opt_out_set": False,
+                    "project_opt_out_set": False,
                     "errors": []}
 
     global_cleanup_failed = False
@@ -838,6 +853,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     if has_project_target and not project_cleanup_failed:
         try:
             project_uninstall_marker(".").touch()
+            result["project_opt_out_set"] = True
         except OSError as exc:
             result["errors"].append(f"Could not persist project uninstall opt-out: {exc}")
 
