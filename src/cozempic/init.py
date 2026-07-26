@@ -610,6 +610,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
         "added": added,
         "updated": updated,
         "skipped": skipped,
+        "repaired": repaired,
         "settings_path": str(path),
         "backup_path": str(backup) if backup else None,
         "ephemeral": ephemeral,        # #158: True if cozempic runs from a throwaway env

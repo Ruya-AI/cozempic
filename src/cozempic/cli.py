@@ -1319,12 +1319,14 @@ def cmd_init(args):
     updated = hooks.get("updated") or []
     if hooks.get("error"):
         print(f"  Hooks: ERROR — {hooks['error']}")
-    elif hooks["added"] or updated:
+    elif hooks["added"] or updated or hooks.get("repaired"):
         print(f"  Hooks wired in {hooks['settings_path']}:")
         for h in hooks["added"]:
             print(f"    + {h} (added)")
         for h in updated:
             print(f"    → {h} (refreshed from stale schema)")
+        if hooks.get("repaired"):
+            print("    → malformed hook entries removed")
         if hooks["backup_path"]:
             print(f"  Backup: {hooks['backup_path']}")
     else:
