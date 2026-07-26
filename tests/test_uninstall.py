@@ -383,6 +383,8 @@ class TestPreviewAndDryRun(_Base):
         text = output.getvalue()
         self.assertIn("Hooks: ERROR — invalid settings", text)
         self.assertIn("Slash command: ERROR — Could not read slash command", text)
+        self.assertIn("Slash command (~/.claude/commands/cozempic.md): (could not determine)", text)
+        self.assertNotIn("(not present / not ours)", text)
         self.assertIn("/one/settings.json, /two/settings.local.json", text)
         self.assertNotIn("['/one/settings.json'", text)
 

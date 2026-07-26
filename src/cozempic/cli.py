@@ -19,7 +19,7 @@ from .helpers import (
     is_ssh_session, shell_quote,
     compile_protect_patterns, tag_pattern_matches, strip_pattern_tags,
 )
-from .init import global_init_marker_path, run_init
+from .init import global_init_marker_path, project_uninstall_marker, run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .safety import PruneValidationError
@@ -1228,8 +1228,12 @@ def cmd_uninstall(args):
         prev = preview_uninstall(scope, purge)
         print("  Dry run — nothing will be changed.\n")
         print(f"    Hooks would be removed from: {', '.join(prev['hooks_in']) or '(none)'}")
-        print(f"    Slash command (~/.claude/commands/cozempic.md): "
-              f"{'remove' if prev['slash_command'] else '(not present / not ours)'}")
+        slash_status = (
+            "remove" if prev["slash_command"]
+            else "(could not determine)" if prev.get("slash_error")
+            else "(not present / not ours)"
+        )
+        print(f"    Slash command (~/.claude/commands/cozempic.md): {slash_status}")
         print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
         for error in prev.get("hook_errors", prev.get("errors", [])):
             print(f"    Hooks: ERROR — {error}")
@@ -2300,7 +2304,7 @@ def _project_is_cozempic_current(claude_dir: Path) -> bool:
 
 
 def _managed_cozempic_hook_state(claude_dir: Path):
-    """Return state for the settings.json that global init and uninstall manage."""
+    """Return state for the settings.json that global init writes to."""
     from .init import _global_settings_paths, cozempic_hook_schema_state
 
     return cozempic_hook_schema_state(_global_settings_paths()[0])
@@ -2337,7 +2341,7 @@ def _maybe_auto_init(argv: list[str]) -> None:
     claude_dir = Path.cwd() / ".claude"
     if not claude_dir.exists():
         return  # not a Claude project — never modify foreign directories
-    if (claude_dir / ".cozempic_uninstalled").exists():
+    if project_uninstall_marker(str(Path.cwd())).exists():
         return  # explicit project uninstall is an opt-out until `cozempic init`
 
     cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
