@@ -663,6 +663,12 @@ def run_init(
 
     Returns combined result dict.
     """
+    local_cleanup = None
+    if settings_path is None:
+        local_settings = _settings_path(project_dir).with_name("settings.local.json")
+        if local_settings.exists():
+            local_cleanup = uninstall_hooks(project_dir, settings_path=local_settings)
+
     hook_result = wire_hooks(project_dir, settings_path=settings_path)
     if settings_path is None and not hook_result.get("error"):
         project_uninstall_marker(project_dir).unlink(missing_ok=True)
@@ -673,6 +679,7 @@ def run_init(
 
     return {
         "hooks": hook_result,
+        "local_cleanup": local_cleanup,
         "slash_command": slash_result,
     }
 

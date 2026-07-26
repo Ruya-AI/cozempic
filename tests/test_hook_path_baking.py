@@ -126,6 +126,16 @@ class TestResolveAndBake(unittest.TestCase):
             self.assertFalse(cz.wire_hooks(tmp).get("error"))
             self.assertFalse(cz.uninstall_hooks(tmp).get("error"))
 
+    def test_init_replaces_stale_local_hooks_with_project_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text('{"hooks": {"SessionStart": [{"hooks": [{"command": "{ cozempic guard; } # cozempic-hook-schema=v1"}]}]}}')
+            cz.run_init(tmp, skip_slash=True)
+            self.assertNotIn("cozempic", local.read_text())
+            settings = json.loads((Path(tmp) / ".claude" / "settings.json").read_text())
+            self.assertIn("cozempic", json.dumps(settings))
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):
