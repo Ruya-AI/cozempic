@@ -819,7 +819,7 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
             errors.append(f"Could not read slash command: {exc}")
             slash_present = False
     data = []
-    if purge:
+    if purge and scope in ("global", "all"):
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             if p.exists():
                 data.append(str(p))

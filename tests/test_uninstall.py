@@ -299,6 +299,11 @@ class TestPreviewAndDryRun(_Base):
             os.chdir(previous_cwd)
         self.assertFalse(preview["remind_counter"])
 
+    def test_project_preview_does_not_offer_global_purge(self):
+        (self.home / ".cozempic").mkdir()
+        preview = cz_init.preview_uninstall("project", purge=True)
+        self.assertEqual(preview["purge_data"], [])
+
     def test_preview_reports_without_mutating(self):
         sp = self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
