@@ -136,6 +136,14 @@ class TestRunUninstall(_Base):
             )
         self.assertIn("ERROR", output.getvalue())
 
+    def test_surfaces_valid_non_object_global_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("null")
+        result = cz_init.run_uninstall("global")
+        self.assertTrue(result["errors"])
+        self.assertIn("JSON object", result["errors"][0])
+
 
 class TestPreviewAndDryRun(_Base):
     def test_preview_reports_without_mutating(self):

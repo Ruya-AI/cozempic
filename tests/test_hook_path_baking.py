@@ -79,6 +79,15 @@ class TestResolveAndBake(unittest.TestCase):
                 _, eph = cz._resolve_cozempic_python()
                 self.assertFalse(eph, f"{p} should be persistent")
 
+    def test_settings_scalar_returns_error_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text("[]")
+            self.assertTrue(cz.cozempic_hook_schema_state(path).error)
+            self.assertIn("JSON object", cz.wire_hooks(tmp)["error"])
+            self.assertIn("JSON object", cz.uninstall_hooks(tmp)["error"])
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):

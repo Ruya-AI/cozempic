@@ -145,12 +145,20 @@ class TestNudge(unittest.TestCase):
             payload = json.dumps({"transcript_path": str(t), "session_id": "s1"})
             out = io.StringIO()
             import os
-            e = {k: v for k, v in os.environ.items() if not k.startswith("COZEMPIC_NUDGE")}
+            e = {k: v for k, v in os.environ.items()
+                 if not k.startswith("COZEMPIC_NUDGE") and k != "CLAUDE_CONFIG_DIR"}
             with patch("sys.stdin", io.StringIO(payload)), patch("sys.stdout", out), \
                  patch("pathlib.Path.home", return_value=self.home), \
                  patch.dict(os.environ, e, clear=True):
                 cmd_nudge(None)  # must not raise (and should still fire the 55 nudge)
             self.assertIn("56%", out.getvalue(), bad)
+
+    def test_state_file_honors_claude_config_dir(self):
+        profile = self.tmp / "profile"
+        profile.mkdir()
+        self._run(560_000, "profile-state", env={"CLAUDE_CONFIG_DIR": str(profile)})
+        self.assertTrue((profile / "cozempic-metrics" / "nudge-state.json").exists())
+        self.assertFalse((self.home / ".claude" / "cozempic-metrics" / "nudge-state.json").exists())
 
     def test_tiers_from_sidecar(self):
         # The guard records its resolved reload-tier fractions; the nudge fires at

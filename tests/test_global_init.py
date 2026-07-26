@@ -334,6 +334,40 @@ class TestGlobalAutoInit(unittest.TestCase):
             self.assertTrue((profile / "settings.json").exists())
             self.assertFalse((home / ".claude" / "settings.json").exists())
 
+    def test_decline_in_one_profile_does_not_suppress_another(self):
+        """Each CLAUDE_CONFIG_DIR profile owns its global-init decision."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            first = Path(tmp) / "first"
+            second = Path(tmp) / "second"
+            first.mkdir()
+            second.mkdir()
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch("cozempic.session.get_claude_dir", return_value=first):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                            with mock.patch("builtins.input", return_value="n"):
+                                cli._maybe_global_init(["list"])
+                with mock.patch("cozempic.session.get_claude_dir", return_value=second):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
+                        cli._maybe_global_init(["list"])
+            self.assertTrue((first / ".cozempic_global_initialized").exists())
+            self.assertTrue((second / "settings.json").exists())
+
+    def test_valid_non_object_global_settings_reports_error(self):
+        """A valid JSON scalar must not crash global auto-init."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            profile.mkdir()
+            (profile / "settings.json").write_text("null")
+            with mock.patch("cozempic.session.get_claude_dir", return_value=profile):
+                with mock.patch("sys.stderr") as stderr:
+                    cli._maybe_global_init(["list"])
+            output = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
+            self.assertIn("settings.json must be a JSON object", output)
+
 
 class TestUninstallHooks(unittest.TestCase):
     def test_removes_cozempic_hooks_only(self):

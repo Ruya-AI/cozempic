@@ -272,6 +272,21 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                         cli._maybe_auto_init(["list"])
                         run_init.assert_not_called()
 
+    def test_skips_when_project_settings_are_valid_non_object_json(self):
+        """A scalar settings.local.json must not crash or be overwritten."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            (project / ".claude" / "settings.local.json").write_text("[]")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as run_init:
+                        cli._maybe_auto_init(["list"])
+                        run_init.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

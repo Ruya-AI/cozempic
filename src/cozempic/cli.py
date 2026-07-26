@@ -19,7 +19,7 @@ from .helpers import (
     is_ssh_session, shell_quote,
     compile_protect_patterns, tag_pattern_matches, strip_pattern_tags,
 )
-from .init import run_init
+from .init import global_init_marker_path, run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .safety import PruneValidationError
@@ -1286,7 +1286,7 @@ def cmd_init(args):
         if not result.get("error"):
             # Mark as opted-out so global auto-init doesn't re-fire.
             try:
-                _GLOBAL_INIT_MARKER.touch()
+                _global_init_marker().touch()
             except OSError:
                 pass
         print()
@@ -1334,7 +1334,7 @@ def cmd_init(args):
     if getattr(args, "global_install", False) and not hooks.get("error"):
         # A failed install must remain retryable instead of looking like a decline.
         try:
-            _GLOBAL_INIT_MARKER.touch()
+            _global_init_marker().touch()
         except OSError:
             pass
 
@@ -1494,7 +1494,8 @@ def cmd_nudge(args):
     # Once-per-tier latch with re-arm: drop tiers we've fallen BELOW (so they
     # re-fire on a later re-cross), persist that drop in EVERY path, then fire the
     # current tier only if not already latched.
-    state_file = Path.home() / ".claude" / "cozempic-metrics" / "nudge-state.json"
+    from .session import get_claude_dir
+    state_file = get_claude_dir() / "cozempic-metrics" / "nudge-state.json"
     try:
         state = _json.loads(state_file.read_text()) if state_file.exists() else {}
     except Exception:
@@ -2023,7 +2024,13 @@ _AUTO_INIT_SKIP_CMDS = frozenset({
     "dashboard",     # report-only; reads/writes only ~/.cozempic, never project state
 })
 
-_GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
+# Compatibility seam for callers that patch this in tests. Production resolves
+# dynamically so each CLAUDE_CONFIG_DIR profile gets its own decision.
+_GLOBAL_INIT_MARKER: Path | None = None
+
+
+def _global_init_marker() -> Path:
+    return _GLOBAL_INIT_MARKER or global_init_marker_path()
 
 
 def _prompt_with_timeout(msg: str, timeout: int = 30, default: str = "n") -> str:
@@ -2110,7 +2117,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if not home_claude.exists():
         return  # Claude Code not yet installed — defer until it is
 
-    marker_exists = _GLOBAL_INIT_MARKER.exists()
+    marker_exists = _global_init_marker().exists()
     hook_state = _managed_cozempic_hook_state(home_claude)
     if hook_state.error:
         print(
@@ -2123,7 +2130,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if hook_state.found and hook_state.current:
         # Already wired (probably via plugin marketplace install). Mark as done.
         try:
-            _GLOBAL_INIT_MARKER.touch()
+            _global_init_marker().touch()
         except OSError:
             pass
         return
@@ -2164,7 +2171,7 @@ def _maybe_global_init(argv: list[str]) -> None:
         # don't accidentally opt IN.
         if response in ("n", "no", "q", "quit", "cancel", "exit", "x"):
             try:
-                _GLOBAL_INIT_MARKER.touch()
+                _global_init_marker().touch()
             except OSError:
                 pass
             print(
@@ -2202,7 +2209,7 @@ def _maybe_global_init(argv: list[str]) -> None:
         return
 
     try:
-        _GLOBAL_INIT_MARKER.touch()
+        _global_init_marker().touch()
     except OSError:
         pass
 

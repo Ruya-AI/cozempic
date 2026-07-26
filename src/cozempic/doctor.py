@@ -1203,6 +1203,12 @@ def check_cozempic_project_init() -> CheckResult:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if not isinstance(data, dict):
+            return CheckResult(
+                name="cozempic-project-init",
+                status="warning",
+                message=f"Could not read {p.name}: settings must be a JSON object",
+            )
         hooks = data.get("hooks", {}) or {}
         for entries in hooks.values():
             if not isinstance(entries, list):
@@ -1255,6 +1261,13 @@ def check_cozempic_hooks() -> CheckResult:
             name="cozempic-hooks",
             status="warning",
             message=f"Could not read settings.json: {e}",
+        )
+
+    if not isinstance(settings, dict):
+        return CheckResult(
+            name="cozempic-hooks",
+            status="warning",
+            message="Could not read settings.json: settings must be a JSON object",
         )
 
     hooks = settings.get("hooks", {})

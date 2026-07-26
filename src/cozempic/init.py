@@ -181,7 +181,7 @@ def cozempic_hook_schema_state(settings_path: Path) -> CozempicHookSchemaState:
     """Return managed-hook state for ``settings_path`` without masking errors."""
     try:
         settings = _load_settings(settings_path)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         return CozempicHookSchemaState(
             found=False,
             current=False,
@@ -230,7 +230,10 @@ def _load_settings(path: Path) -> dict:
     """Load settings.json, returning empty dict if missing."""
     if path.exists():
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            settings = json.load(f)
+        if not isinstance(settings, dict):
+            raise ValueError(f"settings.json must be a JSON object, got {type(settings).__name__}")
+        return settings
     return {}
 
 
@@ -462,7 +465,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
     with _SettingsLock(path):
         try:
             settings = _load_settings(path)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             # Malformed or unreadable settings.json — don't crash cmd_init with
             # a raw traceback. Surface via the `error` field like uninstall does.
             return {
@@ -639,7 +642,9 @@ def run_init(
 # Stable content signature of cozempic's /cozempic slash command, used to avoid
 # clobbering an unrelated user-authored ~/.claude/commands/cozempic.md.
 _SLASH_SIGNATURE = "prune bloated Claude Code context"
-_GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
+# Compatibility seam for callers that patch this in tests. Production resolves
+# dynamically so each CLAUDE_CONFIG_DIR profile gets its own decision.
+_GLOBAL_INIT_MARKER: Path | None = None
 _REMIND_COUNTER = Path.home() / ".cozempic_remind_counter"
 
 
@@ -651,6 +656,15 @@ def _global_slash_path() -> Path:
 def _global_settings_path() -> Path:
     from .session import get_claude_dir
     return get_claude_dir() / "settings.json"
+
+
+def global_init_marker_path() -> Path:
+    from .session import get_claude_dir
+    return get_claude_dir() / ".cozempic_global_initialized"
+
+
+def _global_init_marker() -> Path:
+    return _GLOBAL_INIT_MARKER or global_init_marker_path()
 
 
 def _slash_is_ours(content: str) -> bool:
@@ -764,7 +778,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
 
     # Opt-out: keep auto-init from re-wiring after uninstall.
     try:
-        _GLOBAL_INIT_MARKER.touch()
+        _global_init_marker().touch()
         result["opt_out_set"] = True
     except OSError:
         pass
@@ -799,7 +813,7 @@ def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict
     with _SettingsLock(path):
         try:
             settings = _load_settings(path)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             # Malformed settings.json — don't crash, just report and bail.
             return {
                 "removed": [],
