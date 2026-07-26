@@ -385,6 +385,16 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
         if not _is_lock_held(lock_path):
             orphan_locks.append(lock_path)
 
+    try:
+        reclaim_entries = list(_TMP_DIR.glob("cozempic_guard_*.pid.reclaim-lock"))
+    except OSError:
+        reclaim_entries = []
+    for lock_path in reclaim_entries:
+        if _is_protected_tmp_artifact(lock_path.name):
+            continue
+        if not _is_lock_held(lock_path):
+            orphan_locks.append(lock_path)
+
     return stale_pids, stale_temps, orphan_logs, orphan_locks
 
 

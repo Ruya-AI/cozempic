@@ -552,11 +552,11 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
             if overflow_watcher:
                 try:
                     overflow_watcher.stop()
-                except Exception:
+                except BaseException:
                     pass
             try:
                 _safe_unlink_session_pidfile(session_id)
-            except Exception:
+            except BaseException:
                 pass
             try:
                 clear_armed(session_id, session_path)
@@ -3844,6 +3844,7 @@ def start_guard_daemon(
                        if orphaned_guard_pid is not None else "")
                 ),
                 "pid": None,
+                "orphaned_pid": orphaned_guard_pid,
                 "pid_file": str(pid_path),
                 "log_file": None,
                 "already_running": False,

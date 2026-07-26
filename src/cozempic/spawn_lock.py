@@ -411,7 +411,7 @@ class DaemonSpawnClaim:
                 f"{INIT_SPAWN_PARENT}\n"
             )
             os.write(fd, payload.encode("utf-8"))
-        except Exception:
+        except BaseException:
             try:
                 self.pid_file.unlink(missing_ok=True)
             except OSError:
@@ -485,4 +485,4 @@ def daemon_spawn_lock(session_id: str) -> Iterator[Path]:
         claim.__exit__(None, None, None)
 
 
-_HAVE_FCNTL = False  # exported for back-compat; we no longer use fcntl
+_HAVE_FCNTL = False  # exported for back-compat; primary claims do not use fcntl
