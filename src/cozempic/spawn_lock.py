@@ -68,6 +68,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -169,10 +170,23 @@ def _parse_pidfile_pid(pid_path: Path) -> int:
     only need line 1 and ``cat`` would feed multi-token output to
     ``kill -0``, which is undefined-behaviour across shells.
     """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        content = pid_path.read_text()
+        fd = os.open(str(pid_path), flags)
     except OSError:
         return 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return 0
+        content = os.read(fd, 4096).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 0
+    finally:
+        os.close(fd)
     if not content:
         return 0
     lines = content.splitlines()
@@ -439,7 +453,7 @@ class DaemonSpawnClaim:
         stat() — most likely) return False so we can re-claim cleanly.
         """
         try:
-            mtime = self.pid_file.stat().st_mtime
+            mtime = os.stat(self.pid_file, follow_symlinks=False).st_mtime
         except PermissionError:
             # EACCES: can't read mtime → assume fresh (don't race a
             # potentially-live peer claim).

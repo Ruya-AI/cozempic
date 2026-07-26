@@ -340,9 +340,7 @@ def _unheld_lock_artifacts(pattern: str) -> list[Path]:
 
 
 def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[Path], list[Path]]:
-    """Scan `_TMP_DIR` and partition cozempic artifacts into four buckets:
-    stale .pid/.pid.tmp files, orphan .log/.lock files, and kept files (unused here
-    but isolates the pure-IO from the status/message logic).
+    """Scan `_TMP_DIR` into stale PID/temp files, orphan logs/locks/markers.
 
     Never returns a file listed in `_is_protected_tmp_artifact`.
     """
@@ -386,7 +384,10 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     orphan_locks = [
         *_unheld_lock_artifacts("cozempic_hook_*.lock"),
     ]
-    orphan_markers = _glob_tmp_artifacts("cozempic_guard_*.orphan")
+    orphan_markers = [
+        path for path in _glob_tmp_artifacts("cozempic_guard_*.orphan*")
+        if not _is_protected_tmp_artifact(path.name)
+    ]
 
     return stale_pids, stale_temps, orphan_logs, orphan_locks, orphan_markers
 
@@ -395,11 +396,13 @@ def check_stale_tmp_artifacts() -> CheckResult:
     """Detect accumulated cozempic runtime artifacts left behind by crashed
     or abnormally-terminated guard daemons.
 
-    Surfaces three classes of artifact:
+    Surfaces five classes of artifact:
       - stale /tmp/cozempic_guard_*.pid files whose PID is dead or not a
         cozempic guard (PID-reuse safe via `_is_cozempic_guard_process`)
+      - stale /tmp/cozempic_guard_*.pid.tmp files left by interrupted spawns
       - /tmp/cozempic_guard_*.log files with no matching live guard
       - /tmp/cozempic_hook_*.lock files not currently held by any flock
+      - /tmp/cozempic_guard_*.orphan* markers for guards that could not stop
 
     Global append-only files (cozempic_guard.log, cozempic_reload.log) and
     the circuit-breaker state file (cozempic_breaker_*.json) are ignored —
@@ -451,7 +454,7 @@ def check_stale_tmp_artifacts() -> CheckResult:
 
 
 def fix_stale_tmp_artifacts() -> str:
-    """Delete stale .pid, orphan .log, and orphan .lock files.
+    """Delete stale PID/temp files and orphan logs, locks, and markers.
 
     Re-classifies artifacts at fix time (the set may have changed since the
     check ran) so a guard that went live between check and fix is protected.

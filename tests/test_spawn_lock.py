@@ -451,6 +451,17 @@ class TestFreshWindowEnvVarClamping(unittest.TestCase):
 class TestFreshClaimProtection(unittest.TestCase):
     """The race fixtures must not be the only coverage of fresh claims."""
 
+    def test_fresh_empty_pidfile_is_not_unlinked_by_guard_probe(self):
+        """A probe must not delete a peer's not-yet-written exclusive claim."""
+        from cozempic import guard
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            pid_file.touch()
+            with patch.object(guard, "_pid_file_for_session", return_value=pid_file):
+                self.assertIsNone(guard._is_guard_running_for_session("test-session"))
+            self.assertTrue(pid_file.exists())
+
     def test_fresh_dead_pid_is_not_reclaimed(self):
         """A freshly written dead PID is a peer claim, not stale state."""
         from cozempic import spawn_lock
@@ -685,6 +696,16 @@ class TestSymlinkDefense(unittest.TestCase):
         with self.assertRaises(OSError):
             with _stale_reclaim_lock(self.pid_path):
                 pass
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
+
+    def test_pidfile_parse_rejects_symlink(self):
+        """PID readers must not follow a symlink planted at the claim path."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.spawn_lock import _parse_pidfile_pid
+
+        os.symlink(str(self.victim), str(self.pid_path))
+        self.assertEqual(_parse_pidfile_pid(self.pid_path), 0)
         self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
 
 

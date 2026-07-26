@@ -3386,9 +3386,6 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
     except ValueError:
         # Invalid session_id shape — no daemon can exist for it.
         return None
-    if not pid_path.exists():
-        return None
-
     try:
         # Tolerant parse: handles both legacy 1-line and new 3-line
         # pidfile formats (PR #93 item #5). Returns 0 on garbled/empty
@@ -3399,13 +3396,16 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
         from .spawn_lock import _parse_pidfile_pid
         pid = _parse_pidfile_pid(pid_path)
         if pid <= 0:
-            # Pidfile contains a sentinel/placeholder — treat as stale.
-            # Guards against the PID-reuse footgun where os.kill(0, sig)
-            # broadcasts to the caller's process group rather than
-            # targeting a sentinel. Cross-process freshness for in-flight
-            # claims is enforced by DaemonSpawnClaim's O_CREAT|O_EXCL +
-            # _FRESH_PIDFILE_SECONDS gate, not by an in-process dict.
-            pid_path.unlink(missing_ok=True)
+            # A peer can have created the exclusive claim but not written
+            # its parent PID yet. Keep a fresh unreadable/empty claim so a
+            # concurrent probe cannot delete the peer's single-flight lock.
+            from .spawn_lock import _FRESH_PIDFILE_SECONDS
+            try:
+                age = time.time() - os.stat(pid_path, follow_symlinks=False).st_mtime
+            except OSError:
+                age = 0.0
+            if age >= _FRESH_PIDFILE_SECONDS:
+                pid_path.unlink(missing_ok=True)
             return None
         os.kill(pid, 0)
         # Verify the PID is actually our guard — defend against PID reuse.
@@ -3424,7 +3424,7 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
             # means (H1 fix — single source of truth).
             from .spawn_lock import _FRESH_PIDFILE_SECONDS
             try:
-                age = time.time() - pid_path.stat().st_mtime
+                age = time.time() - os.stat(pid_path, follow_symlinks=False).st_mtime
             except OSError:
                 age = 0.0
             if age >= _FRESH_PIDFILE_SECONDS:
@@ -3442,7 +3442,7 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
         # threshold as the holder-alive-but-not-guard branch above.
         from .spawn_lock import _FRESH_PIDFILE_SECONDS
         try:
-            age = time.time() - pid_path.stat().st_mtime
+            age = time.time() - os.stat(pid_path, follow_symlinks=False).st_mtime
         except OSError:
             age = 0.0
         if age >= _FRESH_PIDFILE_SECONDS:
@@ -3459,7 +3459,7 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
             raise
         from .spawn_lock import _FRESH_PIDFILE_SECONDS
         try:
-            age = time.time() - pid_path.stat().st_mtime
+            age = time.time() - os.stat(pid_path, follow_symlinks=False).st_mtime
         except OSError:
             age = 0.0
         if age >= _FRESH_PIDFILE_SECONDS:
@@ -3643,11 +3643,10 @@ def start_guard_daemon(
             "already_running": False,
         }
 
-    orphan_marker = pid_path.with_suffix(".orphan")
-
     def record_orphan(pid: int) -> None:
+        orphan_marker = pid_path.with_suffix(f".orphan.{pid}")
         fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{orphan_marker.name}.", suffix=".tmp", dir=orphan_marker.parent
+            prefix=f"{orphan_marker.name}.", suffix=".tmp", dir=orphan_marker.parent
         )
         try:
             os.write(fd, f"{pid}\n".encode("ascii"))

@@ -462,6 +462,17 @@ class TestStaleTmpArtifacts(unittest.TestCase):
             fix_stale_tmp_artifacts()
         self.assertTrue(marker.exists())
 
+    def test_orphan_marker_symlink_is_removed_without_touching_target(self):
+        victim = self.tmpdir / "victim.txt"
+        victim.write_text("keep")
+        marker = self.tmpdir / "cozempic_guard_orphan-08.orphan.42"
+        os.symlink(victim, marker)
+
+        self.assertIn("orphan guard marker", check_stale_tmp_artifacts().message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(marker.exists())
+        self.assertEqual(victim.read_text(), "keep")
+
     def test_hook_lock_symlink_does_not_touch_its_target(self):
         victim = self.tmpdir / "victim.txt"
         lock_path = self.tmpdir / "cozempic_hook_symlink-06.lock"
