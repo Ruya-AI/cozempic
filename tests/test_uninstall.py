@@ -144,6 +144,13 @@ class TestRunUninstall(_Base):
         # opt-out marker still set even on purge (so auto-init doesn't re-fire)
         self.assertTrue((self.home / ".cozempic_global_initialized").exists())
 
+    def test_purge_failure_is_reported(self):
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        with patch("shutil.rmtree", side_effect=OSError("permission denied")):
+            result = cz_init.run_uninstall("global", purge=True)
+        self.assertIn("Purge failed", result["errors"][0])
+
     def test_no_purge_keeps_data(self):
         (self.home / ".cozempic").mkdir()
         (self.home / ".cozempic_savings.json").write_text("{}")

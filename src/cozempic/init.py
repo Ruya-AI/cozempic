@@ -726,7 +726,7 @@ def global_init_marker_path() -> Path:
         try:
             marker.touch(exist_ok=True)
         except OSError:
-            pass
+            return legacy_marker
     return marker
 
 
@@ -838,8 +838,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     if has_project_target and not project_cleanup_failed:
         try:
             project_uninstall_marker(".").touch()
-        except OSError:
-            pass
+        except OSError as exc:
+            result["errors"].append(f"Could not persist project uninstall opt-out: {exc}")
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()
@@ -857,8 +857,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         try:
             _global_init_marker().touch()
             result["opt_out_set"] = True
-        except OSError:
-            pass
+        except OSError as exc:
+            result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
 
     if purge:
         import shutil as _sh
@@ -868,8 +868,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                     _sh.rmtree(p); result["purged"].append(str(p))
                 elif p.exists():
                     p.unlink(); result["purged"].append(str(p))
-            except OSError:
-                pass
+            except OSError as exc:
+                result["errors"].append(f"Purge failed for {p}: {exc}")
 
     return result
 

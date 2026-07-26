@@ -1245,8 +1245,8 @@ def cmd_uninstall(args):
 
     result = run_uninstall(scope, purge)
     n_hooks = sum(len(h.get("removed", [])) for h in result["hooks"])
-    successful_settings = [h for h in result["hooks"] if not h.get("error")]
-    print(f"  Removed {n_hooks} hook(s) across {len(successful_settings)} settings file(s).")
+    changed_settings = [h for h in result["hooks"] if h.get("removed")]
+    print(f"  Removed {n_hooks} hook(s) across {len(changed_settings)} settings file(s).")
     for h in result["hooks"]:
         if h.get("removed"):
             print(f"    - {h['settings_path']}: {', '.join(h['removed'])}"
@@ -2051,6 +2051,17 @@ def _global_init_marker() -> Path:
     return _GLOBAL_INIT_MARKER or global_init_marker_path()
 
 
+def _persist_global_init_marker() -> None:
+    try:
+        _global_init_marker().touch()
+    except OSError as exc:
+        print(
+            f"  Cozempic: could not save your global init preference ({exc}). "
+            "Set COZEMPIC_NO_GLOBAL_INIT=1 to prevent automatic setup.",
+            file=sys.stderr,
+        )
+
+
 def _prompt_with_timeout(msg: str, timeout: int = 30, default: str = "n") -> str:
     """input() wrapped with a hard timeout so we never hang a cozempic invocation.
 
@@ -2147,10 +2158,7 @@ def _maybe_global_init(argv: list[str]) -> None:
 
     if hook_state.found and hook_state.current:
         # Already wired (probably via plugin marketplace install). Mark as done.
-        try:
-            _global_init_marker().touch()
-        except OSError:
-            pass
+        _persist_global_init_marker()
         return
 
     if marker_exists and not hook_state.found:
@@ -2188,10 +2196,7 @@ def _maybe_global_init(argv: list[str]) -> None:
         # Accept common "cancel" synonyms so users who press q/quit/cancel
         # don't accidentally opt IN.
         if response in ("n", "no", "q", "quit", "cancel", "exit", "x"):
-            try:
-                _global_init_marker().touch()
-            except OSError:
-                pass
+            _persist_global_init_marker()
             print(
                 "  Skipped. Run `cozempic init --global` later if you change your mind.\n",
                 file=sys.stderr,
@@ -2226,10 +2231,7 @@ def _maybe_global_init(argv: list[str]) -> None:
         )
         return
 
-    try:
-        _global_init_marker().touch()
-    except OSError:
-        pass
+    _persist_global_init_marker()
 
     repaired = hooks_result.get("repaired")
     if not (added or updated or repaired):

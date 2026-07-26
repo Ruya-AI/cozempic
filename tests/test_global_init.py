@@ -115,6 +115,23 @@ class TestGlobalAutoInit(unittest.TestCase):
             run_init.assert_not_called()
             self.assertTrue((claude_dir / ".cozempic_global_initialized").exists())
 
+    def test_legacy_marker_still_blocks_init_when_migration_fails(self):
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            claude_dir = home / ".claude"
+            claude_dir.mkdir(parents=True)
+            legacy_marker = home / ".cozempic_global_initialized"
+            legacy_marker.touch()
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch("cozempic.init.Path.home", return_value=home), \
+                    mock.patch("cozempic.session.get_claude_dir", return_value=claude_dir), \
+                    mock.patch.object(Path, "touch", side_effect=OSError("read-only")), \
+                    mock.patch.object(cli, "run_init") as run_init:
+                cli._maybe_global_init(["list"])
+            run_init.assert_not_called()
+
     def test_refreshes_stale_hooks_when_marker_exists(self):
         """A prior global install must refresh after the package schema changes."""
         from cozempic import cli
