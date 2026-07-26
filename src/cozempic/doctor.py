@@ -20,7 +20,8 @@ from .session import find_sessions, get_claude_dir, get_claude_json_path
 # Directory where cozempic writes runtime artifacts (.pid / .log / .lock files).
 # Exposed as a module-level constant so tests can redirect it to a tmpdir
 # without monkeypatching every glob call.
-_TMP_DIR = Path(tempfile.gettempdir()) if platform.system() == "Windows" else Path("/tmp")
+# Only fixed Cozempic artifact names are unlinked below; Path.unlink never follows symlinks.
+_TMP_DIR = Path(tempfile.gettempdir()) if platform.system() == "Windows" else Path("/tmp")  # NOSONAR
 
 
 @dataclass
