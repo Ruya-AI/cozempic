@@ -55,6 +55,15 @@ class TestCozempicSettingsShape(unittest.TestCase):
         self.assertEqual(result.status, "warning")
         self.assertIn("SessionStart", result.message)
 
+    def test_project_non_object_hooks_is_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".claude").mkdir()
+            (project / ".claude" / "settings.json").write_text('{"hooks": "broken"}')
+            with patch("cozempic.doctor.Path.cwd", return_value=project):
+                result = check_cozempic_project_init()
+        self.assertEqual(result.status, "warning")
+
 
 class TestClaudeJsonCorruption(unittest.TestCase):
 

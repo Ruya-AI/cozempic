@@ -106,7 +106,10 @@ class TestResolveAndBake(unittest.TestCase):
             result = cz.wire_hooks(tmp)
             self.assertFalse(result.get("error"))
             settings = json.loads(path.read_text())
-            self.assertTrue(any(isinstance(entry, dict) for entry in settings["hooks"]["SessionStart"]))
+            entries = settings["hooks"]["SessionStart"]
+            self.assertTrue(entries)
+            self.assertTrue(all(isinstance(entry, dict) for entry in entries))
+            self.assertTrue(all(isinstance(entry.get("hooks"), list) for entry in entries))
 
     def test_hook_state_tolerates_truthy_non_list_containers(self):
         with tempfile.TemporaryDirectory() as tmp:

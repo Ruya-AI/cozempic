@@ -1211,6 +1211,8 @@ def check_cozempic_project_init() -> CheckResult:
                 message=f"Could not read {p.name}: settings must be a JSON object",
             )
         hooks = data.get("hooks", {}) or {}
+        if not isinstance(hooks, dict):
+            hooks = {}
         for entries in hooks.values():
             if not isinstance(entries, list):
                 continue
@@ -1218,7 +1220,7 @@ def check_cozempic_project_init() -> CheckResult:
                 if not isinstance(entry, dict):
                     continue
                 for h in _hooks_list(entry):
-                    if isinstance(h, dict) and _is_cozempic_command(str(h.get("command", ""))):
+                    if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
                         found = True
                         break
 

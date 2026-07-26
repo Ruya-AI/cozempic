@@ -497,6 +497,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
         added: list[str] = []
         updated: list[str] = []
         skipped: list[str] = []
+        repaired = False
 
         # #158: bake the absolute interpreter into the hook fallback so the guard
         # resolves even when bare `cozempic` isn't on the hook's PATH.
@@ -507,6 +508,16 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
             existing = hooks.get(event_name, [])
             if not isinstance(existing, list):
                 existing = []
+                repaired = True
+            valid_existing = [
+                entry
+                for entry in existing
+                if isinstance(entry, dict)
+                and ("hooks" not in entry or isinstance(entry["hooks"], list))
+            ]
+            if len(valid_existing) != len(existing):
+                existing = valid_existing
+                repaired = True
 
             for new_entry in hook_entries:
                 matcher = new_entry.get("matcher", "")
@@ -586,7 +597,7 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
 
         # Only write if something changed
         backup = None
-        if added or updated:
+        if added or updated or repaired:
             backup = _backup_settings(path)
             _save_settings(path, settings)
 
