@@ -797,26 +797,30 @@ def uninstall_slash_command() -> dict:
 
 def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
-    scopes = {
+    scopes_by_name = {
         "global": _global_settings_paths(),
         "project": _project_settings_paths("."),
         "all": [*_global_settings_paths(), *_project_settings_paths(".")],
-    }.get(scope, [_global_settings_path()])
+    }
+    if scope not in scopes_by_name:
+        raise ValueError(f"Unknown uninstall scope: {scope}")
+    scopes = scopes_by_name[scope]
     hook_targets = []
-    errors = []
+    hook_errors = []
     for p in scopes:
         state = cozempic_hook_schema_state(p)
         if state.error:
-            errors.append(state.error)
+            hook_errors.append(state.error)
         elif state.found:
             hook_targets.append(str(p))
     slash = _global_slash_path()
     slash_present = False
+    slash_error = None
     if scope in ("global", "all") and slash.exists():
         try:
             slash_present = _slash_is_ours(slash.read_text(encoding="utf-8", errors="surrogateescape"))
         except OSError as exc:
-            errors.append(f"Could not read slash command: {exc}")
+            slash_error = f"Could not read slash command: {exc}"
             slash_present = False
     data = []
     if purge and scope in ("global", "all"):
@@ -825,7 +829,8 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
                 data.append(str(p))
     return {"hooks_in": hook_targets, "slash_command": slash_present,
             "remind_counter": scope in ("global", "all") and _REMIND_COUNTER.exists(), "purge_data": data,
-            "errors": errors}
+            "hook_errors": hook_errors, "slash_error": slash_error,
+            "errors": [*hook_errors, *([slash_error] if slash_error else [])]}
 
 
 def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
@@ -836,12 +841,15 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     On successful global/all cleanup, leaves the global-init marker as the auto-init
     opt-out so init does not silently re-wire (explicit `cozempic init` still works).
     """
-    targets = {
+    targets_by_scope = {
         "global": [(str(Path.home()), path) for path in _global_settings_paths()],
         "project": [(".", path) for path in _project_settings_paths(".")],
         "all": [(str(Path.home()), path) for path in _global_settings_paths()]
         + [(".", path) for path in _project_settings_paths(".")],
-    }.get(scope, [(str(Path.home()), _global_settings_path())])
+    }
+    if scope not in targets_by_scope:
+        raise ValueError(f"Unknown uninstall scope: {scope}")
+    targets = targets_by_scope[scope]
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
                     "remind_counter_removed": False, "purged": [], "opt_out_set": False,
                     "project_opt_out_set": False,

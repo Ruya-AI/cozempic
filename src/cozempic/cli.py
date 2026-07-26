@@ -1227,14 +1227,16 @@ def cmd_uninstall(args):
     if getattr(args, "dry_run", False):
         prev = preview_uninstall(scope, purge)
         print("  Dry run — nothing will be changed.\n")
-        print(f"    Hooks would be removed from: {prev['hooks_in'] or '(none)'}")
+        print(f"    Hooks would be removed from: {', '.join(prev['hooks_in']) or '(none)'}")
         print(f"    Slash command (~/.claude/commands/cozempic.md): "
               f"{'remove' if prev['slash_command'] else '(not present / not ours)'}")
         print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
-        for error in prev.get("errors", []):
+        for error in prev.get("hook_errors", prev.get("errors", [])):
             print(f"    Hooks: ERROR — {error}")
+        if prev.get("slash_error"):
+            print(f"    Slash command: ERROR — {prev['slash_error']}")
         if purge:
-            print(f"    Purge data: {prev['purge_data'] or '(none)'}")
+            print(f"    Purge data: {', '.join(prev['purge_data']) or '(none)'}")
         print()
         return
 
@@ -1393,7 +1395,7 @@ def cmd_init(args):
 
     print()
 
-    if hooks.get("error"):
+    if hooks.get("error") or (local_cleanup or {}).get("error"):
         print("  Setup incomplete — fix the error above and re-run `cozempic init`.")
     else:
         # Summary: what to do next

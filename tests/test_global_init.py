@@ -774,6 +774,25 @@ class TestGlobalInitFailure(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertIn("Setup incomplete", output.getvalue())
 
+    def test_explicit_init_local_cleanup_error_does_not_report_success(self):
+        from cozempic import cli
+        import argparse
+
+        result = {
+            "hooks": {"added": [], "updated": [], "repaired": False, "skipped": [],
+                      "warnings": [], "backup_path": None, "settings_path": "settings.json"},
+            "local_cleanup": {"error": "could not parse settings.local.json"},
+            "slash_command": {"updated": False, "installed": False, "already_existed": False,
+                              "path": "cozempic.md"},
+        }
+        args = argparse.Namespace(uninstall_global=False, global_install=False, cwd=None,
+                                  no_slash_command=True)
+        output = io.StringIO()
+        with mock.patch.object(cli, "run_init", return_value=result), mock.patch.object(cli.sys, "stdout", output):
+            cli.cmd_init(args)
+        self.assertIn("Setup incomplete", output.getvalue())
+        self.assertNotIn("Setup complete", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

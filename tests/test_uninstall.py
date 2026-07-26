@@ -341,6 +341,32 @@ class TestPreviewAndDryRun(_Base):
         preview = cz_init.preview_uninstall("global")
         self.assertTrue(preview["errors"])
 
+    def test_uninstall_rejects_unknown_scope(self):
+        with self.assertRaisesRegex(ValueError, "Unknown uninstall scope"):
+            cz_init.preview_uninstall("typo")
+        with self.assertRaisesRegex(ValueError, "Unknown uninstall scope"):
+            cz_init.run_uninstall("typo")
+
+    def test_dry_run_labels_slash_errors_and_formats_paths(self):
+        from cozempic import cli
+
+        preview = {
+            "hooks_in": ["/one/settings.json", "/two/settings.local.json"],
+            "slash_command": False,
+            "remind_counter": False,
+            "purge_data": ["/home/example/.cozempic"],
+            "hook_errors": ["invalid settings"],
+            "slash_error": "Could not read slash command: permission denied",
+        }
+        output = io.StringIO()
+        with patch("cozempic.init.preview_uninstall", return_value=preview), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=True))
+        text = output.getvalue()
+        self.assertIn("Hooks: ERROR — invalid settings", text)
+        self.assertIn("Slash command: ERROR — Could not read slash command", text)
+        self.assertIn("/one/settings.json, /two/settings.local.json", text)
+        self.assertNotIn("['/one/settings.json'", text)
+
 
 class TestOptOutHolds(_Base):
     def test_opt_out_marker_blocks_refire(self):
