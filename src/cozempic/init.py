@@ -226,6 +226,10 @@ def _settings_path(project_dir: str) -> Path:
     return Path(project_dir) / ".claude" / "settings.json"
 
 
+def project_uninstall_marker(project_dir: str) -> Path:
+    return Path(project_dir) / ".claude" / ".cozempic_uninstalled"
+
+
 def _load_settings(path: Path) -> dict:
     """Load settings.json, returning empty dict if missing."""
     if path.exists():
@@ -474,7 +478,10 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                 "backup_path": None,
                 "error": f"could not parse {path}: {exc}. Back up + fix the file, then rerun.",
             }
-        hooks = settings.setdefault("hooks", {})
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+            settings["hooks"] = hooks
 
         added: list[str] = []
         updated: list[str] = []
@@ -487,6 +494,8 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
 
         for event_name, hook_entries in canonical_hooks.items():
             existing = hooks.get(event_name, [])
+            if not isinstance(existing, list):
+                existing = []
 
             for new_entry in hook_entries:
                 matcher = new_entry.get("matcher", "")
@@ -626,6 +635,8 @@ def run_init(
     Returns combined result dict.
     """
     hook_result = wire_hooks(project_dir, settings_path=settings_path)
+    if settings_path is None and not hook_result.get("error"):
+        project_uninstall_marker(project_dir).unlink(missing_ok=True)
     slash_result = {"installed": False, "path": None, "already_existed": False}
 
     if not skip_slash:
@@ -764,6 +775,11 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         result["hooks"].append(hook_result)
         if hook_result.get("error"):
             result["errors"].append(hook_result["error"])
+        elif directory == ".":
+            try:
+                project_uninstall_marker(directory).touch()
+            except OSError:
+                pass
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()

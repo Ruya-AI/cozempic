@@ -2295,6 +2295,8 @@ def _maybe_auto_init(argv: list[str]) -> None:
     claude_dir = Path.cwd() / ".claude"
     if not claude_dir.exists():
         return  # not a Claude project — never modify foreign directories
+    if (claude_dir / ".cozempic_uninstalled").exists():
+        return  # explicit project uninstall is an opt-out until `cozempic init`
 
     cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
     if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:

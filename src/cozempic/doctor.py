@@ -1270,16 +1270,20 @@ def check_cozempic_hooks() -> CheckResult:
             message="Could not read settings.json: settings must be a JSON object",
         )
 
-    hooks = settings.get("hooks", {})
+    hooks = settings.get("hooks", {}) or {}
+    if not isinstance(hooks, dict):
+        hooks = {}
     expected = {"SessionStart", "PreCompact", "PostCompact", "Stop"}
     missing = []
 
     for event in expected:
         entries = hooks.get(event, [])
+        if not isinstance(entries, list):
+            entries = []
         from .init import _is_cozempic_command
         has_cozempic = any(
             _is_cozempic_command(h.get("command", ""))
-            for entry in entries
+            for entry in entries if isinstance(entry, dict)
             for h in entry.get("hooks", [])
         )
         if not has_cozempic:
