@@ -58,18 +58,10 @@ def _race_worker(
             return _DummyProc(900_000 + worker_index)
         return _real_popen(cmd_parts, **kwargs)
 
-    def _fake_is_process_alive(pid: int) -> bool:
-        """Model the spawned fake guard as alive for the contention check."""
-        return pid > 0
-
     with (
         _patch("cozempic.guard.subprocess.Popen", side_effect=_fake_popen),
         _patch("cozempic.guard.find_claude_pid", return_value=12345),
         _patch("cozempic.guard._cleanup_legacy_pid"),
-        _patch("cozempic.guard._is_guard_running_for_session", return_value=None),
-        _patch(
-            "cozempic.spawn_lock._is_process_alive", side_effect=_fake_is_process_alive
-        ),
     ):
         try:
             barrier_handle.wait(timeout=10.0)
@@ -120,13 +112,11 @@ class TestThreeProcessContention(unittest.TestCase):
 
         self.pid_path = _pid_file_for_session(self.SESSION_ID)
         self.pid_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
         self.log_path.unlink(missing_ok=True)
 
     def tearDown(self):
         self.pid_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path.unlink(missing_ok=True)
 
     def test_three_process_contention(self):
@@ -139,7 +129,6 @@ class TestThreeProcessContention(unittest.TestCase):
         failures = []
         for it in range(ITERATIONS):
             self.pid_path.unlink(missing_ok=True)
-            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(N)
@@ -205,7 +194,6 @@ class TestV4TenProcessContention(unittest.TestCase):
 
         self.pid_path = _pid_file_for_session(self.SESSION_ID)
         self.pid_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
         self.log_path.unlink(missing_ok=True)
 
@@ -221,7 +209,6 @@ class TestV4TenProcessContention(unittest.TestCase):
         failures = []
         for it in range(self.ITERATIONS):
             self.pid_path.unlink(missing_ok=True)
-            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(self.N)
@@ -594,7 +581,7 @@ class TestStaleClaimContention(unittest.TestCase):
                         proc.terminate()
                         proc.join(timeout=2.0)
                 self.assertFalse([result for result in results if "error" in result], results)
-                self.assertEqual(1, sum(result["claimed"] for result in results), results)
+                self.assertEqual(sum(result["claimed"] for result in results), 1, results)
                 pid_file.unlink(missing_ok=True)
 
 

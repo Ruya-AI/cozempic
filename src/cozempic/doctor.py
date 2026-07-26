@@ -306,9 +306,30 @@ def _is_lock_held(lock_path: Path) -> bool:
         fd.close()
 
 
+def _glob_tmp_artifacts(pattern: str) -> list[Path]:
+    try:
+        return list(_TMP_DIR.glob(pattern))
+    except OSError:
+        return []
+
+
+def _is_stale_tmp_artifact(path: Path, max_age_seconds: float) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime >= max_age_seconds
+    except OSError:
+        return False
+
+
+def _unheld_lock_artifacts(pattern: str) -> list[Path]:
+    return [
+        path for path in _glob_tmp_artifacts(pattern)
+        if not _is_protected_tmp_artifact(path.name) and not _is_lock_held(path)
+    ]
+
+
 def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[Path]]:
-    """Scan `_TMP_DIR` and partition cozempic artifacts into three buckets:
-    stale .pid/.log files, orphan .lock files, and kept files (unused here
+    """Scan `_TMP_DIR` and partition cozempic artifacts into four buckets:
+    stale .pid/.pid.tmp files, orphan .log/.lock files, and kept files (unused here
     but isolates the pure-IO from the status/message logic).
 
     Never returns a file listed in `_is_protected_tmp_artifact`.
@@ -319,15 +340,9 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     orphan_locks: list[Path] = []
 
     live_slugs: set[str] = set()
-    pid_files: list[Path] = []
-
-    try:
-        entries = list(_TMP_DIR.glob("cozempic_guard_*.pid"))
-    except OSError:
-        entries = []
 
     from .spawn_lock import _parse_pidfile_pid
-    for pid_path in entries:
+    for pid_path in _glob_tmp_artifacts("cozempic_guard_*.pid"):
         if _is_protected_tmp_artifact(pid_path.name):
             continue
         slug = pid_path.stem[len("cozempic_guard_"):]  # strip prefix, keep before .pid
@@ -342,58 +357,25 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
             live_slugs.add(slug)
         else:
             stale_pids.append(pid_path)
-        pid_files.append(pid_path)
-
-    pid_slugs = {p.stem[len("cozempic_guard_"):] for p in pid_files}
-
-    try:
-        tmp_entries = list(_TMP_DIR.glob("cozempic_guard_*.pid.tmp"))
-    except OSError:
-        tmp_entries = []
     from .spawn_lock import _FRESH_PIDFILE_SECONDS
-    for tmp_path in tmp_entries:
-        if _is_protected_tmp_artifact(tmp_path.name):
-            continue
-        try:
-            if time.time() - tmp_path.stat().st_mtime >= _FRESH_PIDFILE_SECONDS:
-                stale_temps.append(tmp_path)
-        except OSError:
-            continue
+    stale_temps = [
+        path for path in _glob_tmp_artifacts("cozempic_guard_*.pid.tmp")
+        if not _is_protected_tmp_artifact(path.name)
+        and _is_stale_tmp_artifact(path, _FRESH_PIDFILE_SECONDS)
+    ]
 
-    try:
-        log_entries = list(_TMP_DIR.glob("cozempic_guard_*.log"))
-    except OSError:
-        log_entries = []
-    for log_path in log_entries:
+    for log_path in _glob_tmp_artifacts("cozempic_guard_*.log"):
         if _is_protected_tmp_artifact(log_path.name):
             continue
         slug = log_path.stem[len("cozempic_guard_"):]
         if slug in live_slugs:
             continue  # paired with a live guard
-        if slug in pid_slugs:
-            orphan_logs.append(log_path)  # paired with a stale .pid — delete together
-        else:
-            orphan_logs.append(log_path)  # no pid file at all — orphan
+        orphan_logs.append(log_path)  # paired with stale/no .pid — delete together
 
-    try:
-        lock_entries = list(_TMP_DIR.glob("cozempic_hook_*.lock"))
-    except OSError:
-        lock_entries = []
-    for lock_path in lock_entries:
-        if _is_protected_tmp_artifact(lock_path.name):
-            continue
-        if not _is_lock_held(lock_path):
-            orphan_locks.append(lock_path)
-
-    try:
-        reclaim_entries = list(_TMP_DIR.glob("cozempic_guard_*.pid.reclaim-lock"))
-    except OSError:
-        reclaim_entries = []
-    for lock_path in reclaim_entries:
-        if _is_protected_tmp_artifact(lock_path.name):
-            continue
-        if not _is_lock_held(lock_path):
-            orphan_locks.append(lock_path)
+    orphan_locks = [
+        *_unheld_lock_artifacts("cozempic_hook_*.lock"),
+        *_unheld_lock_artifacts("cozempic_guard_*.pid.reclaim-lock"),
+    ]
 
     return stale_pids, stale_temps, orphan_logs, orphan_locks
 

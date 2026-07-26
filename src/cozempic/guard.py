@@ -552,11 +552,11 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
             if overflow_watcher:
                 try:
                     overflow_watcher.stop()
-                except BaseException:
+                except (Exception, KeyboardInterrupt):
                     pass
             try:
                 _safe_unlink_session_pidfile(session_id)
-            except BaseException:
+            except (Exception, KeyboardInterrupt):
                 pass
             try:
                 clear_armed(session_id, session_path)
