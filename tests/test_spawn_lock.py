@@ -91,6 +91,25 @@ def _race_worker(
         result_queue.put(r)
 
 
+def _stale_claim_worker(barrier_handle, result_queue, pid_file: str, worker_index: int):
+    """Race stale-claim recovery without spawning a real guard."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from cozempic.spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
+
+    try:
+        barrier_handle.wait(timeout=10.0)
+        claim = DaemonSpawnClaim("stale-claim-test", Path(pid_file))
+        claim.__enter__()
+        claim.handed_off = True
+        result_queue.put({"claimed": True, "worker": worker_index})
+        time.sleep(0.1)
+        claim.__exit__(None, None, None)
+    except DaemonAlreadyStarting as exc:
+        result_queue.put({"claimed": False, "holder_pid": exc.holder_pid, "worker": worker_index})
+    except Exception as exc:
+        result_queue.put({"error": repr(exc), "worker": worker_index})
+
+
 class TestThreeProcessContention(unittest.TestCase):
     """Three processes race for the same session — exactly ONE must win."""
 
@@ -495,11 +514,69 @@ class TestFreshClaimProtection(unittest.TestCase):
             ):
                 result = start_guard_daemon(
                     cwd=tmp_dir,
-                    session_id="abcd1234-5678-9abc-def0-2026051811aa",
+                    session_id="bead1234-5678-9abc-def0-2026051811aa",
                     threshold_tokens=1000,
                 )
         self.assertFalse(result["started"])
         self.assertIn("pidfile claim", result["reason"])
+
+    def test_pid_tmp_conflict_prevents_spawn(self):
+        """A stale publication temp file must fail before creating a child."""
+        from cozempic.guard import _pid_file_for_session, start_guard_daemon
+
+        session_id = "deed1234-5678-9abc-def0-2026051811aa"
+        pid_path = _pid_file_for_session(session_id)
+        tmp_path = pid_path.with_suffix(".pid.tmp")
+        pid_path.unlink(missing_ok=True)
+        tmp_path.write_text("stale\n", encoding="utf-8")
+        try:
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard.find_claude_pid", return_value=12345),
+                patch("cozempic.guard.subprocess.Popen") as popen,
+            ):
+                result = start_guard_daemon(
+                    cwd=tempfile.gettempdir(), session_id=session_id, threshold_tokens=1000
+                )
+            self.assertFalse(result["started"])
+            self.assertIn("pidfile", result["reason"])
+            popen.assert_not_called()
+        finally:
+            pid_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+
+
+class TestStaleClaimContention(unittest.TestCase):
+    """A stale PID file still admits exactly one cross-process claimant."""
+
+    def test_two_processes_one_reclaimer(self):
+        from cozempic import spawn_lock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            ctx = mp.get_context("spawn")
+            for _ in range(10):
+                pid_file.write_text("999999999\n", encoding="utf-8")
+                stale_at = time.time() - spawn_lock._FRESH_PIDFILE_SECONDS - 1
+                os.utime(pid_file, (stale_at, stale_at))
+                barrier = ctx.Barrier(2)
+                queue = ctx.Queue()
+                procs = [
+                    ctx.Process(target=_stale_claim_worker, args=(barrier, queue, str(pid_file), i))
+                    for i in range(2)
+                ]
+                for proc in procs:
+                    proc.start()
+                results = [queue.get(timeout=10.0) for _ in procs]
+                for proc in procs:
+                    proc.join(timeout=5.0)
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join(timeout=2.0)
+                self.assertFalse([result for result in results if "error" in result], results)
+                self.assertEqual(1, sum(result["claimed"] for result in results), results)
+                pid_file.unlink(missing_ok=True)
 
 
 class TestSymlinkDefense(unittest.TestCase):

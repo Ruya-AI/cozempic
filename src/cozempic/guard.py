@@ -3604,17 +3604,12 @@ def start_guard_daemon(
         claude_pid = find_claude_pid()
 
     # ── Cross-process spawn claim (Bug 2 + Bug 3 fix, V4 rework) ────────────
-    # The PID file IS the lock. O_CREAT|O_EXCL on the PID file is the only
-    # primitive used: POSIX guarantees exactly one process wins the create,
-    # all others see EEXIST and become losers via DaemonAlreadyStarting.
-    # This mirrors reload_lock.py:200-262 (same pattern, different file).
+    # The PID file is the fast-path claim: O_CREAT|O_EXCL guarantees exactly
+    # one winner. Stale recovery also takes a persistent companion lock so two
+    # contenders cannot replace the same stale PID file concurrently.
     #
-    # Why not fcntl.flock on a separate sentinel? Race-reproducer's V4 stress
-    # (10 processes × 30 iterations) found a textbook flock-unlink race: when
-    # the holder unlinks the sentinel on release, peers immediately O_CREAT
-    # NEW inodes and their flocks attach to those new inodes — different
-    # kernel objects, so multiple "winners" each acquire flock simultaneously.
-    # See spawn_lock.py module docstring for the full failure mode + evidence.
+    # The companion lock path is never unlinked, avoiding the old flock-unlink
+    # race where contenders could lock separate replacement inodes.
     from .spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
 
     try:
@@ -3722,7 +3717,19 @@ def start_guard_daemon(
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
-                proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                # Reserve the publication path before spawning. A pre-existing
+                # temp file must fail before a detached child can be orphaned.
+                tmp_path = pid_path.with_suffix(".pid.tmp")
+                _tmp_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                if hasattr(os, "O_NOFOLLOW"):
+                    _tmp_flags |= os.O_NOFOLLOW
+                _tmp_fd = os.open(str(tmp_path), _tmp_flags, 0o600)
+                try:
+                    proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                except Exception:
+                    os.close(_tmp_fd)
+                    tmp_path.unlink(missing_ok=True)
+                    raise
             finally:
                 lf.close()
 
@@ -3740,7 +3747,6 @@ def start_guard_daemon(
             # surfaces orphan .pid.tmp files (from a prior SIGKILLed spawn)
             # as a FileExistsError instead of silently truncating them,
             # which closes a re-attack window in CRIT C3.
-            tmp_path = pid_path.with_suffix(".pid.tmp")
             # CRIT C3 fix: catch ANY exception (not just OSError) around
             # the write+rename block. A SIGINT/InterruptedError or other
             # non-OSError between write_text and rename used to leak the
@@ -3748,10 +3754,6 @@ def start_guard_daemon(
             try:
                 from .spawn_lock import INIT_SPAWN_DAEMON
                 from datetime import datetime as _dt
-                _tmp_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                if hasattr(os, "O_NOFOLLOW"):
-                    _tmp_flags |= os.O_NOFOLLOW
-                _tmp_fd = os.open(str(tmp_path), _tmp_flags, 0o600)
                 try:
                     # 3-line payload: pid + iso-timestamp + initiator.
                     # Mirrors DaemonSpawnClaim._claim and
@@ -3803,6 +3805,17 @@ def start_guard_daemon(
                 # Unlink any partial .pid.tmp we may have created so a
                 # retry can succeed. unlink is symlink-safe (operates on
                 # the directory entry, not the symlink target).
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except (AttributeError, OSError, subprocess.TimeoutExpired):
+                        pass
+                except (AttributeError, OSError):
+                    pass
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:

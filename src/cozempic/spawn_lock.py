@@ -30,8 +30,8 @@ reload-side single-flight.
 Lifecycle:
   - On claim (enter): ``O_CREAT|O_EXCL|O_NOFOLLOW`` on the PID file. Loser
     reads the file, returns ``DaemonAlreadyStarting(holder_pid=<read pid>)``.
-    Stale-holder detection: if the read PID is not alive (``kill(pid, 0)``
-    fails), unlink + retry once.
+    Stale-holder detection is serialized by a persistent companion lock before
+    it can unlink + retry, so two contenders cannot reclaim the same file.
   - Inside the claim: caller writes the real daemon PID atomically via
     temp-file + rename (``os.rename`` on same FS is POSIX-atomic). Readers
     transitioning between our parent-PID and the daemon PID observe the OLD
@@ -265,6 +265,42 @@ class DaemonAlreadyStarting(Exception):
         )
 
 
+@contextmanager
+def _stale_reclaim_lock(pid_file: Path) -> Iterator[None]:
+    """Serialize stale-claim replacement without unlinking the lock path."""
+    lock_path = pid_file.with_name(f"{pid_file.name}.reclaim-lock")
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        else:
+            os.close(fd)
+
+
 class DaemonSpawnClaim:
     """Atomic PID-file claim via O_CREAT|O_EXCL.
 
@@ -338,22 +374,24 @@ class DaemonSpawnClaim:
         try:
             fd = os.open(str(self.pid_file), flags, 0o600)
         except FileExistsError:
-            holder_pid = self._read_existing_pid()
-            holder_alive = holder_pid > 0 and _is_process_alive(holder_pid)
-            fresh = self._is_pidfile_fresh()
-            if holder_alive or fresh:
-                raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
-            # Stale (dead PID AND old file): unlink and retry exactly once.
-            try:
-                self.pid_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-            try:
-                fd = os.open(str(self.pid_file), flags, 0o600)
-            except FileExistsError:
-                # A peer reclaimed between our unlink and our retry.
-                holder_pid = self._read_existing_pid()
-                raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
+            # A persistent companion lock serializes the stale inspection and
+            # replacement. Unlike the old flock sentinel, this lock path is
+            # never unlinked, so every contender locks the same inode.
+            with _stale_reclaim_lock(self.pid_file):
+                try:
+                    fd = os.open(str(self.pid_file), flags, 0o600)
+                except FileExistsError:
+                    holder_pid = self._read_existing_pid()
+                    holder_alive = holder_pid > 0 and _is_process_alive(holder_pid)
+                    fresh = self._is_pidfile_fresh()
+                    if holder_alive or fresh:
+                        raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
+                    self.pid_file.unlink()
+                    try:
+                        fd = os.open(str(self.pid_file), flags, 0o600)
+                    except FileExistsError:
+                        holder_pid = self._read_existing_pid()
+                        raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
 
         # Won the claim. Write our parent PID + timestamp + initiator
         # so concurrent readers see a real, alive PID (not a placeholder)

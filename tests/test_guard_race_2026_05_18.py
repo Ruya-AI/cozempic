@@ -162,8 +162,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
         barrier = ctx.Barrier(2)
         result_queue = ctx.Queue()
 
-        # Fresh cwd per iteration so the legacy-pid cleanup path doesn't
-        # interfere across iterations.
+        # The shared cwd is enough; pidfile and log cleanup isolate iterations.
         cwd = os.getcwd()
 
         procs = [
