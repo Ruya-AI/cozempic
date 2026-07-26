@@ -1253,8 +1253,7 @@ def cmd_uninstall(args):
     n_hooks = sum(len(h.get("removed", [])) for h in result["hooks"])
     changed_settings = [h for h in result["hooks"] if h.get("removed")]
     error_count = len(result.get("errors", []))
-    error_suffix = f" ({error_count} error(s))" if error_count else ""
-    print(f"  Removed {n_hooks} hook(s) across {len(changed_settings)} settings file(s).{error_suffix}")
+    print(f"  Removed {n_hooks} hook(s) across {len(changed_settings)} settings file(s).")
     for h in result["hooks"]:
         if h.get("removed"):
             print(f"    - {h['settings_path']}: {', '.join(h['removed'])}"
@@ -1277,6 +1276,8 @@ def cmd_uninstall(args):
     for error in result.get("errors", []):
         if error not in reported_errors:
             print(f"  ERROR: {error}")
+    if error_count:
+        print(f"  Uninstall completed with {error_count} error(s).")
     if result.get("opt_out_set"):
         print("  Auto-init disabled. Re-run `cozempic init` to reinstall.")
     if result.get("project_opt_out_set"):
@@ -1390,12 +1391,14 @@ def cmd_init(args):
         print(f"  Use /cozempic in any Claude Code session to diagnose and treat.")
     elif slash["already_existed"]:
         print(f"  Slash command: up-to-date at {slash['path']}")
+    elif slash.get("error"):
+        print(f"  Slash command: ERROR — {slash['error']}")
     elif not args.no_slash_command:
         print(f"  Slash command: source not found (install from git repo to get it)")
 
     print()
 
-    if hooks.get("error") or (local_cleanup or {}).get("error"):
+    if hooks.get("error") or (local_cleanup or {}).get("error") or slash.get("error"):
         print("  Setup incomplete — fix the error above and re-run `cozempic init`.")
     else:
         # Summary: what to do next
@@ -1909,8 +1912,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--uninstall-global", action="store_true", help="(deprecated) use `cozempic uninstall`")
 
     p_uninstall = sub.add_parser("uninstall", help="Reverse `cozempic init` — remove hooks, slash command, markers (global by default)")
-    p_uninstall.add_argument("--project", action="store_true", help="Uninstall from THIS project's .claude/settings.json (default is global ~/.claude)")
-    p_uninstall.add_argument("--all", action="store_true", help="Uninstall from both global and project")
+    uninstall_scope = p_uninstall.add_mutually_exclusive_group()
+    uninstall_scope.add_argument("--project", action="store_true", help="Uninstall from THIS project's .claude/settings.json (default is global ~/.claude)")
+    uninstall_scope.add_argument("--all", action="store_true", help="Uninstall from both global and project")
     p_uninstall.add_argument("--purge", action="store_true", help="ALSO delete ~/.cozempic data + savings ledger (irreversible; prompts)")
     p_uninstall.add_argument("--dry-run", action="store_true", help="Show what would be removed without changing anything")
 
@@ -2067,7 +2071,9 @@ def _global_init_marker() -> Path:
 
 def _persist_global_init_marker() -> None:
     try:
-        _global_init_marker().touch()
+        marker = _global_init_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
     except OSError as exc:
         print(
             f"  Cozempic: could not save your global init preference ({exc}). "

@@ -341,6 +341,25 @@ class TestPreviewAndDryRun(_Base):
         preview = cz_init.preview_uninstall("global")
         self.assertTrue(preview["errors"])
 
+    def test_uninstall_creates_missing_opt_out_marker_parents(self):
+        self.assertTrue(cz_init.run_uninstall("global")["opt_out_set"])
+        self.assertTrue((self.home / ".cozempic_global_initialized").exists())
+
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            self.assertTrue(cz_init.run_uninstall("project")["project_opt_out_set"])
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue((project / ".claude" / ".cozempic_uninstalled").exists())
+
+    def test_install_slash_command_returns_error_instead_of_raising(self):
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.install_slash_command(".")
+        self.assertIn("Could not install slash command", result["error"])
+
     def test_uninstall_rejects_unknown_scope(self):
         with self.assertRaisesRegex(ValueError, "Unknown uninstall scope"):
             cz_init.preview_uninstall("typo")

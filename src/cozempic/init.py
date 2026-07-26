@@ -619,6 +619,13 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
         if added or updated or repaired:
             try:
                 backup = _backup_settings(path)
+            except OSError as exc:
+                return {
+                    "added": [], "updated": [], "skipped": [],
+                    "settings_path": str(path), "backup_path": None,
+                    "error": f"could not back up {path}: {exc}",
+                }
+            try:
                 _save_settings(path, settings)
             except OSError as exc:
                 return {
@@ -662,15 +669,15 @@ def install_slash_command(project_dir: str) -> dict:
     if not source.exists():
         return {"installed": False, "path": None, "already_existed": False, "updated": False}
 
-    already_existed = target.exists()
-
-    # Check if content differs
-    if already_existed:
-        if source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8"):
+    try:
+        already_existed = target.exists()
+        if already_existed and source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8"):
             return {"installed": False, "path": str(target), "already_existed": True, "updated": False}
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"installed": False, "path": str(target), "already_existed": False,
+                "updated": False, "error": f"Could not install slash command: {exc}"}
 
     return {"installed": True, "path": str(target), "already_existed": already_existed, "updated": already_existed}
 
@@ -698,7 +705,7 @@ def run_init(
             hook_result.setdefault("warnings", []).append(
                 f"Could not clear project uninstall marker: {exc}"
             )
-    slash_result = {"installed": False, "path": None, "already_existed": False}
+    slash_result = {"installed": False, "path": None, "already_existed": False, "updated": False}
 
     if not skip_slash:
         slash_result = install_slash_command(project_dir)
@@ -869,7 +876,9 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
 
     if has_project_target and not project_cleanup_failed:
         try:
-            project_uninstall_marker(".").touch()
+            marker = project_uninstall_marker(".")
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
             result["project_opt_out_set"] = True
         except OSError as exc:
             result["errors"].append(f"Could not persist project uninstall opt-out: {exc}")
@@ -891,7 +900,9 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     if scope in ("global", "all") and not global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.
         try:
-            _global_init_marker().touch()
+            marker = _global_init_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
             result["opt_out_set"] = True
         except OSError as exc:
             result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
@@ -989,6 +1000,12 @@ def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict
             settings.pop("hooks", None)
         try:
             backup = _backup_settings(path)
+        except OSError as exc:
+            return {
+                "removed": [], "settings_path": str(path), "backup_path": None,
+                "error": f"could not back up {path}: {exc}",
+            }
+        try:
             _save_settings(path, settings)
         except OSError as exc:
             return {
