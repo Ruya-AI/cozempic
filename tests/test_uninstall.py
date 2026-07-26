@@ -255,9 +255,23 @@ class TestPreviewAndDryRun(_Base):
         from cozempic import cli
 
         with patch.object(cli.sys.stdin, "isatty", return_value=False), \
-                patch.object(cli, "_prompt_with_timeout") as prompt:
+                patch.object(cli, "_prompt_with_timeout") as prompt, \
+                patch.object(cz_init, "run_uninstall") as run_uninstall:
             cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=False))
         prompt.assert_not_called()
+        run_uninstall.assert_called_once_with("global", False)
+
+    def test_project_preview_does_not_offer_global_remind_counter_removal(self):
+        (self.home / ".cozempic_remind_counter").write_text("3")
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            preview = cz_init.preview_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        self.assertFalse(preview["remind_counter"])
 
     def test_preview_reports_without_mutating(self):
         sp = self._write_global_settings(_settings_with({

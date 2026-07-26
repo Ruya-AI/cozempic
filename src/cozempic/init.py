@@ -816,7 +816,7 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
             if p.exists():
                 data.append(str(p))
     return {"hooks_in": hook_targets, "slash_command": slash_present,
-            "remind_counter": _REMIND_COUNTER.exists(), "purge_data": data,
+            "remind_counter": scope in ("global", "all") and _REMIND_COUNTER.exists(), "purge_data": data,
             "errors": errors}
 
 
