@@ -269,12 +269,16 @@ class DaemonAlreadyStarting(Exception):
 def _stale_reclaim_lock(pid_file: Path) -> Iterator[None]:
     """Serialize stale-claim replacement without unlinking the lock path."""
     lock_path = pid_file.with_name(f"{pid_file.name}.reclaim-lock")
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(lock_path), flags, 0o600)
     locked = False
     try:
         if os.name == "nt":
             import msvcrt
 
+            os.write(fd, b"\0")
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
         else:
@@ -386,7 +390,7 @@ class DaemonSpawnClaim:
                     fresh = self._is_pidfile_fresh()
                     if holder_alive or fresh:
                         raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
-                    self.pid_file.unlink()
+                    self.pid_file.unlink(missing_ok=True)
                     try:
                         fd = os.open(str(self.pid_file), flags, 0o600)
                     except FileExistsError:

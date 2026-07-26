@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -305,7 +306,7 @@ def _is_lock_held(lock_path: Path) -> bool:
         fd.close()
 
 
-def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path]]:
+def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[Path]]:
     """Scan `_TMP_DIR` and partition cozempic artifacts into three buckets:
     stale .pid/.log files, orphan .lock files, and kept files (unused here
     but isolates the pure-IO from the status/message logic).
@@ -313,6 +314,7 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path]]:
     Never returns a file listed in `_is_protected_tmp_artifact`.
     """
     stale_pids: list[Path] = []
+    stale_temps: list[Path] = []
     orphan_logs: list[Path] = []
     orphan_locks: list[Path] = []
 
@@ -345,6 +347,20 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path]]:
     pid_slugs = {p.stem[len("cozempic_guard_"):] for p in pid_files}
 
     try:
+        tmp_entries = list(_TMP_DIR.glob("cozempic_guard_*.pid.tmp"))
+    except OSError:
+        tmp_entries = []
+    from .spawn_lock import _FRESH_PIDFILE_SECONDS
+    for tmp_path in tmp_entries:
+        if _is_protected_tmp_artifact(tmp_path.name):
+            continue
+        try:
+            if time.time() - tmp_path.stat().st_mtime >= _FRESH_PIDFILE_SECONDS:
+                stale_temps.append(tmp_path)
+        except OSError:
+            continue
+
+    try:
         log_entries = list(_TMP_DIR.glob("cozempic_guard_*.log"))
     except OSError:
         log_entries = []
@@ -369,7 +385,7 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path]]:
         if not _is_lock_held(lock_path):
             orphan_locks.append(lock_path)
 
-    return stale_pids, orphan_logs, orphan_locks
+    return stale_pids, stale_temps, orphan_logs, orphan_locks
 
 
 def check_stale_tmp_artifacts() -> CheckResult:
@@ -386,8 +402,8 @@ def check_stale_tmp_artifacts() -> CheckResult:
     the circuit-breaker state file (cozempic_breaker_*.json) are ignored —
     those are intentionally persistent.
     """
-    stale_pids, orphan_logs, orphan_locks = _classify_tmp_artifacts()
-    total = len(stale_pids) + len(orphan_logs) + len(orphan_locks)
+    stale_pids, stale_temps, orphan_logs, orphan_locks = _classify_tmp_artifacts()
+    total = len(stale_pids) + len(stale_temps) + len(orphan_logs) + len(orphan_locks)
 
     if total == 0:
         return CheckResult(
@@ -398,7 +414,7 @@ def check_stale_tmp_artifacts() -> CheckResult:
 
     # Size aggregate — helps surface the "96 log files" case.
     size_bytes = 0
-    for path in (*stale_pids, *orphan_logs, *orphan_locks):
+    for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks):
         try:
             size_bytes += path.stat().st_size
         except OSError:
@@ -410,6 +426,8 @@ def check_stale_tmp_artifacts() -> CheckResult:
     parts = []
     if stale_pids:
         parts.append(f"{len(stale_pids)} stale .pid file(s)")
+    if stale_temps:
+        parts.append(f"{len(stale_temps)} stale .pid.tmp file(s)")
     if orphan_logs:
         parts.append(f"{len(orphan_logs)} orphan .log file(s)")
     if orphan_locks:
@@ -435,9 +453,9 @@ def fix_stale_tmp_artifacts() -> str:
     Every unlink uses `missing_ok=True` to tolerate races with concurrent
     cleanup from `_is_guard_running_for_session`.
     """
-    stale_pids, orphan_logs, orphan_locks = _classify_tmp_artifacts()
+    stale_pids, stale_temps, orphan_logs, orphan_locks = _classify_tmp_artifacts()
     deleted = 0
-    for path in (*stale_pids, *orphan_logs, *orphan_locks):
+    for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks):
         try:
             path.unlink(missing_ok=True)
             deleted += 1

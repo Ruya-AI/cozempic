@@ -3638,6 +3638,7 @@ def start_guard_daemon(
         }
 
     try:
+        orphaned_guard_pid: int | None = None
         # Build the guard command
         cmd_parts = [
             sys.executable, "-m", "cozempic.cli", "guard",
@@ -3813,9 +3814,15 @@ def start_guard_daemon(
                         proc.kill()
                         proc.wait(timeout=5)
                     except (AttributeError, OSError, subprocess.TimeoutExpired):
-                        pass
+                        orphaned_guard_pid = proc.pid
                 except (AttributeError, OSError):
-                    pass
+                    orphaned_guard_pid = proc.pid
+                if orphaned_guard_pid is not None:
+                    print(
+                        f"  Cozempic: guard PID {orphaned_guard_pid} may still be running; "
+                        "stop it manually.",
+                        file=sys.stderr,
+                    )
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:
@@ -3831,7 +3838,11 @@ def start_guard_daemon(
             # handed_off is still False, so a retry can re-claim.
             return {
                 "started": False,
-                "reason": f"pidfile: {exc}",
+                "reason": (
+                    f"pidfile: {exc}"
+                    + (f"; guard PID {orphaned_guard_pid} may still be running"
+                       if orphaned_guard_pid is not None else "")
+                ),
                 "pid": None,
                 "pid_file": str(pid_path),
                 "log_file": None,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -398,6 +400,16 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         result = check_stale_tmp_artifacts()
         self.assertIn(result.status, ("warning", "issue"))
         self.assertIn("log", result.message.lower())
+
+    def test_stale_pid_tmp_is_reported_and_removed(self):
+        temp_path = self.tmpdir / "cozempic_guard_staletmp-04.pid.tmp"
+        temp_path.write_text("reserved\n")
+        stale_at = time.time() - 10
+        os.utime(temp_path, (stale_at, stale_at))
+        result = check_stale_tmp_artifacts()
+        self.assertIn("pid.tmp", result.message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(temp_path.exists())
 
     def test_orphan_lock_is_stale_when_not_held(self):
         """A .lock file that can be acquired with LOCK_EX|LOCK_NB is orphaned."""

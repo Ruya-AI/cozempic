@@ -622,7 +622,8 @@ class TestSymlinkDefense(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        for p in (self.pid_path, self.tmp_pid_path, self.log_path):
+        reclaim_lock = self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock")
+        for p in (self.pid_path, self.tmp_pid_path, self.log_path, reclaim_lock):
             try:
                 p.unlink()
             except (FileNotFoundError, OSError):
@@ -682,6 +683,19 @@ class TestSymlinkDefense(unittest.TestCase):
             "The .pid.tmp write must use O_NOFOLLOW (or fail closed on "
             "EEXIST when the path already exists, which O_EXCL guarantees).",
         )
+
+    def test_reclaim_lock_rejects_symlink(self):
+        """The persistent stale-reclaim lock must not follow a symlink."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.spawn_lock import _stale_reclaim_lock
+
+        lock_path = self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock")
+        os.symlink(str(self.victim), str(lock_path))
+        with self.assertRaises(OSError):
+            with _stale_reclaim_lock(self.pid_path):
+                pass
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
 
 
 class TestFileNotFoundErrorRecovery(unittest.TestCase):
