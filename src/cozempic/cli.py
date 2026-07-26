@@ -1246,7 +1246,9 @@ def cmd_uninstall(args):
     result = run_uninstall(scope, purge)
     n_hooks = sum(len(h.get("removed", [])) for h in result["hooks"])
     changed_settings = [h for h in result["hooks"] if h.get("removed")]
-    print(f"  Removed {n_hooks} hook(s) across {len(changed_settings)} settings file(s).")
+    error_count = len(result.get("errors", []))
+    error_suffix = f" ({error_count} error(s))" if error_count else ""
+    print(f"  Removed {n_hooks} hook(s) across {len(changed_settings)} settings file(s).{error_suffix}")
     for h in result["hooks"]:
         if h.get("removed"):
             print(f"    - {h['settings_path']}: {', '.join(h['removed'])}"

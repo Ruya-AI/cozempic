@@ -807,7 +807,8 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     if scope in ("global", "all") and slash.exists():
         try:
             slash_present = _slash_is_ours(slash.read_text(encoding="utf-8", errors="surrogateescape"))
-        except OSError:
+        except OSError as exc:
+            errors.append(f"Could not read slash command: {exc}")
             slash_present = False
     data = []
     if purge:
@@ -859,14 +860,17 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()
+        if result["slash_command"].get("error"):
+            result["errors"].append(result["slash_command"]["error"])
 
     # Cleanup the nudge counter (cosmetic, safe).
-    try:
-        if _REMIND_COUNTER.exists():
-            _REMIND_COUNTER.unlink()
-            result["remind_counter_removed"] = True
-    except OSError:
-        pass
+    if scope in ("global", "all"):
+        try:
+            if _REMIND_COUNTER.exists():
+                _REMIND_COUNTER.unlink()
+                result["remind_counter_removed"] = True
+        except OSError:
+            pass
 
     if scope in ("global", "all") and not global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.
