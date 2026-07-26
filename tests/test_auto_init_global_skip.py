@@ -1,4 +1,5 @@
 """Tests for _maybe_auto_init() skipping local init when global hooks are current."""
+import io
 import json
 import tempfile
 import unittest
@@ -286,6 +287,24 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                     with mock.patch.object(cli, "run_init") as run_init:
                         cli._maybe_auto_init(["list"])
                         run_init.assert_not_called()
+
+    def test_reports_local_cleanup_error_after_auto_init(self):
+        """A cleanup failure must not hide behind a successful main settings write."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self._make_project(tmp)
+            stderr = io.StringIO()
+            result = {
+                "hooks": {"added": [], "updated": [], "repaired": False},
+                "local_cleanup": {"error": "could not parse settings.local.json"},
+            }
+            with mock.patch.object(cli.Path, "cwd", return_value=project), \
+                    mock.patch.object(cli, "_global_claude_dir", return_value=project / ".claude"), \
+                    mock.patch.object(cli, "_project_cozempic_hook_state", return_value=mock.Mock(found=False, current=False, error=None)), \
+                    mock.patch.object(cli, "run_init", return_value=result), \
+                    mock.patch.object(cli.sys, "stderr", stderr):
+                cli._maybe_auto_init(["list"])
+            self.assertIn("local settings cleanup FAILED", stderr.getvalue())
 
     def test_global_uninstall_opt_out_blocks_project_auto_init(self):
         from cozempic import cli

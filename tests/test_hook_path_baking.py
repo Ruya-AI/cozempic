@@ -111,6 +111,19 @@ class TestResolveAndBake(unittest.TestCase):
             self.assertTrue(all(isinstance(entry, dict) for entry in entries))
             self.assertTrue(all(isinstance(entry.get("hooks"), list) for entry in entries))
 
+    def test_wire_hooks_repairs_non_object_hook_elements(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '{"hooks": {"SessionStart": [{"hooks": ["bad", {"command": "echo ok"}]}]}}'
+            )
+            result = cz.wire_hooks(tmp)
+            self.assertTrue(result["repaired"])
+            settings = json.loads(path.read_text())
+            hooks = settings["hooks"]["SessionStart"][0]["hooks"]
+            self.assertTrue(all(isinstance(hook, dict) for hook in hooks))
+
     def test_hook_state_tolerates_truthy_non_list_containers(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".claude" / "settings.json"
@@ -135,6 +148,14 @@ class TestResolveAndBake(unittest.TestCase):
             self.assertNotIn("cozempic", local.read_text())
             settings = json.loads((Path(tmp) / ".claude" / "settings.json").read_text())
             self.assertIn("cozempic", json.dumps(settings))
+
+    def test_init_reports_malformed_local_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text("{broken json")
+            result = cz.run_init(tmp, skip_slash=True)
+            self.assertIn("error", result["local_cleanup"])
 
 
 class TestWireHooksBakes(unittest.TestCase):

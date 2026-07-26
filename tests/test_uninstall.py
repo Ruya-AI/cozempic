@@ -49,6 +49,12 @@ class _Base(unittest.TestCase):
         p.write_text(json.dumps(settings))
         return p
 
+    def _write_global_local_settings(self, settings):
+        p = self.home / ".claude" / "settings.local.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(settings))
+        return p
+
     def _write_slash(self, content):
         p = self.home / ".claude" / "commands" / "cozempic.md"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +179,7 @@ class TestPreviewAndDryRun(_Base):
         from cozempic import cli
 
         with patch.object(cli.sys.stdin, "isatty", return_value=True), \
+                patch.object(cli.sys.stderr, "isatty", return_value=True), \
                 patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
                 patch.object(cz_init, "run_uninstall") as run_uninstall:
             cli.cmd_uninstall(
@@ -197,6 +204,16 @@ class TestPreviewAndDryRun(_Base):
         prev = cz_init.preview_uninstall("global")
         self.assertIn(str(sp), prev["hooks_in"])
         self.assertEqual(sp.read_text(), before)  # untouched
+
+    def test_global_uninstall_and_preview_include_local_settings(self):
+        settings = _settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        })
+        local = self._write_global_local_settings(settings)
+        preview = cz_init.preview_uninstall("global")
+        self.assertIn(str(local), preview["hooks_in"])
+        cz_init.run_uninstall("global")
+        self.assertNotIn("cozempic", local.read_text())
 
     def test_cmd_dry_run_changes_nothing(self):
         from cozempic import cli

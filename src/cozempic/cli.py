@@ -1236,7 +1236,7 @@ def cmd_uninstall(args):
 
     if purge:
         print("  --purge will DELETE your savings ledger + receipts (~/.cozempic). This is irreversible.")
-        if not sys.stdin.isatty():
+        if not (sys.stdin.isatty() and sys.stderr.isatty()):
             print("  Aborted (no interactive confirmation).\n")
             return
         if _prompt_with_timeout("  Continue? [y/N] ", timeout=30, default="n") != "y":
@@ -1335,6 +1335,16 @@ def cmd_init(args):
     if hooks["skipped"]:
         for h in hooks["skipped"]:
             print(f"    ~ {h} (current, skipped)")
+
+    local_cleanup = result.get("local_cleanup")
+    if local_cleanup:
+        if local_cleanup.get("error"):
+            print(f"  Local settings cleanup: ERROR — {local_cleanup['error']}")
+        elif local_cleanup.get("removed"):
+            print(
+                f"  Local settings cleanup: removed {len(local_cleanup['removed'])} stale hook(s) "
+                f"from {local_cleanup['settings_path']}"
+            )
 
     if getattr(args, "global_install", False) and not hooks.get("error"):
         # A failed install must remain retryable instead of looking like a decline.
@@ -2218,7 +2228,8 @@ def _maybe_global_init(argv: list[str]) -> None:
     except OSError:
         pass
 
-    if not (added or updated):
+    repaired = hooks_result.get("repaired")
+    if not (added or updated or repaired):
         return
 
     count_desc = []
@@ -2226,11 +2237,14 @@ def _maybe_global_init(argv: list[str]) -> None:
         count_desc.append(f"{len(added)} new")
     if updated:
         count_desc.append(f"{len(updated)} refreshed")
+    if repaired:
+        count_desc.append("malformed hook entries removed")
     summary = ", ".join(count_desc)
+    outcome = f"{summary} hook(s) wired" if added or updated else summary
 
     if interactive:
         print(
-            f"  Cozempic enabled — {summary} hook(s) wired into ~/.claude/settings.json.",
+            f"  Cozempic enabled — {outcome} in ~/.claude/settings.json.",
             file=sys.stderr,
         )
         print(
@@ -2241,7 +2255,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     else:
         print(
             f"  Cozempic: protecting every Claude Code session globally "
-            f"({summary} hook(s) wired into ~/.claude/settings.json). "
+            f"({outcome} in ~/.claude/settings.json). "
             "Disable with `cozempic init --uninstall-global` or COZEMPIC_NO_GLOBAL_INIT=1.",
             file=sys.stderr,
         )
@@ -2364,17 +2378,33 @@ def _maybe_auto_init(argv: list[str]) -> None:
 
     added = hooks_result.get("added", []) or []
     updated = hooks_result.get("updated", []) or []
-    if added or updated:
+    repaired = hooks_result.get("repaired")
+    if added or updated or repaired:
         parts = []
         if added:
             parts.append(f"{len(added)} hook(s) wired")
         if updated:
             parts.append(f"{len(updated)} refreshed from stale schema")
+        if repaired:
+            parts.append("malformed hook entries removed")
         print(
             f"  Cozempic: auto-initialized this project ({', '.join(parts)}). "
             "Disable with --no-auto-init or COZEMPIC_NO_AUTO_INIT=1.",
             file=sys.stderr,
         )
+
+    local_cleanup = result.get("local_cleanup")
+    if local_cleanup:
+        if local_cleanup.get("error"):
+            print(
+                f"  Cozempic: local settings cleanup FAILED — {local_cleanup['error']}",
+                file=sys.stderr,
+            )
+        elif local_cleanup.get("removed"):
+            print(
+                "  Cozempic: removed stale hooks from project settings.local.json.",
+                file=sys.stderr,
+            )
 
 
 def cmd_dashboard(args):

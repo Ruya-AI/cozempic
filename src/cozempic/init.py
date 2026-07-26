@@ -242,6 +242,11 @@ def _project_settings_paths(project_dir: str) -> list[Path]:
     return [settings, settings.with_name("settings.local.json")]
 
 
+def _global_settings_paths() -> list[Path]:
+    settings = _global_settings_path()
+    return [settings, settings.with_name("settings.local.json")]
+
+
 def project_uninstall_marker(project_dir: str) -> Path:
     return Path(project_dir) / ".claude" / ".cozempic_uninstalled"
 
@@ -514,15 +519,20 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
             if not isinstance(existing, list):
                 existing = []
                 repaired = True
-            valid_existing = [
-                entry
-                for entry in existing
-                if isinstance(entry, dict)
-                and ("hooks" not in entry or isinstance(entry["hooks"], list))
-            ]
-            if len(valid_existing) != len(existing):
-                existing = valid_existing
-                repaired = True
+            valid_existing = []
+            for entry in existing:
+                if not isinstance(entry, dict) or (
+                    "hooks" in entry and not isinstance(entry["hooks"], list)
+                ):
+                    repaired = True
+                    continue
+                if "hooks" in entry:
+                    hooks_list = [hook for hook in entry["hooks"] if isinstance(hook, dict)]
+                    if len(hooks_list) != len(entry["hooks"]):
+                        entry = {**entry, "hooks": hooks_list}
+                        repaired = True
+                valid_existing.append(entry)
+            existing = valid_existing
 
             for new_entry in hook_entries:
                 matcher = new_entry.get("matcher", "")
@@ -757,9 +767,9 @@ def uninstall_slash_command() -> dict:
 def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
     scopes = {
-        "global": [_global_settings_path()],
+        "global": _global_settings_paths(),
         "project": _project_settings_paths("."),
-        "all": [_global_settings_path(), *_project_settings_paths(".")],
+        "all": [*_global_settings_paths(), *_project_settings_paths(".")],
     }.get(scope, [_global_settings_path()])
     hook_targets = []
     errors = []
@@ -799,9 +809,9 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     not silently re-wire on the next run (explicit `cozempic init` still works).
     """
     targets = {
-        "global": [(str(Path.home()), _global_settings_path())],
+        "global": [(str(Path.home()), path) for path in _global_settings_paths()],
         "project": [(".", path) for path in _project_settings_paths(".")],
-        "all": [(str(Path.home()), _global_settings_path())]
+        "all": [(str(Path.home()), path) for path in _global_settings_paths()]
         + [(".", path) for path in _project_settings_paths(".")],
     }.get(scope, [(str(Path.home()), _global_settings_path())])
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
