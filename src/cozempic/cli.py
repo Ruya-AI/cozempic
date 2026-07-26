@@ -1220,6 +1220,10 @@ def cmd_uninstall(args):
     print("  ═══════════════════════════════════════════════════════════════════")
     print(f"  Scope: {scope}" + ("  (+ purge data)" if purge else ""))
 
+    if purge and scope == "project":
+        print("  ERROR: --purge only applies to global data; choose --global or --all.\n")
+        return
+
     if getattr(args, "dry_run", False):
         prev = preview_uninstall(scope, purge)
         print("  Dry run — nothing will be changed.\n")

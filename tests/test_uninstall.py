@@ -152,6 +152,13 @@ class TestRunUninstall(_Base):
             result = cz_init.run_uninstall("global", purge=True)
         self.assertIn("Purge failed", result["errors"][0])
 
+    def test_project_scope_purge_keeps_global_data(self):
+        (self.home / ".cozempic").mkdir()
+        (self.home / ".cozempic_savings.json").write_text("{}")
+        cz_init.run_uninstall("project", purge=True)
+        self.assertTrue((self.home / ".cozempic").exists())
+        self.assertTrue((self.home / ".cozempic_savings.json").exists())
+
     def test_cmd_uninstall_prints_non_hook_errors(self):
         from cozempic import cli
 
@@ -260,6 +267,15 @@ class TestPreviewAndDryRun(_Base):
             cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=False))
         prompt.assert_not_called()
         run_uninstall.assert_called_once_with("global", False)
+
+    def test_project_purge_is_rejected(self):
+        from cozempic import cli
+
+        output = io.StringIO()
+        with patch("sys.stdout", output), patch.object(cz_init, "run_uninstall") as run_uninstall:
+            cli.cmd_uninstall(argparse.Namespace(project=True, all=False, purge=True, dry_run=False))
+        self.assertIn("only applies to global data", output.getvalue())
+        run_uninstall.assert_not_called()
 
     def test_project_preview_does_not_offer_global_remind_counter_removal(self):
         (self.home / ".cozempic_remind_counter").write_text("3")
