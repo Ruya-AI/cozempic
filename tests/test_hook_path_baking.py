@@ -167,6 +167,18 @@ class TestResolveAndBake(unittest.TestCase):
             result = cz.run_init(tmp, skip_slash=True)
             self.assertIn("error", result["local_cleanup"])
 
+    def test_init_keeps_local_hooks_when_primary_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text('{"hooks": {"SessionStart": []}}')
+            with patch("cozempic.init.wire_hooks", return_value={"error": "primary failed"}), \
+                    patch("cozempic.init.uninstall_hooks") as uninstall_hooks:
+                result = cz.run_init(tmp, skip_slash=True)
+            self.assertEqual(result["hooks"]["error"], "primary failed")
+            self.assertIsNone(result["local_cleanup"])
+            uninstall_hooks.assert_not_called()
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):

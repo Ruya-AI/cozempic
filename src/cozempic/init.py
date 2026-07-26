@@ -676,14 +676,12 @@ def run_init(
 
     Returns combined result dict.
     """
+    hook_result = wire_hooks(project_dir, settings_path=settings_path)
     local_cleanup = None
-    if settings_path is None:
+    if settings_path is None and not hook_result.get("error"):
         local_settings = _settings_path(project_dir).with_name("settings.local.json")
         if local_settings.exists():
             local_cleanup = uninstall_hooks(project_dir, settings_path=local_settings)
-
-    hook_result = wire_hooks(project_dir, settings_path=settings_path)
-    if settings_path is None and not hook_result.get("error"):
         project_uninstall_marker(project_dir).unlink(missing_ok=True)
     slash_result = {"installed": False, "path": None, "already_existed": False}
 
@@ -816,16 +814,21 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                     "remind_counter_removed": False, "purged": [], "opt_out_set": False,
                     "errors": []}
 
+    project_cleanup_failed = False
+    has_project_target = False
     for directory, settings_path in targets:
         hook_result = uninstall_hooks(directory, settings_path=settings_path)
         result["hooks"].append(hook_result)
+        has_project_target = has_project_target or directory == "."
         if hook_result.get("error"):
             result["errors"].append(hook_result["error"])
-        elif directory == ".":
-            try:
-                project_uninstall_marker(directory).touch()
-            except OSError:
-                pass
+            project_cleanup_failed = project_cleanup_failed or directory == "."
+
+    if has_project_target and not project_cleanup_failed:
+        try:
+            project_uninstall_marker(".").touch()
+        except OSError:
+            pass
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()

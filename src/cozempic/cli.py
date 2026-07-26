@@ -1381,15 +1381,18 @@ def cmd_init(args):
 
     print()
 
-    # Summary: what to do next
-    print(f"  Setup complete. Protection is fully automatic:")
-    print(f"    - Guard daemon auto-starts on every session (SessionStart hook)")
-    print(f"    - Team state checkpointed on every agent event (PostToolUse hooks)")
-    print(f"    - Emergency checkpoint before compaction (PreCompact hook)")
-    print(f"    - Recovery context after compaction (PostCompact hook)")
-    print(f"    - Final checkpoint on session end (Stop hook)")
-    print()
-    print(f"  Just start Claude Code normally. No second terminal needed.")
+    if hooks.get("error"):
+        print("  Setup incomplete — fix the error above and re-run `cozempic init`.")
+    else:
+        # Summary: what to do next
+        print(f"  Setup complete. Protection is fully automatic:")
+        print(f"    - Guard daemon auto-starts on every session (SessionStart hook)")
+        print(f"    - Team state checkpointed on every agent event (PostToolUse hooks)")
+        print(f"    - Emergency checkpoint before compaction (PreCompact hook)")
+        print(f"    - Recovery context after compaction (PostCompact hook)")
+        print(f"    - Final checkpoint on session end (Stop hook)")
+        print()
+        print(f"  Just start Claude Code normally. No second terminal needed.")
     print()
 
 
@@ -2276,9 +2279,9 @@ def _project_is_cozempic_current(claude_dir: Path) -> bool:
 
 def _managed_cozempic_hook_state(claude_dir: Path):
     """Return state for the settings.json that global init and uninstall manage."""
-    from .init import cozempic_hook_schema_state
+    from .init import _global_settings_paths, cozempic_hook_schema_state
 
-    return cozempic_hook_schema_state(claude_dir / "settings.json")
+    return cozempic_hook_schema_state(_global_settings_paths()[0])
 
 
 def _global_claude_dir() -> Path:
@@ -2288,11 +2291,9 @@ def _global_claude_dir() -> Path:
 
 def _project_cozempic_hook_state(claude_dir: Path):
     """Return combined state for the project's effective Claude settings files."""
-    from .init import cozempic_hook_schema_state_for_paths
+    from .init import _project_settings_paths, cozempic_hook_schema_state_for_paths
 
-    return cozempic_hook_schema_state_for_paths(
-        (claude_dir / "settings.json", claude_dir / "settings.local.json")
-    )
+    return cozempic_hook_schema_state_for_paths(tuple(_project_settings_paths(str(claude_dir.parent))))
 
 
 def _maybe_auto_init(argv: list[str]) -> None:

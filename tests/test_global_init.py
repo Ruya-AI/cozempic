@@ -1,4 +1,5 @@
 """Tests for global auto-init + uninstall + opt-out paths."""
+import io
 import json
 import os
 import tempfile
@@ -722,8 +723,11 @@ class TestGlobalInitFailure(unittest.TestCase):
                     with mock.patch(
                         "cozempic.session.get_claude_dir", return_value=profile
                     ):
-                        cli.cmd_init(args)
+                        output = io.StringIO()
+                        with mock.patch.object(cli.sys, "stdout", output):
+                            cli.cmd_init(args)
             self.assertFalse(marker.exists())
+            self.assertIn("Setup incomplete", output.getvalue())
 
 
 if __name__ == "__main__":

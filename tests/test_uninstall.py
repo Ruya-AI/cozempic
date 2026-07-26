@@ -86,6 +86,21 @@ class TestRunUninstall(_Base):
         cz_init.run_init(str(project), skip_slash=True)
         self.assertFalse(marker.exists())
 
+    def test_project_uninstall_error_does_not_set_opt_out_marker(self):
+        project = self.home / "project-error"
+        claude = project / ".claude"
+        claude.mkdir(parents=True)
+        (claude / "settings.json").write_text('{"hooks": {}}')
+        (claude / "settings.local.json").write_text("{broken json")
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            result = cz_init.run_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue(result["errors"])
+        self.assertFalse((claude / ".cozempic_uninstalled").exists())
+
     def test_removes_global_hooks_and_slash(self):
         self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
