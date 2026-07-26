@@ -1396,6 +1396,12 @@ def start_guard(
             _safe_unlink_session_pidfile(sess["session_id"])
         except Exception:
             pass
+        # A daemon that exits through a normal loop path must not leave an
+        # armed reload from an earlier turn for its successor to trust.
+        try:
+            clear_armed(sess["session_id"], session_path)
+        except Exception:
+            pass
 
 
 def _detect_interactive(claude_pid: int | None) -> bool:
@@ -3637,6 +3643,22 @@ def start_guard_daemon(
             "already_running": False,
         }
 
+    orphan_marker = pid_path.with_suffix(".orphan")
+
+    def record_orphan(pid: int) -> None:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{orphan_marker.name}.", suffix=".tmp", dir=orphan_marker.parent
+        )
+        try:
+            os.write(fd, f"{pid}\n".encode("ascii"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(tmp_name, orphan_marker)
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
+
     try:
         orphaned_guard_pid: int | None = None
         # Build the guard command
@@ -3823,6 +3845,10 @@ def start_guard_daemon(
                 except (AttributeError, OSError):
                     orphaned_guard_pid = proc.pid
                 if orphaned_guard_pid is not None:
+                    try:
+                        record_orphan(orphaned_guard_pid)
+                    except OSError:
+                        pass
                     print(
                         f"  Cozempic: guard PID {orphaned_guard_pid} may still be running; "
                         "stop it manually.",

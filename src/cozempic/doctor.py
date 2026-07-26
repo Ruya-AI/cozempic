@@ -339,7 +339,7 @@ def _unheld_lock_artifacts(pattern: str) -> list[Path]:
     ]
 
 
-def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[Path]]:
+def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[Path], list[Path]]:
     """Scan `_TMP_DIR` and partition cozempic artifacts into four buckets:
     stale .pid/.pid.tmp files, orphan .log/.lock files, and kept files (unused here
     but isolates the pure-IO from the status/message logic).
@@ -349,6 +349,7 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     stale_pids: list[Path] = []
     orphan_logs: list[Path] = []
     orphan_locks: list[Path] = []
+    orphan_markers: list[Path] = []
 
     live_slugs: set[str] = set()
 
@@ -385,8 +386,9 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     orphan_locks = [
         *_unheld_lock_artifacts("cozempic_hook_*.lock"),
     ]
+    orphan_markers = _glob_tmp_artifacts("cozempic_guard_*.orphan")
 
-    return stale_pids, stale_temps, orphan_logs, orphan_locks
+    return stale_pids, stale_temps, orphan_logs, orphan_locks, orphan_markers
 
 
 def check_stale_tmp_artifacts() -> CheckResult:
@@ -403,8 +405,8 @@ def check_stale_tmp_artifacts() -> CheckResult:
     the circuit-breaker state file (cozempic_breaker_*.json) are ignored —
     those are intentionally persistent.
     """
-    stale_pids, stale_temps, orphan_logs, orphan_locks = _classify_tmp_artifacts()
-    total = len(stale_pids) + len(stale_temps) + len(orphan_logs) + len(orphan_locks)
+    stale_pids, stale_temps, orphan_logs, orphan_locks, orphan_markers = _classify_tmp_artifacts()
+    total = len(stale_pids) + len(stale_temps) + len(orphan_logs) + len(orphan_locks) + len(orphan_markers)
 
     if total == 0:
         return CheckResult(
@@ -415,7 +417,7 @@ def check_stale_tmp_artifacts() -> CheckResult:
 
     # Size aggregate — helps surface the "96 log files" case.
     size_bytes = 0
-    for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks):
+    for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks, *orphan_markers):
         try:
             size_bytes += path.stat().st_size
         except OSError:
@@ -433,6 +435,8 @@ def check_stale_tmp_artifacts() -> CheckResult:
         parts.append(f"{len(orphan_logs)} orphan .log file(s)")
     if orphan_locks:
         parts.append(f"{len(orphan_locks)} orphan .lock file(s)")
+    if orphan_markers:
+        parts.append(f"{len(orphan_markers)} orphan guard marker(s)")
     detail = ", ".join(parts)
 
     return CheckResult(
@@ -454,9 +458,18 @@ def fix_stale_tmp_artifacts() -> str:
     Every unlink uses `missing_ok=True` to tolerate races with concurrent
     cleanup from `_is_guard_running_for_session`.
     """
-    stale_pids, stale_temps, orphan_logs, orphan_locks = _classify_tmp_artifacts()
+    stale_pids, stale_temps, orphan_logs, orphan_locks, orphan_markers = _classify_tmp_artifacts()
     deleted = 0
     for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks):
+        try:
+            path.unlink(missing_ok=True)
+            deleted += 1
+        except OSError:
+            pass
+    from .spawn_lock import _parse_pidfile_pid
+    for path in orphan_markers:
+        if _is_live_guard_pid(_parse_pidfile_pid(path)):
+            continue
         try:
             path.unlink(missing_ok=True)
             deleted += 1
