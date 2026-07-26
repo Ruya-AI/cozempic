@@ -618,10 +618,9 @@ class TestWireHooksGracefulParseFailure(unittest.TestCase):
             self.assertIn("could not parse", result["error"])
 
 
-class TestDoSMarkerOnFailure(unittest.TestCase):
-    def test_marker_touched_on_run_init_failure(self):
-        """If run_init raises, the marker must still be touched to prevent
-        a DoS loop of re-attempts. (Bug 6.1)"""
+class TestGlobalInitFailure(unittest.TestCase):
+    def test_run_init_failure_does_not_become_a_decline(self):
+        """A failed install must retry instead of creating an opt-out marker."""
         from cozempic import cli
         with tempfile.TemporaryDirectory() as tmp:
             # Fake home with .claude dir
@@ -631,9 +630,12 @@ class TestDoSMarkerOnFailure(unittest.TestCase):
             with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
                 with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
                     with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
-                        with mock.patch.object(cli, "run_init", side_effect=OSError("boom")):
-                            cli._maybe_global_init(["list"])
-            self.assertTrue(marker.exists(), "marker must be touched even on failure")
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=False):
+                            with mock.patch.object(cli, "run_init", side_effect=OSError("boom")) as run_init:
+                                cli._maybe_global_init(["list"])
+                                cli._maybe_global_init(["list"])
+            self.assertFalse(marker.exists(), "failure must not become an opt-out")
+            self.assertEqual(run_init.call_count, 2)
 
 
 if __name__ == "__main__":

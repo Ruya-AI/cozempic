@@ -31,9 +31,9 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             }
         }))
 
-    def _write_stale_hooks(self, claude_dir):
+    def _write_stale_hooks(self, claude_dir, filename="settings.json"):
         """Write a settings.json with stale (pre-schema) cozempic hooks."""
-        settings = claude_dir / "settings.json"
+        settings = claude_dir / filename
         settings.write_text(json.dumps({
             "hooks": {
                 "SessionStart": [{
@@ -62,6 +62,61 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                     with mock.patch.object(cli, "run_init") as ri:
                         cli._maybe_auto_init(["list"])
                         ri.assert_not_called()
+
+    def test_skips_when_managed_global_hooks_current_despite_stale_local_file(self):
+        """Global settings.local.json must not override managed global hooks."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            self._write_current_hooks(home_claude)
+            self._write_stale_hooks(home_claude, "settings.local.json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
+
+    def test_skips_when_managed_global_hooks_current_despite_malformed_local_file(self):
+        """Unreadable unmanaged global-local state must not trigger local hooks."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            self._write_current_hooks(home_claude)
+            (home_claude / "settings.local.json").write_text("{broken json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
+
+    def test_skips_local_init_when_managed_global_settings_are_malformed(self):
+        """Do not install local hooks while managed global settings need repair."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            (home_claude / "settings.json").write_text("{broken json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch("sys.stderr") as mock_stderr:
+                        with mock.patch.object(cli, "run_init") as ri:
+                            cli._maybe_auto_init(["list"])
+                            ri.assert_not_called()
+            output = "".join(
+                call.args[0] for call in mock_stderr.write.call_args_list if call.args
+            )
+            self.assertIn("auto-init skipped", output)
 
     def test_fires_when_global_hooks_absent(self):
         """No global hooks -> local auto-init should fire."""

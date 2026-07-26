@@ -2161,17 +2161,9 @@ def _maybe_global_init(argv: list[str]) -> None:
     try:
         result = run_init(str(Path.home()), skip_slash=True)
     except Exception as exc:
-        # Touch the marker even on failure — prevents a DoS loop where every
-        # single cozempic invocation re-attempts a failing run_init and spams
-        # stderr. User can `rm ~/.cozempic_global_initialized` to retry after
-        # addressing the underlying problem (read-only file, permissions, etc).
-        try:
-            _GLOBAL_INIT_MARKER.touch()
-        except OSError:
-            pass
         print(
             f"  Cozempic: global init failed ({exc}). Run `cozempic init --global` manually "
-            "after fixing; `rm ~/.cozempic_global_initialized` to re-ask on next invocation.",
+            "after fixing.",
             file=sys.stderr,
         )
         return
@@ -2281,16 +2273,25 @@ def _maybe_auto_init(argv: list[str]) -> None:
     # Guard: if cwd IS the home dir, home_claude == claude_dir -- fall through
     # to the normal local check instead.
     home_claude = Path.home() / ".claude"
-    if home_claude != claude_dir and _project_is_cozempic_current(home_claude):
-        # Warn if redundant local hooks are also present.
-        if _project_is_cozempic_current(claude_dir):
+    if home_claude != claude_dir:
+        global_state = _managed_cozempic_hook_state(home_claude)
+        if global_state.error:
             print(
-                "  Cozempic: local hooks redundant (global hooks active) — "
-                "they are harmless but can be removed from this project's "
-                ".claude/settings.json.",
+                f"  Cozempic: auto-init skipped ({global_state.error}). "
+                "Fix ~/.claude/settings.json, then run `cozempic init --global`.",
                 file=sys.stderr,
             )
-        return
+            return
+        if global_state.found and global_state.current:
+            # Warn if redundant local hooks are also present.
+            if _project_is_cozempic_current(claude_dir):
+                print(
+                    "  Cozempic: local hooks redundant (global hooks active) — "
+                    "they are harmless but can be removed from this project's "
+                    ".claude/settings.json.",
+                    file=sys.stderr,
+                )
+            return
 
     if _project_is_cozempic_current(claude_dir):
         return  # already initialized
