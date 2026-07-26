@@ -1232,12 +1232,8 @@ def cmd_uninstall(args):
 
     if purge:
         print("  --purge will DELETE your savings ledger + receipts (~/.cozempic). This is irreversible.")
-        try:
-            if input("  Continue? [y/N] ").strip().lower() != "y":
-                print("  Aborted.\n")
-                return
-        except EOFError:
-            print("  Aborted (no confirmation).\n")
+        if _prompt_with_timeout("  Continue? [y/N] ", timeout=30, default="n") != "y":
+            print("  Aborted.\n")
             return
 
     result = run_uninstall(scope, purge)
@@ -2315,6 +2311,8 @@ def _maybe_auto_init(argv: list[str]) -> None:
                 file=sys.stderr,
             )
             return
+        if _global_init_marker().exists() and not global_state.found:
+            return  # explicit global uninstall remains an opt-out for local auto-init
         if global_state.found and global_state.current:
             # Warn if redundant local hooks are also present.
             if _project_is_cozempic_current(claude_dir):

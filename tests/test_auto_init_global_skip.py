@@ -287,6 +287,19 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                         cli._maybe_auto_init(["list"])
                         run_init.assert_not_called()
 
+    def test_global_uninstall_opt_out_blocks_project_auto_init(self):
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self._make_project(tmp)
+            marker = Path(tmp) / "global-uninstalled"
+            marker.touch()
+            with mock.patch.object(cli.Path, "cwd", return_value=project), \
+                    mock.patch.object(cli, "_global_init_marker", return_value=marker), \
+                    mock.patch.object(cli, "_managed_cozempic_hook_state", return_value=mock.Mock(found=False, current=False, error=None)), \
+                    mock.patch.object(cli, "run_init") as run_init:
+                cli._maybe_auto_init(["list"])
+            run_init.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1218,7 +1218,7 @@ def check_cozempic_project_init() -> CheckResult:
                     continue
                 for h in entry.get("hooks", []) or []:
                     from .init import _is_cozempic_command
-                    if _is_cozempic_command(str(h.get("command", ""))):
+                    if isinstance(h, dict) and _is_cozempic_command(str(h.get("command", ""))):
                         found = True
                         break
 
@@ -1284,7 +1284,8 @@ def check_cozempic_hooks() -> CheckResult:
         has_cozempic = any(
             _is_cozempic_command(h.get("command", ""))
             for entry in entries if isinstance(entry, dict)
-            for h in entry.get("hooks", [])
+            for h in entry.get("hooks", []) or []
+            if isinstance(h, dict)
         )
         if not has_cozempic:
             missing.append(event)

@@ -81,13 +81,15 @@ COZEMPIC_HOOKS = _load_canonical_hooks()
 
 # ─── Core logic ──────────────────────────────────────────────────────────────
 
-def _is_cozempic_hook(hook_entry: dict) -> bool:
+def _is_cozempic_hook(hook_entry: object) -> bool:
     """Return True if this entry contains AT LEAST ONE cozempic-installed
     command. See `_is_cozempic_command` for per-command granularity used by
     uninstall (which must preserve user-authored commands in mixed entries).
     """
-    for h in hook_entry.get("hooks", []):
-        if _is_cozempic_command(h.get("command", "")):
+    if not isinstance(hook_entry, dict):
+        return False
+    for h in hook_entry.get("hooks", []) or []:
+        if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
             return True
     return False
 
@@ -127,12 +129,14 @@ def _is_current_cozempic_command(command: str) -> bool:
     return HOOK_SCHEMA_MARKER in command
 
 
-def _entry_has_current_cozempic_hook(hook_entry: dict) -> bool:
+def _entry_has_current_cozempic_hook(hook_entry: object) -> bool:
     """Return True if at least one command in this entry matches the current
     schema. Used by `_maybe_auto_init` and `_maybe_global_init` to decide
     whether the project/user needs a refresh."""
-    for h in hook_entry.get("hooks", []):
-        if _is_current_cozempic_command(h.get("command", "")):
+    if not isinstance(hook_entry, dict):
+        return False
+    for h in hook_entry.get("hooks", []) or []:
+        if isinstance(h, dict) and _is_current_cozempic_command(h.get("command", "")):
             return True
     return False
 
@@ -436,7 +440,7 @@ def _bake_cozempic_path(hooks: dict, abs_python: str) -> dict:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            for h in (entry.get("hooks", []) or []) if isinstance(entry, dict) else []:
                 cmd = h.get("command") if isinstance(h, dict) else None
                 if isinstance(cmd, str) and "python3 -m cozempic" in cmd:
                     h["command"] = cmd.replace("python3 -m cozempic", f"{q} -m cozempic")
@@ -507,6 +511,8 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                 # user commands in every matching entry.
                 our_entry_idxs = []
                 for idx, existing_entry in enumerate(existing):
+                    if not isinstance(existing_entry, dict):
+                        continue
                     if existing_entry.get("matcher", "") != matcher:
                         continue
                     if _is_cozempic_hook(existing_entry):

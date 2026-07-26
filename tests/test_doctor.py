@@ -46,6 +46,15 @@ class TestCozempicSettingsShape(unittest.TestCase):
         self.assertEqual(result.status, "warning")
         self.assertIn("JSON object", result.message)
 
+    def test_malformed_nested_hooks_are_actionable_warnings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)
+            (config / "settings.json").write_text('{"hooks": {"SessionStart": [{"hooks": null}]}}')
+            with patch("cozempic.doctor.get_claude_dir", return_value=config):
+                result = check_cozempic_hooks()
+        self.assertEqual(result.status, "warning")
+        self.assertIn("SessionStart", result.message)
+
 
 class TestClaudeJsonCorruption(unittest.TestCase):
 

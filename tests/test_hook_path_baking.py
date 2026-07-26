@@ -98,6 +98,16 @@ class TestResolveAndBake(unittest.TestCase):
             settings = json.loads(path.read_text())
             self.assertIsInstance(settings["hooks"]["SessionStart"], list)
 
+    def test_wire_hooks_repairs_malformed_nested_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [null, {"matcher": "", "hooks": null}]}}')
+            result = cz.wire_hooks(tmp)
+            self.assertFalse(result.get("error"))
+            settings = json.loads(path.read_text())
+            self.assertTrue(any(isinstance(entry, dict) for entry in settings["hooks"]["SessionStart"]))
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):
