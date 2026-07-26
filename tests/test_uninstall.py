@@ -152,6 +152,16 @@ class TestRunUninstall(_Base):
             result = cz_init.run_uninstall("global", purge=True)
         self.assertIn("Purge failed", result["errors"][0])
 
+    def test_uninstall_write_failure_is_reported(self):
+        self._write_global_settings(_settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        }))
+        with patch("cozempic.init._save_settings", side_effect=OSError("disk full")):
+            result = cz_init.run_uninstall("global")
+        self.assertEqual(result["errors"], [
+            f"could not write {self.home / '.claude' / 'settings.json'}: disk full"
+        ])
+
     def test_project_scope_purge_keeps_global_data(self):
         (self.home / ".cozempic").mkdir()
         (self.home / ".cozempic_savings.json").write_text("{}")

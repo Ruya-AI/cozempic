@@ -617,8 +617,16 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
         # Only write if something changed
         backup = None
         if added or updated or repaired:
-            backup = _backup_settings(path)
-            _save_settings(path, settings)
+            try:
+                backup = _backup_settings(path)
+                _save_settings(path, settings)
+            except OSError as exc:
+                return {
+                    "added": [], "updated": [], "skipped": [],
+                    "settings_path": str(path),
+                    "backup_path": str(backup) if backup else None,
+                    "error": f"could not write {path}: {exc}",
+                }
 
     return {
         "added": added,
@@ -966,12 +974,21 @@ def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict
         if not changed:
             return {"removed": [], "settings_path": str(path), "backup_path": None}
 
-        backup = _backup_settings(path)
+        backup = None
         if hooks:
             settings["hooks"] = hooks
         else:
             settings.pop("hooks", None)
-        _save_settings(path, settings)
+        try:
+            backup = _backup_settings(path)
+            _save_settings(path, settings)
+        except OSError as exc:
+            return {
+                "removed": [],
+                "settings_path": str(path),
+                "backup_path": str(backup) if backup else None,
+                "error": f"could not write {path}: {exc}",
+            }
 
     return {
         "removed": removed,

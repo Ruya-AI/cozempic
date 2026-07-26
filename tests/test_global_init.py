@@ -652,6 +652,18 @@ class TestPIDReuseCheck(unittest.TestCase):
 
 
 class TestAtomicWrite(unittest.TestCase):
+    def test_wire_hooks_reports_write_failure(self):
+        from cozempic.init import wire_hooks
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir()
+            path.write_text("{}")
+            with mock.patch("cozempic.init._save_settings", side_effect=OSError("disk full")):
+                result = wire_hooks(tmp, settings_path=path)
+
+        self.assertEqual(result["error"], f"could not write {path}: disk full")
+
     def test_save_settings_is_atomic_on_json_error(self):
         """If json serialization raises mid-write, the existing settings.json
         must remain intact (atomic write via tempfile + os.replace)."""
