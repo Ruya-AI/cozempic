@@ -1154,6 +1154,7 @@ def cmd_doctor(args):
         "warning": "⚠",
         "issue": "✗",
         "fixed": "→",
+        "error": "!",
     }
     STATUS_COLORS = {
         "ok": "",
@@ -1171,6 +1172,7 @@ def cmd_doctor(args):
     issues = 0
     warnings = 0
     fixed = 0
+    errors = 0
 
     for r in results:
         icon = STATUS_ICONS.get(r.status, "?")
@@ -1188,12 +1190,14 @@ def cmd_doctor(args):
             warnings += 1
         elif r.status == "fixed":
             fixed += 1
+        elif r.status == "error":
+            errors += 1
 
     # Summary
     if fixed:
         print(f"  Summary: {fixed} issue(s) fixed")
-    elif issues or warnings:
-        print(f"  Summary: {issues} issue(s), {warnings} warning(s)")
+    elif issues or warnings or errors:
+        print(f"  Summary: {issues} issue(s), {warnings} warning(s), {errors} check(s) failed")
         if not args.fix:
             print("  Run 'cozempic doctor --fix' to auto-fix where possible.")
     else:

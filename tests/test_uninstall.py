@@ -70,6 +70,7 @@ class TestRunUninstall(_Base):
             os.chdir(previous_cwd)
         marker = project / ".claude" / ".cozempic_uninstalled"
         self.assertTrue(marker.exists())
+        self.assertFalse((self.home / ".cozempic_global_initialized").exists())
 
         with patch.object(cli.Path, "cwd", return_value=project):
             with patch.object(cli, "run_init") as auto_init:

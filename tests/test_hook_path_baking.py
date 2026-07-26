@@ -115,6 +115,14 @@ class TestResolveAndBake(unittest.TestCase):
             path.write_text('{"hooks": {"SessionStart": [{"hooks": 5}]}}')
             self.assertFalse(cz.cozempic_hook_schema_state(path).error)
 
+    def test_hook_commands_tolerate_non_string_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": [{"command": null}]}]}}')
+            self.assertFalse(cz.wire_hooks(tmp).get("error"))
+            self.assertFalse(cz.uninstall_hooks(tmp).get("error"))
+
 
 class TestWireHooksBakes(unittest.TestCase):
     def test_wire_hooks_writes_absolute_fallback_and_reports_ephemeral(self):

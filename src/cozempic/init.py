@@ -67,7 +67,10 @@ def _load_canonical_hooks() -> dict:
             data = files("cozempic").joinpath("data/hooks.json").read_text(encoding="utf-8")
         except Exception:
             data = (Path(__file__).parent / "data" / "hooks.json").read_text(encoding="utf-8")
-        return json.loads(data).get("hooks", {})
+        hooks = json.loads(data).get("hooks", {})
+        if not isinstance(hooks, dict):
+            raise ValueError("bundled hooks must be a JSON object")
+        return hooks
     except Exception as exc:
         _LOAD_ERROR = (
             f"could not load bundled hook definitions ({exc}). "
@@ -100,7 +103,7 @@ def _is_cozempic_hook(hook_entry: object) -> bool:
     return False
 
 
-def _is_cozempic_command(command: str) -> bool:
+def _is_cozempic_command(command: object) -> bool:
     """Return True if this single hook command was installed by cozempic.
 
     Detection order:
@@ -120,6 +123,8 @@ def _is_cozempic_command(command: str) -> bool:
     are left alone; only commands produced by our `_c()` template / canonical
     hooks.json entries are recognized as ours.
     """
+    if not isinstance(command, str):
+        return False
     if "cozempic-hook-schema=" in command:
         return True
     has_wrapper_open = "{ cozempic " in command
@@ -129,10 +134,10 @@ def _is_cozempic_command(command: str) -> bool:
     return has_wrapper_open and has_python_fallback
 
 
-def _is_current_cozempic_command(command: str) -> bool:
+def _is_current_cozempic_command(command: object) -> bool:
     """Return True if this command is at the CURRENT schema version (fresh).
     Used by auto-init to decide whether to refresh stale hooks."""
-    return HOOK_SCHEMA_MARKER in command
+    return isinstance(command, str) and HOOK_SCHEMA_MARKER in command
 
 
 def _entry_has_current_cozempic_hook(hook_entry: object) -> bool:
@@ -800,12 +805,13 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     except OSError:
         pass
 
-    # Opt-out: keep auto-init from re-wiring after uninstall.
-    try:
-        _global_init_marker().touch()
-        result["opt_out_set"] = True
-    except OSError:
-        pass
+    if scope in ("global", "all"):
+        # Opt-out: keep global auto-init from re-wiring after global uninstall.
+        try:
+            _global_init_marker().touch()
+            result["opt_out_set"] = True
+        except OSError:
+            pass
 
     if purge:
         import shutil as _sh
