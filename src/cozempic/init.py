@@ -10,6 +10,7 @@ This module automates both so `cozempic init` is the only setup step.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -499,15 +500,16 @@ def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
                 "backup_path": None,
                 "error": f"could not parse {path}: {exc}. Back up + fix the file, then rerun.",
             }
+        repaired = False
         hooks = settings.get("hooks")
         if not isinstance(hooks, dict):
             hooks = {}
             settings["hooks"] = hooks
+            repaired = True
 
         added: list[str] = []
         updated: list[str] = []
         skipped: list[str] = []
-        repaired = False
 
         # #158: bake the absolute interpreter into the hook fallback so the guard
         # resolves even when bare `cozempic` isn't on the hook's PATH.
@@ -718,7 +720,14 @@ def _global_settings_path() -> Path:
 
 def global_init_marker_path() -> Path:
     from .session import get_claude_dir
-    return get_claude_dir() / ".cozempic_global_initialized"
+    marker = get_claude_dir() / ".cozempic_global_initialized"
+    legacy_marker = Path.home() / ".cozempic_global_initialized"
+    if not os.environ.get("CLAUDE_CONFIG_DIR") and legacy_marker != marker and legacy_marker.exists():
+        try:
+            marker.touch(exist_ok=True)
+        except OSError:
+            pass
+    return marker
 
 
 def _global_init_marker() -> Path:
@@ -814,6 +823,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                     "remind_counter_removed": False, "purged": [], "opt_out_set": False,
                     "errors": []}
 
+    global_cleanup_failed = False
     project_cleanup_failed = False
     has_project_target = False
     for directory, settings_path in targets:
@@ -822,6 +832,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         has_project_target = has_project_target or directory == "."
         if hook_result.get("error"):
             result["errors"].append(hook_result["error"])
+            global_cleanup_failed = global_cleanup_failed or directory != "."
             project_cleanup_failed = project_cleanup_failed or directory == "."
 
     if has_project_target and not project_cleanup_failed:
@@ -841,7 +852,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     except OSError:
         pass
 
-    if scope in ("global", "all"):
+    if scope in ("global", "all") and not global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.
         try:
             _global_init_marker().touch()

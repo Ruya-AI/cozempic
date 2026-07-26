@@ -171,6 +171,7 @@ class TestRunUninstall(_Base):
         path.write_text("{broken json")
         result = cz_init.run_uninstall("global")
         self.assertTrue(result["errors"])
+        self.assertFalse(result["opt_out_set"])
 
         from cozempic import cli
         output = io.StringIO()

@@ -88,6 +88,15 @@ class TestResolveAndBake(unittest.TestCase):
             self.assertIn("JSON object", cz.wire_hooks(tmp)["error"])
             self.assertIn("JSON object", cz.uninstall_hooks(tmp)["error"])
 
+    def test_wire_hooks_reports_non_dict_top_level_hooks_as_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": "broken"}')
+            result = cz.wire_hooks(tmp)
+            self.assertTrue(result["repaired"])
+            self.assertIsInstance(json.loads(path.read_text())["hooks"], dict)
+
     def test_null_hook_containers_are_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".claude" / "settings.json"
