@@ -1064,11 +1064,13 @@ def remove_synced_memory(cwd: str = "") -> bool:
         removed = True
     index_path = mem_dir / "MEMORY.md"
     if index_path.exists():
+        # Remove ONLY the index entry _update_memory_index generates (matched by
+        # its marker), never a user-authored line that merely mentions the file.
+        marker = "[Cozempic Behavioral Digest](cozempic_digest.md)"
         content = index_path.read_text(encoding="utf-8")
-        if "cozempic_digest.md" in content:
+        if marker in content:
             lines = [
-                line for line in content.splitlines()
-                if "cozempic_digest.md" not in line
+                line for line in content.splitlines() if marker not in line
             ]
             new_content = "\n".join(lines)
             if content.endswith("\n"):
