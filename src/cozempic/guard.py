@@ -2667,7 +2667,7 @@ def _open_guard_log(log_file: Path):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(log_file), flags, 0o600)
     try:
-        return os.fdopen(fd, "a", encoding="utf-8")
+        return os.fdopen(fd, "a", encoding="utf-8", errors="surrogateescape")
     except BaseException:
         os.close(fd)
         raise

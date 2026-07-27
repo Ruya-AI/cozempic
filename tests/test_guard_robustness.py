@@ -12,6 +12,18 @@ class TestGuardSignalHandling(unittest.TestCase):
         self.assertTrue(hasattr(signal, 'SIGTERM'))
 
 
+class TestGuardLogEncoding(unittest.TestCase):
+    def test_guard_log_preserves_surrogateescaped_path_bytes(self):
+        from cozempic.guard import _open_guard_log
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "guard.log"
+            with _open_guard_log(log_path) as log:
+                log.write("CWD: bad" + chr(0xDCFF) + "\n")
+
+            self.assertEqual(log_path.read_bytes(), b"CWD: bad\xff\n")
+
+
 class TestBackupCleanupIntegration(unittest.TestCase):
     def test_cleanup_old_backups_importable(self):
         """cleanup_old_backups can be imported from session module."""
