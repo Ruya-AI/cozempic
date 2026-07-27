@@ -1277,6 +1277,8 @@ def cmd_uninstall(args):
         print(f"  Slash command: ERROR — {sc['error']}")
     if result.get("purged"):
         print(f"  Purged data: {', '.join(result['purged'])}")
+    elif result.get("purge_skipped"):
+        print("  Purge skipped due to a hook/settings error above; fix it, then re-run with --purge.")
     reported_errors = {h.get("error") for h in result["hooks"] if h.get("error")}
     if sc and sc.get("error"):
         reported_errors.add(sc["error"])

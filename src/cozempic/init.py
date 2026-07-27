@@ -859,7 +859,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         raise ValueError(f"Unknown uninstall scope: {scope}")
     targets = targets_by_scope[scope]
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
-                    "remind_counter_removed": False, "purged": [], "opt_out_set": False,
+                    "remind_counter_removed": False, "purged": [], "purge_skipped": False,
+                    "opt_out_set": False,
                     "project_opt_out_set": False,
                     "errors": []}
 
@@ -908,7 +909,9 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         except OSError as exc:
             result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
 
-    if purge and scope in ("global", "all") and not global_cleanup_failed:
+    if purge and scope in ("global", "all") and global_cleanup_failed:
+        result["purge_skipped"] = True
+    elif purge and scope in ("global", "all"):
         import shutil as _sh
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             try:

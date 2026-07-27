@@ -163,6 +163,7 @@ class TestRunUninstall(_Base):
 
         self.assertTrue(result["errors"])
         self.assertEqual(result["purged"], [])
+        self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
     def test_uninstall_write_failure_is_reported(self):
@@ -196,6 +197,18 @@ class TestRunUninstall(_Base):
         with self.assertRaises(SystemExit), patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
             cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
         self.assertIn("ERROR: Purge failed", output.getvalue())
+
+    def test_cmd_uninstall_reports_skipped_purge(self):
+        from cozempic import cli
+
+        result = {
+            "hooks": [], "slash_command": None, "purged": [], "purge_skipped": True,
+            "opt_out_set": False, "errors": ["could not parse settings"],
+        }
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
+        self.assertIn("Purge skipped due to a hook/settings error", output.getvalue())
 
     def test_slash_backup_failure_is_reported_without_removal(self):
         slash = self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
