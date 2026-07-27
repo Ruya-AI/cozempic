@@ -273,7 +273,9 @@ def _is_live_guard_pid(pid: int) -> bool:
 
     try:
         _os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
         return False
     from .guard import _is_cozempic_guard_process
     return _is_cozempic_guard_process(pid)
@@ -352,6 +354,7 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
     live_slugs: set[str] = set()
 
     from .spawn_lock import _parse_pidfile_pid
+    from .spawn_lock import pidfile_is_fresh
     for pid_path in _glob_tmp_artifacts("cozempic_guard_*.pid"):
         if _is_protected_tmp_artifact(pid_path.name):
             continue
@@ -360,8 +363,10 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
         # pidfile formats (PR #93 item #5). Returns 0 on garble → we
         # classify as stale.
         pid = _parse_pidfile_pid(pid_path)
-        if pid <= 0:
+        if pid <= 0 and not pidfile_is_fresh(pid_path):
             stale_pids.append(pid_path)
+            continue
+        if pid <= 0:
             continue
         if _is_live_guard_pid(pid):
             live_slugs.add(slug)

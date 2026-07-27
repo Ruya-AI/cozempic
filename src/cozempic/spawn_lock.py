@@ -137,6 +137,17 @@ def _read_fresh_window_seconds() -> float:
 _FRESH_PIDFILE_SECONDS = _read_fresh_window_seconds()
 
 
+def pidfile_is_fresh(pid_file: Path) -> bool:
+    """Return whether a PID claim is still within its protected handoff window."""
+    try:
+        mtime = os.stat(pid_file, follow_symlinks=False).st_mtime
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return (time.time() - mtime) < _FRESH_PIDFILE_SECONDS
+
+
 # Initiator strings — mirrored from ``reload_lock.INIT_*`` conventions
 # for operator-triage parity. The parent-vs-daemon split is the only
 # meaningful distinction for spawn-claim payloads:
@@ -452,15 +463,7 @@ class DaemonSpawnClaim:
         Other OSErrors (ENOENT — file vanished between exists() and
         stat() — most likely) return False so we can re-claim cleanly.
         """
-        try:
-            mtime = os.stat(self.pid_file, follow_symlinks=False).st_mtime
-        except PermissionError:
-            # EACCES: can't read mtime → assume fresh (don't race a
-            # potentially-live peer claim).
-            return True
-        except OSError:
-            return False
-        return (time.time() - mtime) < _FRESH_PIDFILE_SECONDS
+        return pidfile_is_fresh(self.pid_file)
 
     def _read_existing_pid(self) -> int:
         """Best-effort read of the PID currently in the file.

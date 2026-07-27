@@ -1468,20 +1468,20 @@ class TestR3_1_PlaceholderPidZeroNeverSignaled(unittest.TestCase):
             f"before the liveness probe.",
         )
 
-    def test_returns_none_and_unlinks_on_placeholder(self):
-        """Positive regression: even after the fix, a placeholder-valued pidfile
-        must still resolve to `None` and be cleaned up."""
+    def test_returns_none_without_unlinking_placeholder(self):
+        """The read-only probe must leave cleanup to DaemonSpawnClaim."""
         from cozempic.guard import _is_guard_running_for_session
 
-        # No mocks — exercise the real path. Must return None AND clean up.
+        # No mocks — exercise the real path. A concurrent claimant may create
+        # the path between the probe and cleanup, so this helper must not unlink.
         result = _is_guard_running_for_session(self.session_id)
         self.assertIsNone(
             result,
             f"placeholder pidfile not resolved to None: {result!r}",
         )
-        self.assertFalse(
+        self.assertTrue(
             self.pid_path.exists(),
-            "placeholder pidfile must be unlinked after read",
+            "read-only probe must not unlink a placeholder pidfile",
         )
 
 

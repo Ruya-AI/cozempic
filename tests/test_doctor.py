@@ -486,8 +486,17 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         """Non-integer .pid file content must not crash — treat as stale."""
         pid_path = self.tmpdir / "cozempic_guard_badcontent-07.pid"
         pid_path.write_text("not-an-integer")
+        stale_at = time.time() - 61
+        os.utime(pid_path, (stale_at, stale_at))
         result = check_stale_tmp_artifacts()
         self.assertIn(result.status, ("warning", "issue"))
+
+    def test_fresh_empty_pidfile_is_not_reclaimed(self):
+        pid_path = self.tmpdir / "cozempic_guard_fresh-empty.pid"
+        pid_path.touch()
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        fix_stale_tmp_artifacts()
+        self.assertTrue(pid_path.exists())
 
     def test_threshold_escalation_to_issue(self):
         """Many stale artifacts escalate status from warning to issue."""
