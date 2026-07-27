@@ -1064,13 +1064,24 @@ def remove_synced_memory(cwd: str = "") -> bool:
         removed = True
     index_path = mem_dir / "MEMORY.md"
     if index_path.exists():
-        # Remove ONLY the index entry _update_memory_index generates (matched by
-        # its marker), never a user-authored line that merely mentions the file.
+        # Remove ONLY the index entry _update_memory_index generates: a list
+        # item whose LEADING element is the digest link ("- [Cozempic
+        # Behavioral Digest](cozempic_digest.md) — ..."). Matching the line
+        # shape (not the link as a substring) preserves user-authored lines
+        # that merely mention or embed the link in their own text, while
+        # still catching entries written by older versions with a different
+        # trailing description.
         marker = "[Cozempic Behavioral Digest](cozempic_digest.md)"
         content = index_path.read_text(encoding="utf-8")
-        if marker in content:
+
+        def _is_generated_entry(line: str) -> bool:
+            stripped = line.strip()
+            return stripped.startswith(f"- {marker}") or stripped == marker
+
+        if any(_is_generated_entry(line) for line in content.splitlines()):
             lines = [
-                line for line in content.splitlines() if marker not in line
+                line for line in content.splitlines()
+                if not _is_generated_entry(line)
             ]
             new_content = "\n".join(lines)
             if content.endswith("\n"):

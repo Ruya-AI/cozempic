@@ -98,6 +98,8 @@ class TestWritePathsGated(unittest.TestCase):
                 "# Memory\n\n- [Other](other.md) — keep me\n"
                 "- [Cozempic Behavioral Digest](cozempic_digest.md) — rules\n"
                 "- user note: why cozempic_digest.md was disabled — keep me too\n"
+                "- my pin of [Cozempic Behavioral Digest](cozempic_digest.md)"
+                " for review — keep me three\n"
             )
             with patch.dict(
                 os.environ, {"HOME": home, "COZEMPIC_NO_DIGEST": "1"}
@@ -111,11 +113,14 @@ class TestWritePathsGated(unittest.TestCase):
             self.assertFalse((memdir / "cozempic_digest.md").exists())
             index = (memdir / "MEMORY.md").read_text()
             self.assertNotIn(
-                "[Cozempic Behavioral Digest](cozempic_digest.md)", index
+                "- [Cozempic Behavioral Digest](cozempic_digest.md) — rules",
+                index,
             )
             self.assertIn("keep me", index)
-            # User-authored lines survive even when they mention the filename.
+            # User-authored lines survive even when they mention the filename
+            # or embed the exact link inside their own text.
             self.assertIn("keep me too", index)
+            self.assertIn("keep me three", index)
 
     def test_remove_synced_memory_noop_when_nothing_synced(self):
         with tempfile.TemporaryDirectory() as home:
