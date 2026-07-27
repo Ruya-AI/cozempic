@@ -849,10 +849,12 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     opt-out; successful project/all cleanup similarly leaves the project opt-out.
     Explicit `cozempic init` still works in either case.
     """
+    global_paths = _global_settings_paths()
+    managed_global_path = global_paths[0]
     targets_by_scope = {
-        "global": [(str(Path.home()), path) for path in _global_settings_paths()],
+        "global": [(str(Path.home()), path) for path in global_paths],
         "project": [(".", path) for path in _project_settings_paths(".")],
-        "all": [(str(Path.home()), path) for path in _global_settings_paths()]
+        "all": [(str(Path.home()), path) for path in global_paths]
         + [(".", path) for path in _project_settings_paths(".")],
     }
     if scope not in targets_by_scope:
@@ -865,6 +867,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                     "errors": []}
 
     global_cleanup_failed = False
+    managed_global_cleanup_failed = False
     project_cleanup_failed = False
     has_project_target = False
     for directory, settings_path in targets:
@@ -874,6 +877,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         if hook_result.get("error"):
             result["errors"].append(hook_result["error"])
             global_cleanup_failed = global_cleanup_failed or directory != "."
+            managed_global_cleanup_failed = managed_global_cleanup_failed or settings_path == managed_global_path
             project_cleanup_failed = project_cleanup_failed or directory == "."
 
     if has_project_target and not project_cleanup_failed:
@@ -899,7 +903,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         except OSError as exc:
             result["errors"].append(f"Could not remove remind counter: {exc}")
 
-    if scope in ("global", "all") and not global_cleanup_failed:
+    if scope in ("global", "all") and not managed_global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.
         try:
             marker = _global_init_marker()
