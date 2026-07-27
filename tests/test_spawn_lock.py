@@ -824,14 +824,30 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
 class TestDaemonSpawnLockUnit(unittest.TestCase):
     """Direct contract tests on the spawn_lock module."""
 
+    def setUp(self):
+        from cozempic.guard import _pid_file_for_session
+
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        for path in self.paths:
+            path.unlink(missing_ok=True)
+
     def test_lock_yields_path(self):
         """Post-V4-rework: the spawn claim writes to the .pid file directly
         (the PID file IS the lock, no separate sentinel). This pins that
         contract."""
         from cozempic.spawn_lock import daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00deadbeef"
-        with daemon_spawn_lock(sid) as lock_path:
+        with daemon_spawn_lock(self.session_id) as lock_path:
             self.assertIsInstance(lock_path, Path)
             self.assertIn("cozempic_guard_", lock_path.name)
             self.assertTrue(
@@ -843,21 +859,19 @@ class TestDaemonSpawnLockUnit(unittest.TestCase):
         """A second concurrent acquire MUST raise DaemonAlreadyStarting."""
         from cozempic.spawn_lock import DaemonAlreadyStarting, daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00cafebabe"
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             with self.assertRaises(DaemonAlreadyStarting):
-                with daemon_spawn_lock(sid):
+                with daemon_spawn_lock(self.session_id):
                     pass
 
     def test_release_allows_reacquire(self):
         """After the first lock exits, a fresh acquire succeeds."""
         from cozempic.spawn_lock import daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00f00dbabe"
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             pass
         # Should not raise
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             pass
 
 

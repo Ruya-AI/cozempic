@@ -37,8 +37,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
-import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,24 +133,27 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
     O_CREAT|O_EXCL claim path holds across process boundaries.
     """
 
-    # Must match _SESSION_ID_RE = ^[0-9a-f][0-9a-f-]{11,}$  (hex chars + dashes only)
-    SESSION_ID = "abcd1234-5678-9abc-def0-2026051811aa"
     ITERATIONS = 50
 
     def setUp(self):
         # Compute and pre-clean the pidfile + log file for our session.
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
         self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def _race_once(self) -> list[dict]:
         """Spawn two processes, sync at a barrier, collect results."""
@@ -168,7 +171,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
         procs = [
             ctx.Process(
                 target=_race_worker,
-                args=(barrier, result_queue, self.SESSION_ID, cwd, i),
+                args=(barrier, result_queue, self.session_id, cwd, i),
                 name=f"race-child-{i}",
             )
             for i in range(2)
