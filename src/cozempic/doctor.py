@@ -271,6 +271,8 @@ def _is_live_guard_pid(pid: int) -> bool:
     """
     import os as _os
 
+    if pid <= 0:
+        return False
     try:
         _os.kill(pid, 0)
     except PermissionError:
@@ -373,7 +375,7 @@ def _classify_tmp_artifacts() -> tuple[list[Path], list[Path], list[Path], list[
         else:
             stale_pids.append(pid_path)
     stale_temps = [
-        path for path in _glob_tmp_artifacts("cozempic_guard_*.pid.tmp")
+        path for path in _glob_tmp_artifacts("cozempic_guard_*.pid*.tmp")
         if not _is_protected_tmp_artifact(path.name)
         and _is_stale_tmp_artifact(path, _DOCTOR_PID_TMP_STALE_SECONDS)
     ]
@@ -444,7 +446,15 @@ def check_stale_tmp_artifacts() -> CheckResult:
     if orphan_locks:
         parts.append(f"{len(orphan_locks)} orphan .lock file(s)")
     if orphan_markers:
-        parts.append(f"{len(orphan_markers)} orphan guard marker(s)")
+        from .spawn_lock import _parse_pidfile_pid
+
+        orphan_pids = sorted(
+            {pid for path in orphan_markers if (pid := _parse_pidfile_pid(path)) > 0}
+        )
+        marker_detail = f"{len(orphan_markers)} orphan guard marker(s)"
+        if orphan_pids:
+            marker_detail += f" (PIDs: {', '.join(map(str, orphan_pids))})"
+        parts.append(marker_detail)
     detail = ", ".join(parts)
 
     return CheckResult(

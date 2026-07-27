@@ -2659,6 +2659,19 @@ def _guard_tmp_root() -> Path:
     return Path("/tmp")
 
 
+def _open_guard_log(log_file: Path):
+    """Open a guard log without following a planted symlink."""
+    flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(log_file), flags, 0o600)
+    try:
+        return os.fdopen(fd, "a", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 # ── Cross-respawn reload-rate ledger (regrow-loop / reload-storm backstop) ────
 # A confirmed prune that frees real bytes but leaves the session destined to
 # re-hit the HARD threshold reloads, exits the daemon, and a fresh guard
@@ -3385,7 +3398,7 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
             return None
         return pid
     except PermissionError:
-        return pid
+        return pid if _is_cozempic_guard_process(pid) else None
     except (ValueError, ProcessLookupError):
         return None
     except OSError:
@@ -3632,12 +3645,12 @@ def start_guard_daemon(
             # mid-spawn (race with operator cleanup, /tmp eviction, etc.)
             # recreate it once and retry the open.
             try:
-                lf = open(log_file, "a", encoding="utf-8")
+                lf = _open_guard_log(log_file)
             except FileNotFoundError:
                 log_dir = os.path.dirname(str(log_file))
                 if log_dir:
                     os.makedirs(log_dir, exist_ok=True)
-                lf = open(log_file, "a", encoding="utf-8")
+                lf = _open_guard_log(log_file)
 
             try:
                 from datetime import datetime

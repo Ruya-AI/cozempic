@@ -243,6 +243,16 @@ class TestG3_IsGuardRunningForSessionVerifiesPidOwnership(unittest.TestCase):
                 "Failed to report a legitimate running guard PID",
             )
 
+    def test_permission_error_still_verifies_pid_ownership(self):
+        """An inaccessible recycled PID must not suppress guard startup."""
+        from cozempic.guard import _is_guard_running_for_session
+
+        with (
+            patch("cozempic.guard.os.kill", side_effect=PermissionError),
+            patch("cozempic.guard._is_cozempic_guard_process", return_value=False),
+        ):
+            self.assertIsNone(_is_guard_running_for_session(self.session_id))
+
 
 # ---------------------------------------------------------------------------
 # BUG-G4 — PID file creation must be atomic (no TOCTOU race)

@@ -698,6 +698,26 @@ class TestSymlinkDefense(unittest.TestCase):
                 pass
         self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
 
+    def test_log_write_rejects_symlink(self):
+        """The deterministic guard log path must not follow a symlink."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.guard import start_guard_daemon
+
+        os.symlink(str(self.victim), str(self.log_path))
+        with (
+            patch("cozempic.guard.find_claude_pid", return_value=12345),
+            patch("cozempic.guard._cleanup_legacy_pid"),
+        ):
+            result = start_guard_daemon(
+                cwd=str(self.tmpdir),
+                session_id=self.SESSION_ID,
+                threshold_tokens=1000,
+            )
+
+        self.assertFalse(result["started"])
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
+
     def test_pidfile_parse_rejects_symlink(self):
         """PID readers must not follow a symlink planted at the claim path."""
         if not hasattr(os, "O_NOFOLLOW"):
@@ -729,27 +749,27 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
         self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
 
     def test_filenotfounderror_recovery(self):
-        """First open(log_file) raises FileNotFoundError, second succeeds."""
+        """First log open raises FileNotFoundError, second succeeds."""
+        from cozempic import guard
         from cozempic.guard import start_guard_daemon
 
-        # We track open() calls on the log_file path; the FIRST call raises,
-        # the rest are passed through. Mock os.makedirs to confirm the retry
-        # path is taken.
-        real_open = open
+        # We track the safe log opener; the FIRST call raises, the rest pass
+        # through. Mock os.makedirs to confirm the retry path is taken.
+        real_open = guard._open_guard_log
         call_state = {"n": 0}
 
-        def fake_open(path, *args, **kwargs):
+        def fake_open(path):
             if str(path) == str(self.log_path):
                 call_state["n"] += 1
                 if call_state["n"] == 1:
                     raise FileNotFoundError(2, "No such file or directory", str(path))
-            return real_open(path, *args, **kwargs)
+            return real_open(path)
 
         with (
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
             patch("cozempic.guard.find_claude_pid", return_value=12345),
             patch("cozempic.guard._cleanup_legacy_pid"),
-            patch("builtins.open", side_effect=fake_open),
+            patch("cozempic.guard._open_guard_log", side_effect=fake_open),
             patch("cozempic.guard.os.makedirs") as mock_makedirs,
         ):
             mock_popen.return_value.pid = 77777
@@ -766,7 +786,7 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
         self.assertEqual(
             call_state["n"],
             2,
-            "Expected exactly 2 open() calls on log file (1 fail + 1 retry); "
+            "Expected exactly 2 log-open calls (1 fail + 1 retry); "
             f"got {call_state['n']}.",
         )
         mock_makedirs.assert_called_once()

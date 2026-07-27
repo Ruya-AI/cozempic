@@ -413,6 +413,20 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         fix_stale_tmp_artifacts()
         self.assertFalse(temp_path.exists())
 
+    def test_randomized_pid_tmp_is_reported_and_removed(self):
+        from cozempic.doctor import _DOCTOR_PID_TMP_STALE_SECONDS
+
+        fd, tmp_name = tempfile.mkstemp(
+            prefix="cozempic_guard_staletmp-04.pid.", suffix=".tmp", dir=self.tmpdir
+        )
+        os.close(fd)
+        temp_path = Path(tmp_name)
+        stale_at = time.time() - _DOCTOR_PID_TMP_STALE_SECONDS - 1
+        os.utime(temp_path, (stale_at, stale_at))
+        self.assertIn("pid.tmp", check_stale_tmp_artifacts().message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(temp_path.exists())
+
     def test_recent_pid_tmp_is_not_reclaimed_during_doctor_fix(self):
         temp_path = self.tmpdir / "cozempic_guard_slowspawn-04.pid.tmp"
         temp_path.write_text("reserved\n")
@@ -451,9 +465,16 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         marker = self.tmpdir / "cozempic_guard_orphan-06.orphan"
         marker.write_text("999999\n")
         with patch("cozempic.doctor._is_live_guard_pid", return_value=False):
-            self.assertIn("orphan guard marker", check_stale_tmp_artifacts().message)
+            self.assertIn("PIDs: 999999", check_stale_tmp_artifacts().message)
             fix_stale_tmp_artifacts()
         self.assertFalse(marker.exists())
+
+    def test_zero_pid_is_not_probed_as_a_process_group(self):
+        from cozempic.doctor import _is_live_guard_pid
+
+        with patch("cozempic.doctor.os.kill") as kill:
+            self.assertFalse(_is_live_guard_pid(0))
+        kill.assert_not_called()
 
     def test_orphan_marker_is_preserved_while_guard_is_live(self):
         marker = self.tmpdir / "cozempic_guard_orphan-07.orphan"
