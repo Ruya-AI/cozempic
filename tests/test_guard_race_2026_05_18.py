@@ -128,15 +128,18 @@ def _race_worker(
 def _reap_processes(procs) -> list[str]:
     lingering = []
     for proc in procs:
-        proc.join(timeout=5.0)
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=2.0)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=2.0)
-        if proc.is_alive():
-            lingering.append(proc.name)
+        try:
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                lingering.append(proc.name)
+        except Exception as exc:
+            lingering.append(f"{proc.name}: {exc!r}")
     return lingering
 
 

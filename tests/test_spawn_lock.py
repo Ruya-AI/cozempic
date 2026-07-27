@@ -106,15 +106,18 @@ def _stale_claim_worker(barrier_handle, result_queue, pid_file: str, worker_inde
 def _reap_processes(procs) -> list[str]:
     lingering = []
     for proc in procs:
-        proc.join(timeout=5.0)
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=2.0)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=2.0)
-        if proc.is_alive():
-            lingering.append(proc.name)
+        try:
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                lingering.append(proc.name)
+        except Exception as exc:
+            lingering.append(f"{proc.name}: {exc!r}")
     return lingering
 
 
@@ -271,6 +274,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                         "already_count": len(already),
                         "undefined_count": len(undefined),
                         "started_workers": [r.get("worker") for r in started],
+                        "lingering": lingering,
                         "first_undefined": undefined[0] if undefined else None,
                     }
                 )
@@ -606,8 +610,15 @@ class TestStaleClaimContention(unittest.TestCase):
                 ]
                 for proc in procs:
                     proc.start()
-                results = [queue.get(timeout=10.0) for _ in procs]
-                lingering = _reap_processes(procs)
+                results = []
+                try:
+                    for _ in procs:
+                        try:
+                            results.append(queue.get(timeout=10.0))
+                        except Exception as exc:
+                            results.append({"error": repr(exc)})
+                finally:
+                    lingering = _reap_processes(procs)
                 self.assertFalse(lingering, f"workers survived cleanup: {lingering}")
                 self.assertFalse([result for result in results if "error" in result], results)
                 self.assertEqual(sum(result["claimed"] for result in results), 1, results)
