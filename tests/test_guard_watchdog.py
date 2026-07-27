@@ -15,6 +15,7 @@ assumed it was — exactly the synthetic-vs-real trap). The true signal is
 futile-churn DOMINANCE, exit or no exit.
 """
 
+import os
 import signal
 import unittest
 from pathlib import Path
@@ -193,6 +194,17 @@ class TestScanGuardLogs(unittest.TestCase):
         target.write_text("4242", encoding="utf-8")
         (self.dir / "cozempic_guard_symlink.pid").symlink_to(target)
         self.assertIsNone(scan_guard_logs(self.dir)[0].pid)
+
+    def test_symlinked_log_is_not_read(self):
+        target = self.dir / "target.log"
+        target.write_text(_respawn_storm(), encoding="utf-8")
+        (self.dir / "cozempic_guard_symlink.log").symlink_to(target)
+        self.assertEqual(scan_guard_logs(self.dir), [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
+    def test_fifo_log_is_skipped_without_blocking(self):
+        os.mkfifo(self.dir / "cozempic_guard_fifo.log")
+        self.assertEqual(scan_guard_logs(self.dir), [])
 
     def test_healthy_not_in_hits(self):
         self._write("ccc", _daemon_start() + "".join(_good_cycle(n=i) for i in range(40)), pid=123)
