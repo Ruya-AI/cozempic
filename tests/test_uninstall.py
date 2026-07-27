@@ -300,7 +300,7 @@ class TestPreviewAndDryRun(_Base):
         from cozempic import cli
 
         output = io.StringIO()
-        with patch("sys.stdout", output), patch.object(cz_init, "run_uninstall") as run_uninstall:
+        with self.assertRaisesRegex(SystemExit, "2"), patch("sys.stdout", output), patch.object(cz_init, "run_uninstall") as run_uninstall:
             cli.cmd_uninstall(argparse.Namespace(project=True, all=False, purge=True, dry_run=False))
         self.assertIn("only applies to global data", output.getvalue())
         run_uninstall.assert_not_called()
@@ -406,7 +406,7 @@ class TestPreviewAndDryRun(_Base):
             "slash_error": "Could not read slash command: permission denied",
         }
         output = io.StringIO()
-        with patch("cozempic.init.preview_uninstall", return_value=preview), patch("sys.stdout", output):
+        with self.assertRaises(SystemExit), patch("cozempic.init.preview_uninstall", return_value=preview), patch("sys.stdout", output):
             cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=True))
         text = output.getvalue()
         self.assertIn("Hooks: ERROR — invalid settings", text)

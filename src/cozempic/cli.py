@@ -1222,7 +1222,7 @@ def cmd_uninstall(args):
 
     if purge and scope == "project":
         print("  ERROR: --purge only applies to global data; omit --project or use --all.\n")
-        return
+        raise SystemExit(2)
 
     if getattr(args, "dry_run", False):
         prev = preview_uninstall(scope, purge)
@@ -1243,6 +1243,8 @@ def cmd_uninstall(args):
         if purge:
             print(f"    Purge data: {', '.join(prev['purge_data']) or '(none)'}")
         print()
+        if prev["hook_errors"] or prev.get("slash_error"):
+            raise SystemExit(1)
         return
 
     if purge:
