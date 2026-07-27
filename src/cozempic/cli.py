@@ -1688,13 +1688,21 @@ def _digest_session(args):
 
 def cmd_digest(args):
     from .digest import (
-        clear_digest_store, flush_digest,
+        clear_digest_store, digest_enabled, flush_digest,
         load_digest_store, recover_digest,
         save_digest_store, show_digest, update_digest,
     )
     from .session import load_messages, save_messages
 
     action = getattr(args, "digest_action", "show") or "show"
+
+    # Opt-out gate: every mutating action no-ops when COZEMPIC_NO_DIGEST is set.
+    # `show` and `clear` stay available so previously written state can still be
+    # inspected and removed. The library write paths are gated too — this check
+    # only exists to tell the CLI user why nothing happened.
+    if action in ("update", "flush", "inject", "recover") and not digest_enabled():
+        print("Behavioral digest disabled (COZEMPIC_NO_DIGEST).")
+        return
 
     if action == "show":
         print(show_digest())

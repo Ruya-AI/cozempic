@@ -362,6 +362,7 @@ After `cozempic init`, these hooks are wired automatically:
 | `COZEMPIC_NO_AUTO_UPDATE` | off | Disable all automatic upgrades (honored by the Python updater, SessionStart hook, and npm installer). Not generally recommended — Claude Code ships frequent changes and cozempic updates keep strategies compatible with the latest session format. See [Auto-update & how to control it](#auto-update--how-to-control-it). |
 | `COZEMPIC_PIN` | unset | Hold a reviewed version (e.g. `1.8.30`): disables auto-update on both paths and warns on drift instead of auto-installing. For users who want the protection on a version they've vetted. |
 | `COZEMPIC_NO_TELEMETRY` | off | Skip anonymous usage counters. Cozempic pings a simple counter on each prune — no personal data, session content, or identifiable information is sent. Helps us prioritize development. |
+| `COZEMPIC_NO_DIGEST` | off | Disable the behavioral digest entirely: no correction extraction from transcripts, no `cozempic_digest.md`, no sync into Claude Code's memory directory (gates the library write paths, so the hook-driven `digest inject`/`digest flush` calls become no-ops). `digest show` and `digest clear` keep working for inspection and cleanup. |
 
 ## Contributing
 

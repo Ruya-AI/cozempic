@@ -48,6 +48,24 @@ DECAY_DAYS = 30  # Universal decay period (MemoryArena 2602.16313)
 # Accepts: 1/true/yes/on (case-insensitive). Default off.
 _DEBUG = parse_env_bool("COZEMPIC_DEBUG", default=False)
 
+_OPT_OUT_ENV = "COZEMPIC_NO_DIGEST"
+
+
+def digest_enabled() -> bool:
+    """False if the user opted out via ``COZEMPIC_NO_DIGEST``.
+
+    The behavioral digest is ON by default (``COZEMPIC_NO_DIGEST`` unset or
+    empty). Same truth table as ``COZEMPIC_NO_RECEIPTS``:
+      * unset / empty / whitespace-only  → True  (digest ON — treated as absent)
+      * explicit falsy: 0, false, no, off → True  (digest ON — "no, don't disable")
+      * explicit truthy: 1, true, yes, on → False (digest OFF — opted out)
+
+    Gates every write path (extraction, store save, memdir sync). Read paths
+    (``digest show``) and explicit cleanup (``digest clear``) stay available so
+    an opted-out user can still inspect and remove previously written state.
+    """
+    return not parse_env_bool(_OPT_OUT_ENV, default=False)
+
 
 def _debug(msg: str) -> None:
     if _DEBUG or parse_env_bool("COZEMPIC_DEBUG", default=False, warn=False):
@@ -801,6 +819,8 @@ def update_digest(
 
     Returns (new_rules, upvoted, rejected).
     """
+    if not digest_enabled():
+        return 0, 0, 0
     store = load_digest_store(project_dir)
     store.session_id = session_id
 
@@ -960,6 +980,8 @@ def sync_to_memdir(store: DigestStore, cwd: str = "") -> int:
 
     Returns number of rules synced.
     """
+    if not digest_enabled():
+        return 0
     # Read-only on the dir: we sync into Claude Code's memory dir only once it
     # exists (Claude Code owns/creates it). We never create it ourselves, so a
     # brand-new folder is not proactively populated with the global digest.
@@ -1035,6 +1057,8 @@ def flush_digest(
     Called by PreCompact and Stop hooks to capture corrections before loss.
     Returns (added, upvoted, rejected).
     """
+    if not digest_enabled():
+        return 0, 0, 0
     added, upvoted, rejected = update_digest(
         messages, since_turn=0, project_dir=project_dir, session_id=session_id,
     )
@@ -1055,6 +1079,8 @@ def recover_digest(
     but re-sync ensures any newly promoted rules are included.
     Returns number of rules synced.
     """
+    if not digest_enabled():
+        return 0
     store = load_digest_store(project_dir)
     if store.is_empty():
         return 0
