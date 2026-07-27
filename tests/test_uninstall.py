@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -225,6 +226,25 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_purge_is_skipped_when_remind_counter_cleanup_fails(self):
+        counter = self.home / ".cozempic_remind_counter"
+        counter.write_text("3")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        original_unlink = Path.unlink
+
+        def fail_counter_unlink(path, *args, **kwargs):
+            if path == counter:
+                raise OSError("permission denied")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", autospec=True, side_effect=fail_counter_unlink):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
     def test_all_purge_is_skipped_when_project_cleanup_fails(self):
         project = self.home / "project"
         local_settings = project / ".claude" / "settings.local.json"
@@ -408,6 +428,23 @@ class TestRunUninstall(_Base):
         with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
             res = cz_init.run_uninstall("global")
         self.assertIn("Could not remove remind counter: permission denied", res["errors"])
+
+    def test_backup_settings_avoids_same_second_collisions(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"before": true}')
+        fixed_time = datetime(2026, 7, 27, 9, 0, 0)
+
+        with patch.object(cz_init, "datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_time
+            first = cz_init._backup_settings(path)
+            path.write_text('{"after": true}')
+            second = cz_init._backup_settings(path)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.read_text(), '{"before": true}')
+        self.assertEqual(second.read_text(), '{"after": true}')
+        self.assertTrue(first.name.startswith("settings.json.20260727_090000"))
 
     def test_surfaces_malformed_global_settings(self):
         path = self.home / ".claude" / "settings.json"

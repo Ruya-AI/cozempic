@@ -268,7 +268,11 @@ def _backup_settings(path: Path) -> Path | None:
     if not path.exists():
         return None
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = path.with_suffix(f".{ts}.bak")
+    backup = path.with_name(f"{path.name}.{ts}.bak")
+    suffix = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.{ts}.{suffix}.bak")
+        suffix += 1
     shutil.copy2(path, backup)
     return backup
 
@@ -903,7 +907,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
             result["errors"].append(result["slash_command"]["error"])
             global_cleanup_failed = True
 
-    # Cleanup the nudge counter (cosmetic, safe).
+    # Remove the global nudge counter before a purge.
     if scope in ("global", "all"):
         try:
             if _REMIND_COUNTER.exists():
@@ -911,6 +915,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                 result["remind_counter_removed"] = True
         except OSError as exc:
             result["errors"].append(f"Could not remove remind counter: {exc}")
+            global_cleanup_failed = True
 
     if scope in ("global", "all") and not managed_global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.
