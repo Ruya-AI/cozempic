@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -105,19 +106,23 @@ def _stale_claim_worker(barrier_handle, result_queue, pid_file: str, worker_inde
 class TestThreeProcessContention(unittest.TestCase):
     """Three processes race for the same session — exactly ONE must win."""
 
-    SESSION_ID = "fade1234-5678-9abc-def0-2026051811cc"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.session_id = f"race3-{uuid.uuid4()}"
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_suffix(".reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_three_process_contention(self):
 
@@ -128,15 +133,15 @@ class TestThreeProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(ITERATIONS):
-            self.pid_path.unlink(missing_ok=True)
-            self.log_path.unlink(missing_ok=True)
+            for path in self.paths:
+                path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(N)
             queue = ctx.Queue()
             procs = [
                 ctx.Process(
                     target=_race_worker,
-                    args=(barrier, queue, self.SESSION_ID, cwd, i),
+                    args=(barrier, queue, self.session_id, cwd, i),
                     name=f"race-3-{i}",
                 )
                 for i in range(N)
@@ -185,22 +190,26 @@ class TestV4TenProcessContention(unittest.TestCase):
     gate for any change to spawn_lock.py or start_guard_daemon.
     """
 
-    SESSION_ID = "feedbeef-1234-5678-9abc-2026051811ff"
     N = 10
     ITERATIONS = 30
 
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.session_id = f"race10-{uuid.uuid4()}"
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_suffix(".reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_ten_process_contention_30x(self):
         ctx = mp.get_context("spawn")
@@ -208,15 +217,15 @@ class TestV4TenProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(self.ITERATIONS):
-            self.pid_path.unlink(missing_ok=True)
-            self.log_path.unlink(missing_ok=True)
+            for path in self.paths:
+                path.unlink(missing_ok=True)
 
             barrier = ctx.Barrier(self.N)
             queue = ctx.Queue()
             procs = [
                 ctx.Process(
                     target=_race_worker,
-                    args=(barrier, queue, self.SESSION_ID, cwd, i),
+                    args=(barrier, queue, self.session_id, cwd, i),
                     name=f"v4-{i}",
                 )
                 for i in range(self.N)
