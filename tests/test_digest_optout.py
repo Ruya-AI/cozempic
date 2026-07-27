@@ -13,6 +13,8 @@ from cozempic.digest import (
     digest_enabled,
     flush_digest,
     recover_digest,
+    remove_synced_memory,
+    save_digest_store,
     sync_to_memdir,
     update_digest,
 )
@@ -46,6 +48,12 @@ class TestDigestEnabledTruthTable(unittest.TestCase):
             with patch.dict(os.environ, {"COZEMPIC_NO_DIGEST": value}):
                 self.assertFalse(digest_enabled(), f"value={value!r}")
 
+    def test_unrecognized_nonempty_fails_closed(self):
+        """Ambiguous opt-out intent disables — same fail-safe as receipts."""
+        for value in ("disabled", "ture", "2", "please"):
+            with patch.dict(os.environ, {"COZEMPIC_NO_DIGEST": value}):
+                self.assertFalse(digest_enabled(), f"value={value!r}")
+
 
 class TestWritePathsGated(unittest.TestCase):
     def test_update_and_flush_return_zeros(self):
@@ -70,6 +78,46 @@ class TestWritePathsGated(unittest.TestCase):
                 ):
                     self.assertEqual(sync_to_memdir(store, cwd="/tmp"), 0)
             self.assertEqual(list(memdir.iterdir()), [])
+
+    def test_save_digest_store_gated(self):
+        """The store choke point must not write (covers migration-on-read)."""
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(
+                os.environ, {"HOME": home, "COZEMPIC_NO_DIGEST": "1"}
+            ):
+                save_digest_store(_store_with_active_rule())
+            self.assertFalse((Path(home) / ".cozempic").exists())
+
+    def test_disabling_removes_previously_synced_memory(self):
+        """Opt-out after a sync must delete the memory file and index line."""
+        with tempfile.TemporaryDirectory() as home:
+            memdir = Path(home) / ".claude" / "projects" / "-tmp" / "memory"
+            memdir.mkdir(parents=True)
+            (memdir / "cozempic_digest.md").write_text("stale rules")
+            (memdir / "MEMORY.md").write_text(
+                "# Memory\n\n- [Other](other.md) — keep me\n"
+                "- [Cozempic Behavioral Digest](cozempic_digest.md) — rules\n"
+            )
+            with patch.dict(
+                os.environ, {"HOME": home, "COZEMPIC_NO_DIGEST": "1"}
+            ):
+                with patch(
+                    "cozempic.digest._get_memdir", return_value=memdir
+                ):
+                    self.assertEqual(
+                        sync_to_memdir(_store_with_active_rule(), cwd="/tmp"), 0
+                    )
+            self.assertFalse((memdir / "cozempic_digest.md").exists())
+            index = (memdir / "MEMORY.md").read_text()
+            self.assertNotIn("cozempic_digest.md", index)
+            self.assertIn("keep me", index)
+
+    def test_remove_synced_memory_noop_when_nothing_synced(self):
+        with tempfile.TemporaryDirectory() as home:
+            memdir = Path(home) / ".claude" / "projects" / "-tmp" / "memory"
+            memdir.mkdir(parents=True)
+            with patch("cozempic.digest._get_memdir", return_value=memdir):
+                self.assertFalse(remove_synced_memory("/tmp"))
 
     def test_sync_to_memdir_writes_when_enabled(self):
         """Control case: same setup with the gate off must produce the file."""

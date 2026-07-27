@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from ._validation import parse_env_bool
+from ._validation import _BOOL_FALSE_TOKENS, parse_env_bool
 from .helpers import get_content_blocks, get_msg_type, text_of
 from .tokens import _is_sidechain
 from .types import Message
@@ -55,16 +55,28 @@ def digest_enabled() -> bool:
     """False if the user opted out via ``COZEMPIC_NO_DIGEST``.
 
     The behavioral digest is ON by default (``COZEMPIC_NO_DIGEST`` unset or
-    empty). Same truth table as ``COZEMPIC_NO_RECEIPTS``:
+    empty). Same truth table as ``COZEMPIC_NO_RECEIPTS`` (receipts_enabled),
+    including its fail-safe direction:
       * unset / empty / whitespace-only  → True  (digest ON — treated as absent)
       * explicit falsy: 0, false, no, off → True  (digest ON — "no, don't disable")
       * explicit truthy: 1, true, yes, on → False (digest OFF — opted out)
+      * any other non-empty value         → False (digest OFF — fail-safe:
+        ambiguous opt-out intent means the user tried to disable it)
 
     Gates every write path (extraction, store save, memdir sync). Read paths
     (``digest show``) and explicit cleanup (``digest clear``) stay available so
     an opted-out user can still inspect and remove previously written state.
     """
-    return not parse_env_bool(_OPT_OUT_ENV, default=False)
+    raw = os.environ.get(_OPT_OUT_ENV)
+    if raw is None:
+        return True
+    normalized = raw.strip().lower()
+    if not normalized:
+        return True
+    if normalized in _BOOL_FALSE_TOKENS:
+        return True
+    # Explicit truthy AND unrecognized non-empty both mean opt-out (fail-safe).
+    return False
 
 
 def _debug(msg: str) -> None:
@@ -731,7 +743,13 @@ def save_digest_store(store: DigestStore) -> None:
     so a mid-write crash leaves the target untouched, and re-reads the current
     on-disk state just before writing to merge in any rules added by a
     concurrent hook process (prevents PreCompact + Stop lost-update races).
+
+    No-ops under ``COZEMPIC_NO_DIGEST`` — this is the single choke point for
+    store persistence, so even indirect callers (e.g. a store migration
+    triggered by a read path) cannot write while the digest is disabled.
     """
+    if not digest_enabled():
+        return
     DIGEST_DIR.mkdir(parents=True, exist_ok=True)
 
     # Concurrent-save merge: if another process appended rules to the file
@@ -981,6 +999,9 @@ def sync_to_memdir(store: DigestStore, cwd: str = "") -> int:
     Returns number of rules synced.
     """
     if not digest_enabled():
+        # Opt-out must also undo an earlier sync: a cozempic_digest.md left in
+        # Claude Code's memory dir would keep injecting rules every session.
+        remove_synced_memory(cwd)
         return 0
     # Read-only on the dir: we sync into Claude Code's memory dir only once it
     # exists (Claude Code owns/creates it). We never create it ourselves, so a
@@ -1023,6 +1044,38 @@ type: feedback
         r.last_injection = now
 
     return len(active)
+
+
+def remove_synced_memory(cwd: str = "") -> bool:
+    """Delete a previously synced digest memory (opt-out cleanup).
+
+    Removes ``cozempic_digest.md`` from Claude Code's memory dir and drops its
+    MEMORY.md index line, so a user who opts out AFTER rules were synced stops
+    having them injected. Never creates anything. Returns True if something
+    was removed.
+    """
+    mem_dir = _get_memdir(cwd)
+    if mem_dir is None:
+        return False
+    removed = False
+    digest_mem = mem_dir / "cozempic_digest.md"
+    if digest_mem.exists():
+        digest_mem.unlink()
+        removed = True
+    index_path = mem_dir / "MEMORY.md"
+    if index_path.exists():
+        content = index_path.read_text(encoding="utf-8")
+        if "cozempic_digest.md" in content:
+            lines = [
+                line for line in content.splitlines()
+                if "cozempic_digest.md" not in line
+            ]
+            new_content = "\n".join(lines)
+            if content.endswith("\n"):
+                new_content += "\n"
+            _atomic_write_text(index_path, new_content)
+            removed = True
+    return removed
 
 
 def _update_memory_index(mem_dir: Path) -> None:
@@ -1080,6 +1133,7 @@ def recover_digest(
     Returns number of rules synced.
     """
     if not digest_enabled():
+        remove_synced_memory(project_dir)
         return 0
     store = load_digest_store(project_dir)
     if store.is_empty():

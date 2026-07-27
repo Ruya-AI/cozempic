@@ -37,3 +37,13 @@ def _disable_real_receipts(monkeypatch):
     isolate base_dir/HOME themselves.)"""
     monkeypatch.setenv("COZEMPIC_NO_RECEIPTS", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _default_digest_enabled(monkeypatch):
+    """Run the suite with the digest in its default (enabled) state even on a
+    developer machine that exports ``COZEMPIC_NO_DIGEST`` — the pre-existing
+    digest tests assert enabled-path behavior. Opt-out tests set the variable
+    explicitly inside their own scope (test_digest_optout.py)."""
+    monkeypatch.delenv("COZEMPIC_NO_DIGEST", raising=False)
+    yield
