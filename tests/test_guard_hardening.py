@@ -100,6 +100,19 @@ class TestG1_CleanupLegacyPidRequiresArgvVerify(unittest.TestCase):
                 "Legacy cleanup failed to SIGTERM a verified guard PID",
             )
 
+    def test_does_not_follow_legacy_pidfile_symlink(self):
+        from cozempic.guard import _cleanup_legacy_pid
+
+        legacy = self._write_legacy_pidfile(0)
+        target = Path(self.tmpdir) / "target.pid"
+        target.write_text("42000")
+        legacy.unlink()
+        legacy.symlink_to(target)
+        with patch("cozempic.guard._is_cozempic_guard_process") as confirmed, patch("cozempic.guard.os.kill") as kill:
+            _cleanup_legacy_pid(self.cwd)
+        confirmed.assert_not_called()
+        kill.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # BUG-G2 — _cleanup_stale_watchers must NOT signal substring-only pgrep matches
@@ -903,35 +916,29 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _run_with_os_open_raising(self, errno_code: int):
-        """Invoke start_guard_daemon with a mocked pidfile-write path that
+    def _run_with_reservation_raising(self, errno_code: int):
+        """Invoke start_guard_daemon with a mocked pidfile reservation that
         raises OSError with the given errno. Returns result dict OR
         `{'_raised': exc}` if uncaught.
 
-        After the round-3 rework (C1 fix) the pidfile is written via
-        ``os.open(<pid>.tmp, O_CREAT|O_EXCL|O_NOFOLLOW)`` then
-        ``os.rename``, replacing the prior ``Path.write_text``. The intent
-        of this test is unchanged (graceful surface on any OSError) —
-        only the mock surface moves to the new ``os.open`` call. We have
-        to filter on the .pid.tmp suffix because DaemonSpawnClaim also
-        uses os.open on the pid_path itself; only the post-Popen
-        atomic-rename open should fail.
+        The current publication path reserves a unique tempfile with
+        ``mkstemp`` before the atomic replacement. The test targets that
+        reservation rather than the claim's separate pidfile open.
         """
         from cozempic.guard import start_guard_daemon
 
-        tmp_pidfile_str = str(self.pid_path.with_suffix(".pid.tmp"))
-        real_os_open = os.open
+        real_mkstemp = tempfile.mkstemp
 
-        def fake_os_open(path, flags, *args, **kwargs):
-            if str(path) == tmp_pidfile_str:
+        def fake_mkstemp(*args, **kwargs):
+            if kwargs.get("prefix") == f"{self.pid_path.name}." and kwargs.get("suffix") == ".tmp":
                 raise OSError(errno_code, os.strerror(errno_code))
-            return real_os_open(path, flags, *args, **kwargs)
+            return real_mkstemp(*args, **kwargs)
 
         with (
             patch("cozempic.guard._cleanup_legacy_pid"),
             patch("cozempic.guard.find_claude_pid", return_value=7777),
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
-            patch("cozempic.guard.os.open", side_effect=fake_os_open),
+            patch("cozempic.guard.tempfile.mkstemp", side_effect=fake_mkstemp),
         ):
             mock_popen.return_value = MagicMock(pid=9999)
             try:
@@ -946,7 +953,7 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
     def test_enospc_does_not_crash_hook(self):
         """ENOSPC must NOT propagate — return {started: False, reason: ...}."""
         import errno as _errno_mod
-        result = self._run_with_os_open_raising(_errno_mod.ENOSPC)
+        result = self._run_with_reservation_raising(_errno_mod.ENOSPC)
         self.assertNotIn(
             "_raised", result,
             f"ENOSPC propagated uncaught: {result.get('_raised')!r}. "
@@ -965,7 +972,7 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
     def test_erofs_does_not_crash_hook(self):
         """EROFS (/tmp read-only) must NOT propagate."""
         import errno as _errno_mod
-        result = self._run_with_os_open_raising(_errno_mod.EROFS)
+        result = self._run_with_reservation_raising(_errno_mod.EROFS)
         self.assertNotIn(
             "_raised", result,
             f"EROFS propagated uncaught: {result.get('_raised')!r}",
@@ -976,7 +983,7 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
     def test_eacces_does_not_crash_hook(self):
         """EACCES (permission denied) must NOT propagate."""
         import errno as _errno_mod
-        result = self._run_with_os_open_raising(_errno_mod.EACCES)
+        result = self._run_with_reservation_raising(_errno_mod.EACCES)
         self.assertNotIn(
             "_raised", result,
             f"EACCES propagated uncaught: {result.get('_raised')!r}",
@@ -1334,35 +1341,29 @@ class TestDiffCoverage_AtomicPidfile_AllErrnos(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _run_with_os_open_raising(self, exc: Exception):
-        """Invoke start_guard_daemon with a mocked pidfile-write path that
+    def _run_with_reservation_raising(self, exc: Exception):
+        """Invoke start_guard_daemon with a mocked pidfile reservation that
         raises the given exception. Returns result dict OR `{'_raised': exc}`
         if uncaught.
 
-        After the round-3 rework (C1 fix) the pidfile is written via
-        ``os.open(<pid>.tmp, O_CREAT|O_EXCL|O_NOFOLLOW)`` then
-        ``os.rename``, replacing the prior ``Path.write_text``. The intent
-        of this test is unchanged (graceful surface on any OSError) —
-        only the mock surface moves to the new ``os.open`` call. We have
-        to filter on the .pid.tmp suffix because DaemonSpawnClaim also
-        uses os.open on the pid_path itself; only the post-Popen
-        atomic-rename open should fail.
+        The current publication path reserves a unique tempfile with
+        ``mkstemp`` before the atomic replacement. The test targets that
+        reservation rather than the claim's separate pidfile open.
         """
         from cozempic.guard import start_guard_daemon
 
-        tmp_pidfile_str = str(self.pid_path.with_suffix(".pid.tmp"))
-        real_os_open = os.open
+        real_mkstemp = tempfile.mkstemp
 
-        def fake_os_open(path, flags, *args, **kwargs):
-            if str(path) == tmp_pidfile_str:
+        def fake_mkstemp(*args, **kwargs):
+            if kwargs.get("prefix") == f"{self.pid_path.name}." and kwargs.get("suffix") == ".tmp":
                 raise exc
-            return real_os_open(path, flags, *args, **kwargs)
+            return real_mkstemp(*args, **kwargs)
 
         with (
             patch("cozempic.guard._cleanup_legacy_pid"),
             patch("cozempic.guard.find_claude_pid", return_value=7777),
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
-            patch("cozempic.guard.os.open", side_effect=fake_os_open),
+            patch("cozempic.guard.tempfile.mkstemp", side_effect=fake_mkstemp),
         ):
             mock_popen.return_value = MagicMock(pid=9999)
             try:
@@ -1392,35 +1393,35 @@ class TestDiffCoverage_AtomicPidfile_AllErrnos(unittest.TestCase):
     def test_enospc_graceful(self):
         import errno as _errno_mod
         exc = OSError(_errno_mod.ENOSPC, os.strerror(_errno_mod.ENOSPC))
-        self._assert_graceful(self._run_with_os_open_raising(exc), "ENOSPC")
+        self._assert_graceful(self._run_with_reservation_raising(exc), "ENOSPC")
 
     def test_erofs_graceful(self):
         import errno as _errno_mod
         exc = OSError(_errno_mod.EROFS, os.strerror(_errno_mod.EROFS))
-        self._assert_graceful(self._run_with_os_open_raising(exc), "EROFS")
+        self._assert_graceful(self._run_with_reservation_raising(exc), "EROFS")
 
     def test_eacces_graceful(self):
         import errno as _errno_mod
         exc = OSError(_errno_mod.EACCES, os.strerror(_errno_mod.EACCES))
-        self._assert_graceful(self._run_with_os_open_raising(exc), "EACCES")
+        self._assert_graceful(self._run_with_reservation_raising(exc), "EACCES")
 
     def test_ebusy_graceful(self):
         import errno as _errno_mod
         exc = OSError(_errno_mod.EBUSY, os.strerror(_errno_mod.EBUSY))
-        self._assert_graceful(self._run_with_os_open_raising(exc), "EBUSY")
+        self._assert_graceful(self._run_with_reservation_raising(exc), "EBUSY")
 
     def test_emfile_graceful(self):
         """EMFILE: file descriptor exhaustion — real-world limit under load."""
         import errno as _errno_mod
         exc = OSError(_errno_mod.EMFILE, os.strerror(_errno_mod.EMFILE))
-        self._assert_graceful(self._run_with_os_open_raising(exc), "EMFILE")
+        self._assert_graceful(self._run_with_reservation_raising(exc), "EMFILE")
 
     def test_generic_oserror_with_custom_strerror(self):
         """OSError with an unconventional errno (e.g., from a mounted FS with
         custom errors) must still flow through the graceful branch."""
         exc = OSError(999, "custom filesystem error — quota drift")
         self._assert_graceful(
-            self._run_with_os_open_raising(exc),
+            self._run_with_reservation_raising(exc),
             "OSError(999)",
         )
 

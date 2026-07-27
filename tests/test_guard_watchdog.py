@@ -187,6 +187,13 @@ class TestScanGuardLogs(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertFalse(hits[0].pid_alive)
 
+    def test_symlinked_pid_is_not_read(self):
+        self._write("symlink", _respawn_storm())
+        target = self.dir / "target.pid"
+        target.write_text("4242", encoding="utf-8")
+        (self.dir / "cozempic_guard_symlink.pid").symlink_to(target)
+        self.assertIsNone(scan_guard_logs(self.dir)[0].pid)
+
     def test_healthy_not_in_hits(self):
         self._write("ccc", _daemon_start() + "".join(_good_cycle(n=i) for i in range(40)), pid=123)
         self.assertEqual(scan_guard_logs(self.dir), [])

@@ -429,7 +429,7 @@ def check_stale_tmp_artifacts() -> CheckResult:
     size_bytes = 0
     for path in (*stale_pids, *stale_temps, *orphan_logs, *orphan_locks, *orphan_markers):
         try:
-            size_bytes += path.stat().st_size
+            size_bytes += path.lstat().st_size
         except OSError:
             pass
 

@@ -217,11 +217,10 @@ class GuardLoopHit:
 
 
 def _read_pid(pid_file: Path) -> int | None:
-    try:
-        first = pid_file.read_text(encoding="utf-8").strip().splitlines()[0]
-        return int(first.strip())
-    except (OSError, ValueError, IndexError):
-        return None
+    from .spawn_lock import _parse_pidfile_pid
+
+    pid = _parse_pidfile_pid(pid_file)
+    return pid if pid > 0 else None
 
 
 def scan_guard_logs(

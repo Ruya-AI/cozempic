@@ -3316,7 +3316,11 @@ def _cleanup_legacy_pid(cwd: str) -> None:
     legacy = _pid_file_for_cwd(cwd)
     if legacy.exists():
         try:
-            pid = int(legacy.read_text().strip())
+            from .spawn_lock import _parse_pidfile_pid
+
+            pid = _parse_pidfile_pid(legacy)
+            if pid <= 0:
+                raise ValueError("invalid legacy pidfile")
             os.kill(pid, 0)
             # Only SIGTERM if we can confirm this is actually our daemon.
             if _is_cozempic_guard_process(pid):
@@ -3639,9 +3643,11 @@ def start_guard_daemon(
         # structured `{started: False, reason: ...}`. The claim's
         # __exit__ will unlink the PID file on exception, so a retry is
         # possible.
-        # Defense-in-depth: if the log file's parent dir was removed mid-spawn
-        # (race with operator cleanup, /tmp eviction, etc.), recreate it once.
         try:
+            artifact = "log file"
+            # Defense-in-depth: if the log file's parent dir was removed
+            # mid-spawn (race with operator cleanup, /tmp eviction, etc.)
+            # recreate it once and retry the open.
             try:
                 lf = _open_guard_log(log_file)
             except FileNotFoundError:
@@ -3649,17 +3655,7 @@ def start_guard_daemon(
                 if log_dir:
                     os.makedirs(log_dir, exist_ok=True)
                 lf = _open_guard_log(log_file)
-        except OSError as exc:
-            return {
-                "started": False,
-                "reason": f"log file: {exc}",
-                "pid": None,
-                "pid_file": str(pid_path),
-                "log_file": None,
-                "already_running": False,
-            }
-
-        try:
+            artifact = "pidfile"
 
             try:
                 from datetime import datetime
@@ -3818,7 +3814,7 @@ def start_guard_daemon(
             return {
                 "started": False,
                 "reason": (
-                    f"pidfile: {exc}"
+                    f"{artifact}: {exc}"
                     + (f"; guard PID {orphaned_guard_pid} may still be running"
                        if orphaned_guard_pid is not None else "")
                 ),
@@ -4264,7 +4260,8 @@ def reload_self_daemon(
     if reloaded:
         reason = "ok"
     else:
-        reason = "could not start fresh daemon after retry — session is unprotected"
+        detail = result.get("reason", "unknown failure")
+        reason = f"could not start fresh daemon after retry — session is unprotected ({detail})"
 
     return {
         "reloaded": reloaded,
