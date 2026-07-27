@@ -322,7 +322,8 @@ class TestPreviewAndDryRun(_Base):
     def test_purge_uses_bounded_confirmation(self):
         from cozempic import cli
 
-        with patch.object(cli.sys.stdin, "isatty", return_value=True), \
+        with self.assertRaisesRegex(SystemExit, "1"), \
+                patch.object(cli.sys.stdin, "isatty", return_value=True), \
                 patch.object(cli.sys.stderr, "isatty", return_value=True), \
                 patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
                 patch.object(cz_init, "run_uninstall") as run_uninstall:

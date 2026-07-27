@@ -1257,7 +1257,7 @@ def cmd_uninstall(args):
             purge = False
         elif _prompt_with_timeout("  Continue? [y/N] ", timeout=30, default="n") != "y":
             print("  Aborted.\n")
-            return
+            raise SystemExit(1)
 
     result = run_uninstall(scope, purge)
     n_hooks = sum(len(h.get("removed", [])) for h in result["hooks"])
