@@ -771,7 +771,9 @@ def start_guard(
     # Record PID + start_time NOW — earliest point where both claude_pid and
     # session_id are known and Claude's identity is confirmed by find_claude_pid.
     if claude_pid:
-        _record_claude_identity(sess["session_id"], claude_pid)
+        _record_claude_identity(
+            sess["session_id"], claude_pid, session_path=session_path
+        )
     claude_alive = True
 
     prune_count = 0
@@ -3655,8 +3657,6 @@ def start_guard_daemon(
                 if log_dir:
                     os.makedirs(log_dir, exist_ok=True)
                 lf = _open_guard_log(log_file)
-            artifact = "pidfile"
-
             try:
                 from datetime import datetime
                 lf.write(f"\n--- Guard daemon started at {datetime.now().isoformat()} ---\n")
@@ -3693,12 +3693,15 @@ def start_guard_daemon(
                 stale_tmp_path = pid_path.with_suffix(".pid.tmp")
                 if stale_tmp_path.is_symlink() or stale_tmp_path.exists():
                     stale_tmp_path.unlink(missing_ok=True)
+                artifact = "pidfile"
                 _tmp_fd, tmp_name = tempfile.mkstemp(
                     prefix=f"{pid_path.name}.", suffix=".tmp", dir=pid_path.parent
                 )
                 tmp_path = Path(tmp_name)
                 try:
+                    artifact = "guard subprocess"
                     proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                    artifact = "pidfile"
                 except BaseException:
                     os.close(_tmp_fd)
                     tmp_path.unlink(missing_ok=True)
@@ -3973,13 +3976,15 @@ def _get_pid_start_time(pid: int) -> float | None:
     return _get_pid_start_time_psutil(pid)
 
 
-def _record_claude_identity(session_id: str, pid: int) -> None:
+def _record_claude_identity(
+    session_id: str, pid: int, session_path: Path | None = None
+) -> None:
     """Record (pid, start_time) for the anti-recycling gate. Call once at startup.
 
     Validates pid is actually Claude (argv check) before recording — defense
     in depth in case a future caller bypasses find_claude_pid's identity gate.
     """
-    if not _is_claude_process(pid):
+    if not _is_claude_process(pid, session_path=session_path):
         return
     start_time = _get_pid_start_time(pid)
     if start_time is not None and session_id:

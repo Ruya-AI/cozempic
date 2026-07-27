@@ -132,6 +132,26 @@ class TestGuardDaemonPidHandoff(unittest.TestCase):
             self.assertTrue(result["started"])
             self.assertFalse(tmp_path.exists())
 
+    def test_start_guard_daemon_labels_subprocess_errors(self):
+        from cozempic.guard import start_guard_daemon
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch("cozempic.guard._guard_tmp_root", return_value=Path(tmpdir)),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard.find_claude_pid", return_value=9999),
+                patch("cozempic.guard.subprocess.Popen", side_effect=OSError("no slots")),
+            ):
+                result = start_guard_daemon(
+                    cwd=tmpdir,
+                    session_id="ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb",
+                    threshold_tokens=123,
+                )
+
+        self.assertFalse(result["started"])
+        self.assertTrue(result["reason"].startswith("guard subprocess:"))
+
 
 if __name__ == "__main__":
     unittest.main()
