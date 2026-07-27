@@ -147,20 +147,22 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
             self.pid_path.with_suffix(".log"),
             self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
         )
-        for path in self.paths:
-            path.unlink(missing_ok=True)
+        self._clean_paths()
         self.log_path = self.pid_path.with_suffix(".log")
 
-    def tearDown(self):
-        for path in self.paths:
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
             path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        self._clean_paths()
 
     def _race_once(self) -> list[dict]:
         """Spawn two processes, sync at a barrier, collect results."""
         # On macOS the default start method is spawn; force it explicitly so
         # the test is platform-deterministic.
         ctx = mp.get_context("spawn")
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        self._clean_paths()
 
         barrier = ctx.Barrier(2)
         result_queue = ctx.Queue()
@@ -195,6 +197,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
                 if p.is_alive():
                     p.kill()
                     p.join(timeout=2.0)
+            self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
 
         return results
 

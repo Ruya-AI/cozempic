@@ -118,12 +118,14 @@ class TestThreeProcessContention(unittest.TestCase):
             self.pid_path.with_suffix(".pid.tmp"),
             self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
         )
-        for path in self.paths:
+        self._clean_paths()
+
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
             path.unlink(missing_ok=True)
 
     def tearDown(self):
-        for path in self.paths:
-            path.unlink(missing_ok=True)
+        self._clean_paths()
 
     def test_three_process_contention(self):
 
@@ -134,8 +136,7 @@ class TestThreeProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(ITERATIONS):
-            for path in self.paths:
-                path.unlink(missing_ok=True)
+            self._clean_paths()
 
             barrier = ctx.Barrier(N)
             queue = ctx.Queue()
@@ -164,6 +165,7 @@ class TestThreeProcessContention(unittest.TestCase):
                     if p.is_alive():
                         p.kill()
                         p.join(timeout=2.0)
+                self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -208,12 +210,14 @@ class TestV4TenProcessContention(unittest.TestCase):
             self.pid_path.with_suffix(".pid.tmp"),
             self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
         )
-        for path in self.paths:
+        self._clean_paths()
+
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
             path.unlink(missing_ok=True)
 
     def tearDown(self):
-        for path in self.paths:
-            path.unlink(missing_ok=True)
+        self._clean_paths()
 
     def test_ten_process_contention_30x(self):
         ctx = mp.get_context("spawn")
@@ -221,8 +225,7 @@ class TestV4TenProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(self.ITERATIONS):
-            for path in self.paths:
-                path.unlink(missing_ok=True)
+            self._clean_paths()
 
             barrier = ctx.Barrier(self.N)
             queue = ctx.Queue()
@@ -251,6 +254,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                     if p.is_alive():
                         p.kill()
                         p.join(timeout=2.0)
+                self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -612,6 +616,7 @@ class TestStaleClaimContention(unittest.TestCase):
                         if proc.is_alive():
                             proc.kill()
                             proc.join(timeout=2.0)
+                    self.assertFalse(proc.is_alive(), f"worker {proc.name} survived cleanup")
                 self.assertFalse([result for result in results if "error" in result], results)
                 self.assertEqual(sum(result["claimed"] for result in results), 1, results)
                 pid_file.unlink(missing_ok=True)
@@ -834,10 +839,10 @@ class TestDaemonSpawnLockUnit(unittest.TestCase):
     """Direct contract tests on the spawn_lock module."""
 
     def setUp(self):
-        from cozempic.guard import _pid_file_for_session
+        from cozempic.spawn_lock import _spawn_lock_path
 
         self.session_id = uuid.uuid4().hex
-        self.pid_path = _pid_file_for_session(self.session_id)
+        self.pid_path = _spawn_lock_path(self.session_id)
         self.paths = (
             self.pid_path,
             self.pid_path.with_suffix(".pid.tmp"),
