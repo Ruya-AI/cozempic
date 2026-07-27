@@ -1302,7 +1302,7 @@ def cmd_uninstall(args):
 def cmd_init(args):
     """Wire cozempic hooks and slash command into the current project (or globally)."""
     if getattr(args, "uninstall_global", False):
-        # Deprecated alias → `cozempic uninstall --global`.
+        # Deprecated alias → `cozempic uninstall` (global is the default scope).
         print("  Note: `init --uninstall-global` is deprecated; use `cozempic uninstall`.", file=sys.stderr)
         cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
         return

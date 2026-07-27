@@ -178,6 +178,20 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_purge_is_skipped_when_global_local_cleanup_fails(self):
+        path = self.home / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["opt_out_set"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
     def test_purge_is_skipped_when_slash_cleanup_fails(self):
         self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
         data_dir = self.home / ".cozempic"
