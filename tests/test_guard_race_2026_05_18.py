@@ -192,6 +192,9 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
             if p.is_alive():
                 p.terminate()
                 p.join(timeout=2.0)
+                if p.is_alive():
+                    p.kill()
+                    p.join(timeout=2.0)
 
         return results
 

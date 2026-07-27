@@ -161,6 +161,9 @@ class TestThreeProcessContention(unittest.TestCase):
                 if p.is_alive():
                     p.terminate()
                     p.join(timeout=2.0)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=2.0)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -245,6 +248,9 @@ class TestV4TenProcessContention(unittest.TestCase):
                 if p.is_alive():
                     p.terminate()
                     p.join(timeout=2.0)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=2.0)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -603,6 +609,9 @@ class TestStaleClaimContention(unittest.TestCase):
                     if proc.is_alive():
                         proc.terminate()
                         proc.join(timeout=2.0)
+                        if proc.is_alive():
+                            proc.kill()
+                            proc.join(timeout=2.0)
                 self.assertFalse([result for result in results if "error" in result], results)
                 self.assertEqual(sum(result["claimed"] for result in results), 1, results)
                 pid_file.unlink(missing_ok=True)
