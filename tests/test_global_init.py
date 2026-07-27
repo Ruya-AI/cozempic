@@ -769,7 +769,7 @@ class TestGlobalInitFailure(unittest.TestCase):
                         "cozempic.session.get_claude_dir", return_value=profile
                     ):
                         output = io.StringIO()
-                        with mock.patch.object(cli.sys, "stdout", output):
+                        with self.assertRaises(SystemExit), mock.patch.object(cli.sys, "stdout", output):
                             cli.cmd_init(args)
             self.assertFalse(marker.exists())
             self.assertIn("Setup incomplete", output.getvalue())
@@ -788,7 +788,7 @@ class TestGlobalInitFailure(unittest.TestCase):
         args = argparse.Namespace(uninstall_global=False, global_install=False, cwd=None,
                                   no_slash_command=True)
         output = io.StringIO()
-        with mock.patch.object(cli, "run_init", return_value=result), mock.patch.object(cli.sys, "stdout", output):
+        with self.assertRaises(SystemExit), mock.patch.object(cli, "run_init", return_value=result), mock.patch.object(cli.sys, "stdout", output):
             cli.cmd_init(args)
         self.assertIn("Setup incomplete", output.getvalue())
         self.assertNotIn("Setup complete", output.getvalue())

@@ -1221,20 +1221,21 @@ def cmd_uninstall(args):
     print(f"  Scope: {scope}" + ("  (+ purge data)" if purge else ""))
 
     if purge and scope == "project":
-        print("  ERROR: --purge only applies to global data; choose --global or --all.\n")
+        print("  ERROR: --purge only applies to global data; omit --project or use --all.\n")
         return
 
     if getattr(args, "dry_run", False):
         prev = preview_uninstall(scope, purge)
         print("  Dry run — nothing will be changed.\n")
         print(f"    Hooks would be removed from: {', '.join(prev['hooks_in']) or '(none)'}")
-        slash_status = (
-            "remove" if prev["slash_command"]
-            else "(could not determine)" if prev.get("slash_error")
-            else "(not present / not ours)"
-        )
-        print(f"    Slash command (~/.claude/commands/cozempic.md): {slash_status}")
-        print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
+        if scope in ("global", "all"):
+            slash_status = (
+                "remove" if prev["slash_command"]
+                else "(could not determine)" if prev.get("slash_error")
+                else "(not present / not ours)"
+            )
+            print(f"    Slash command (~/.claude/commands/cozempic.md): {slash_status}")
+            print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
         for error in prev["hook_errors"]:
             print(f"    Hooks: ERROR — {error}")
         if prev.get("slash_error"):
@@ -1287,6 +1288,8 @@ def cmd_uninstall(args):
     if result.get("project_opt_out_set"):
         print("  Project auto-init disabled. Re-run `cozempic init` to reinstall.")
     print()
+    if error_count:
+        raise SystemExit(1)
 
 
 def cmd_init(args):
@@ -1404,6 +1407,7 @@ def cmd_init(args):
 
     if hooks.get("error") or (local_cleanup or {}).get("error") or slash.get("error"):
         print("  Setup incomplete — fix the error above and re-run `cozempic init`.")
+        raise SystemExit(1)
     else:
         # Summary: what to do next
         print(f"  Setup complete. Protection is fully automatic:")

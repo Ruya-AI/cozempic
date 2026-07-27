@@ -193,10 +193,8 @@ class TestRunUninstall(_Base):
             "errors": ["Purge failed for /home/example/.cozempic: permission denied"],
         }
         output = io.StringIO()
-        with patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
-            cli.cmd_uninstall(
-                argparse.Namespace(project=False, all=False, purge=False, dry_run=False)
-            )
+        with self.assertRaises(SystemExit), patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
         self.assertIn("ERROR: Purge failed", output.getvalue())
 
     def test_slash_backup_failure_is_reported_without_removal(self):
@@ -259,7 +257,7 @@ class TestRunUninstall(_Base):
 
         from cozempic import cli
         output = io.StringIO()
-        with patch("sys.stdout", output):
+        with self.assertRaises(SystemExit), patch("sys.stdout", output):
             cli.cmd_uninstall(
                 argparse.Namespace(project=False, all=False, purge=False, dry_run=False)
             )
@@ -318,6 +316,16 @@ class TestPreviewAndDryRun(_Base):
         finally:
             os.chdir(previous_cwd)
         self.assertFalse(preview["remind_counter"])
+
+    def test_project_dry_run_omits_global_uninstall_items(self):
+        from cozempic import cli
+
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=True, all=False, purge=False, dry_run=True))
+
+        self.assertNotIn("Slash command", output.getvalue())
+        self.assertNotIn("Remind counter", output.getvalue())
 
     def test_project_preview_does_not_offer_global_purge(self):
         (self.home / ".cozempic").mkdir()
