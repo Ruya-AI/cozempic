@@ -1,4 +1,5 @@
 """Tests for guard daemon robustness improvements."""
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,74 @@ class TestGuardLogEncoding(unittest.TestCase):
                 log.write("CWD: bad" + chr(0xDCFF) + "\n")
 
             self.assertEqual(log_path.read_bytes(), b"CWD: bad\xff\n")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
+    def test_guard_log_fifo_is_rejected_without_blocking(self):
+        from cozempic.guard import _open_guard_log
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "guard.log"
+            os.mkfifo(log_path)
+            with self.assertRaises(OSError):
+                _open_guard_log(log_path)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_guard_log_symlink_is_rejected(self):
+        from cozempic.guard import _open_guard_log
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target.log"
+            target.write_text("keep")
+            log_path = Path(tmpdir) / "guard.log"
+            log_path.symlink_to(target)
+            with self.assertRaises(OSError):
+                _open_guard_log(log_path)
+            self.assertEqual(target.read_text(), "keep")
+
+
+class TestReloadStateRegularFiles(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
+    def test_read_armed_ignores_fifo_without_blocking(self):
+        from cozempic.guard import read_armed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sentinel = Path(tmpdir) / "armed.json"
+            os.mkfifo(sentinel)
+            with patch("cozempic.guard._reload_armed_path", return_value=sentinel):
+                self.assertIsNone(read_armed("test-session"))
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_read_armed_ignores_symlink(self):
+        from cozempic.guard import read_armed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target.json"
+            target.write_text('{"warned": true}')
+            sentinel = Path(tmpdir) / "armed.json"
+            sentinel.symlink_to(target)
+            with patch("cozempic.guard._reload_armed_path", return_value=sentinel):
+                self.assertIsNone(read_armed("test-session"))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
+    def test_reload_ledger_ignores_fifo_without_blocking(self):
+        from cozempic.guard import _reload_rate_exceeded
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "reload.history"
+            os.mkfifo(ledger)
+            self.assertEqual(_reload_rate_exceeded(ledger, now=1000.0), (False, 1))
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_reload_ledger_ignores_symlink(self):
+        from cozempic.guard import _reload_rate_exceeded
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target.history"
+            target.write_text("[]")
+            ledger = Path(tmpdir) / "reload.history"
+            ledger.symlink_to(target)
+            self.assertEqual(_reload_rate_exceeded(ledger, now=1000.0), (False, 1))
+            self.assertEqual(target.read_text(), "[]")
 
 
 class TestBackupCleanupIntegration(unittest.TestCase):

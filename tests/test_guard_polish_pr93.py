@@ -688,9 +688,7 @@ class TestPolishPR93_PidfileEACCES(unittest.TestCase):
 
         claim = DaemonSpawnClaim("any-session-12345", Path("/tmp/x.pid"))
 
-        with _patch.object(
-            Path, "stat", side_effect=PermissionError("EACCES")
-        ):
+        with _patch("cozempic.spawn_lock.os.stat", side_effect=PermissionError("EACCES")):
             result = claim._is_pidfile_fresh()
         self.assertTrue(
             result,

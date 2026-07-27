@@ -21,6 +21,7 @@ import os
 import platform
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2665,8 +2666,12 @@ def _open_guard_log(log_file: Path):
     flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     fd = os.open(str(log_file), flags, 0o600)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("guard log is not a regular file")
         return os.fdopen(fd, "a", encoding="utf-8", errors="surrogateescape")
     except BaseException:
         os.close(fd)
@@ -3177,8 +3182,10 @@ def _reload_armed_path(session_id: str | None, session_path: Path | None = None)
 def read_armed(session_id: str | None, session_path: Path | None = None) -> dict | None:
     import json as _json
     try:
+        from .reload_lock import _read_regular_text
         p = _reload_armed_path(session_id, session_path)
-        return _json.loads(p.read_text()) if p.exists() else None
+        text = _read_regular_text(p)
+        return _json.loads(text) if text is not None else None
     except Exception:
         return None
 
@@ -3266,7 +3273,9 @@ def _reload_rate_exceeded(ledger_path: Path, now: float | None = None) -> tuple[
         now = _time.time()
     window = _reload_ledger_window_s()
     try:
-        hist = _json.loads(ledger_path.read_text()) if ledger_path.exists() else []
+        from .reload_lock import _read_regular_text
+        text = _read_regular_text(ledger_path)
+        hist = _json.loads(text) if text is not None else []
         if not isinstance(hist, list):
             hist = []
     except Exception:
