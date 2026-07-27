@@ -178,6 +178,27 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_purge_preview_is_skipped_when_global_hook_cleanup_fails(self):
+        from cozempic import cli
+
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        preview = cz_init.preview_uninstall("global", purge=True)
+
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("sys.stdout", output):
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=True, dry_run=True)
+            )
+        self.assertIn("Purge data: skipped due to a hook/settings error above", output.getvalue())
+
     def test_uninstall_write_failure_is_reported(self):
         self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]

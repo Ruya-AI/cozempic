@@ -804,20 +804,24 @@ def uninstall_slash_command() -> dict:
 
 def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
+    global_paths = _global_settings_paths()
+    project_paths = _project_settings_paths(".")
     scopes_by_name = {
-        "global": _global_settings_paths(),
-        "project": _project_settings_paths("."),
-        "all": [*_global_settings_paths(), *_project_settings_paths(".")],
+        "global": global_paths,
+        "project": project_paths,
+        "all": [*global_paths, *project_paths],
     }
     if scope not in scopes_by_name:
         raise ValueError(f"Unknown uninstall scope: {scope}")
     scopes = scopes_by_name[scope]
     hook_targets = []
     hook_errors = []
+    global_cleanup_failed = False
     for p in scopes:
         state = cozempic_hook_schema_state(p)
         if state.error:
             hook_errors.append(state.error)
+            global_cleanup_failed = global_cleanup_failed or p in global_paths
         elif state.found:
             hook_targets.append(str(p))
     slash = _global_slash_path()
@@ -830,12 +834,14 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
             slash_error = f"Could not read slash command: {exc}"
             slash_present = False
     data = []
-    if purge and scope in ("global", "all"):
+    purge_skipped = purge and scope in ("global", "all") and global_cleanup_failed
+    if purge and scope in ("global", "all") and not purge_skipped:
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             if p.exists():
                 data.append(str(p))
     return {"hooks_in": hook_targets, "slash_command": slash_present,
             "remind_counter": scope in ("global", "all") and _REMIND_COUNTER.exists(), "purge_data": data,
+            "purge_skipped": purge_skipped,
             "hook_errors": hook_errors, "slash_error": slash_error,
             "errors": [*hook_errors, *([slash_error] if slash_error else [])]}
 

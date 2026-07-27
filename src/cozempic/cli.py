@@ -1241,7 +1241,10 @@ def cmd_uninstall(args):
         if prev.get("slash_error"):
             print(f"    Slash command: ERROR — {prev['slash_error']}")
         if purge:
-            print(f"    Purge data: {', '.join(prev['purge_data']) or '(none)'}")
+            if prev.get("purge_skipped"):
+                print("    Purge data: skipped due to a hook/settings error above")
+            else:
+                print(f"    Purge data: {', '.join(prev['purge_data']) or '(none)'}")
         print()
         if prev["hook_errors"] or prev.get("slash_error"):
             raise SystemExit(1)
