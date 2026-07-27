@@ -103,6 +103,21 @@ def _stale_claim_worker(barrier_handle, result_queue, pid_file: str, worker_inde
         result_queue.put({"error": repr(exc), "worker": worker_index})
 
 
+def _reap_processes(procs) -> list[str]:
+    lingering = []
+    for proc in procs:
+        proc.join(timeout=5.0)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2.0)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2.0)
+        if proc.is_alive():
+            lingering.append(proc.name)
+    return lingering
+
+
 class TestThreeProcessContention(unittest.TestCase):
     """Three processes race for the same session — exactly ONE must win."""
 
@@ -157,21 +172,13 @@ class TestThreeProcessContention(unittest.TestCase):
                     results.append(queue.get(timeout=15.0))
                 except Exception as e:
                     results.append({"error": f"queue.get failed: {e!r}"})
-            for p in procs:
-                p.join(timeout=5.0)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=2.0)
-                    if p.is_alive():
-                        p.kill()
-                        p.join(timeout=2.0)
-                self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
+            lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
 
-            if len(started) != 1 or len(already) != (N - 1):
-                failures.append({"iteration": it, "results": results})
+            if len(started) != 1 or len(already) != (N - 1) or lingering:
+                failures.append({"iteration": it, "results": results, "lingering": lingering})
 
         if failures:
             self.fail(
@@ -246,15 +253,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                     results.append(queue.get(timeout=20.0))
                 except Exception as e:
                     results.append({"error": f"queue.get: {e!r}"})
-            for p in procs:
-                p.join(timeout=5.0)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=2.0)
-                    if p.is_alive():
-                        p.kill()
-                        p.join(timeout=2.0)
-                self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
+            lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -264,7 +263,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                 if r.get("started") is not True and r.get("already_running") is not True
             ]
 
-            if len(started) != 1 or len(already) != (self.N - 1) or undefined:
+            if len(started) != 1 or len(already) != (self.N - 1) or undefined or lingering:
                 failures.append(
                     {
                         "iter": it,
@@ -608,15 +607,8 @@ class TestStaleClaimContention(unittest.TestCase):
                 for proc in procs:
                     proc.start()
                 results = [queue.get(timeout=10.0) for _ in procs]
-                for proc in procs:
-                    proc.join(timeout=5.0)
-                    if proc.is_alive():
-                        proc.terminate()
-                        proc.join(timeout=2.0)
-                        if proc.is_alive():
-                            proc.kill()
-                            proc.join(timeout=2.0)
-                    self.assertFalse(proc.is_alive(), f"worker {proc.name} survived cleanup")
+                lingering = _reap_processes(procs)
+                self.assertFalse(lingering, f"workers survived cleanup: {lingering}")
                 self.assertFalse([result for result in results if "error" in result], results)
                 self.assertEqual(sum(result["claimed"] for result in results), 1, results)
                 pid_file.unlink(missing_ok=True)

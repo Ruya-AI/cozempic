@@ -125,6 +125,21 @@ def _race_worker(
         result_queue.put(r)
 
 
+def _reap_processes(procs) -> list[str]:
+    lingering = []
+    for proc in procs:
+        proc.join(timeout=5.0)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2.0)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2.0)
+        if proc.is_alive():
+            lingering.append(proc.name)
+    return lingering
+
+
 class TestR1_DaemonProcessRace(unittest.TestCase):
     """Process-vs-process race on start_guard_daemon for the same session UUID.
 
@@ -189,15 +204,9 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
             except Exception as e:
                 results.append({"error": f"queue.get failed: {e!r}"})
 
-        for p in procs:
-            p.join(timeout=5.0)
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=2.0)
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=2.0)
-            self.assertFalse(p.is_alive(), f"worker {p.name} survived cleanup")
+        lingering = _reap_processes(procs)
+        if lingering:
+            results.append({"error": f"workers survived cleanup: {lingering}"})
 
         return results
 
