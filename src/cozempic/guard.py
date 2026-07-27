@@ -2101,7 +2101,7 @@ def _detect_claude_flags(pid: int) -> str:
     try:
         import psutil
         parts = psutil.Process(pid).cmdline()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     # Fallback: ps -o args= + shlex.split (loses space-boundary info on macOS).
@@ -3186,7 +3186,12 @@ def read_armed(session_id: str | None, session_path: Path | None = None) -> dict
         p = _reload_armed_path(session_id, session_path)
         text = _read_regular_text(p)
         armed = _json.loads(text) if text is not None else None
-        return armed if isinstance(armed, dict) else None
+        if not isinstance(armed, dict):
+            return None
+        for key in ("armed_at", "tier"):
+            if key in armed and not isinstance(armed[key], (int, float)):
+                armed.pop(key)
+        return armed
     except Exception:
         return None
 
@@ -3819,7 +3824,7 @@ def start_guard_daemon(
             # Tell the claim "we wrote the real PID — leave the file in
             # place on clean exit; the daemon now owns its lifecycle."
             claim.handed_off = True
-        except OSError as exc:
+        except Exception as exc:
             # The .pid.tmp orphan was already cleaned by the inner
             # try/except above; here we only need to surface the failure.
             # The claim's __exit__ will unlink the .pid file because

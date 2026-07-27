@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -306,6 +307,8 @@ def _is_lock_held(lock_path: Path) -> bool:
         # Can't open — leave the file alone.
         return True
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):

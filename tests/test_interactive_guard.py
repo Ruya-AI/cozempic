@@ -176,6 +176,16 @@ class TestArmNudgeFromResult(unittest.TestCase):
 
         self.assertEqual(armed["projected_pct"], 0.0)
 
+    def test_read_armed_drops_nonnumeric_grace_fields(self):
+        from cozempic import guard
+
+        with patch("cozempic.guard._guard_tmp_root", return_value=self.scratch):
+            path = guard._reload_armed_path("sess-malformed", None)
+            path.write_text('{"armed_at": "later", "tier": "hard"}')
+            armed = guard.read_armed("sess-malformed", None)
+
+        self.assertEqual(armed, {})
+
     def test_mark_armed_warned_upserts(self):
         # The nudge can warn before the daemon arms — mark must CREATE the sentinel.
         from cozempic import guard
