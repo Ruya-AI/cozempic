@@ -1192,15 +1192,14 @@ def check_cozempic_daemon_running() -> CheckResult:
     Verifies via `_is_cozempic_guard_process` (ps argv match) so a PID-reused
     stranger process doesn't produce a false-positive "daemon running".
     """
-    from pathlib import Path as _Path
-    import os as _os, glob as _glob
+    import os as _os
     from .guard import _is_cozempic_guard_process
     from .spawn_lock import _parse_pidfile_pid
     pids_alive: list[int] = []
-    for pidf in _glob.glob("/tmp/cozempic_guard_*.pid"):
+    for pid_path in _TMP_DIR.glob("cozempic_guard_*.pid"):
         # Tolerant parse: handles both legacy 1-line and new 3-line
         # pidfile formats (PR #93 item #5). Returns 0 on garble.
-        pid = _parse_pidfile_pid(_Path(pidf))
+        pid = _parse_pidfile_pid(pid_path)
         if pid <= 0:
             continue
         try:

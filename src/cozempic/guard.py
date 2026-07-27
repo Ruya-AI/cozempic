@@ -3683,8 +3683,8 @@ def start_guard_daemon(
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
-                # The exclusive PID claim above means any leftover publication
-                # temp belongs to a previous failed spawn, never a live peer.
+                # Reclaim only the legacy deterministic reservation name; the
+                # current mkstemp reservation below is unique per attempt.
                 stale_tmp_path = pid_path.with_suffix(".pid.tmp")
                 if stale_tmp_path.is_symlink() or stale_tmp_path.exists():
                     stale_tmp_path.unlink(missing_ok=True)

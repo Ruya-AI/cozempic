@@ -386,6 +386,19 @@ class TestStaleTmpArtifacts(unittest.TestCase):
             result = check_stale_tmp_artifacts()
         self.assertEqual(result.status, "ok")
 
+    def test_daemon_check_uses_runtime_tmpdir(self):
+        """The daemon status check must use the same platform temp root as guards."""
+        from cozempic.doctor import check_cozempic_daemon_running
+
+        self._make_pid_file("livesess-12", 42)
+        with (
+            patch("cozempic.doctor.os.kill"),
+            patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+        ):
+            result = check_cozempic_daemon_running()
+        self.assertEqual(result.status, "ok")
+        self.assertIn("PIDs: 42", result.message)
+
     def test_dead_pid_file_is_stale(self):
         """A .pid file whose PID is no longer a running cozempic guard is stale."""
         self._make_pid_file("deadsess-01", 999999)
