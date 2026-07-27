@@ -225,6 +225,57 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_all_purge_is_skipped_when_project_cleanup_fails(self):
+        project = self.home / "project"
+        local_settings = project / ".claude" / "settings.local.json"
+        local_settings.parent.mkdir(parents=True)
+        local_settings.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            result = cz_init.run_uninstall("all", purge=True)
+            preview = cz_init.preview_uninstall("all", purge=True)
+        finally:
+            os.chdir(previous_cwd)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertFalse(result["project_opt_out_set"])
+        self.assertTrue(data_dir.exists())
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+
+    def test_all_purge_is_skipped_when_project_opt_out_cannot_be_persisted(self):
+        project = self.home / "project"
+        (project / ".claude").mkdir(parents=True)
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        marker = project / ".claude" / ".cozempic_uninstalled"
+        original_touch = Path.touch
+
+        def fail_project_marker_touch(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("permission denied")
+            return original_touch(path, *args, **kwargs)
+
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            with patch.object(cz_init, "project_uninstall_marker", return_value=marker), patch.object(
+                Path, "touch", autospec=True, side_effect=fail_project_marker_touch
+            ):
+                result = cz_init.run_uninstall("all", purge=True)
+        finally:
+            os.chdir(previous_cwd)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertFalse(result["project_opt_out_set"])
+        self.assertTrue(data_dir.exists())
+
     def test_purge_preview_is_skipped_when_global_hook_cleanup_fails(self):
         from cozempic import cli
 

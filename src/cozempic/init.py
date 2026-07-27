@@ -816,12 +816,12 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     scopes = scopes_by_name[scope]
     hook_targets = []
     hook_errors = []
-    global_cleanup_failed = False
+    cleanup_failed = False
     for p in scopes:
         state = cozempic_hook_schema_state(p)
         if state.error:
             hook_errors.append(state.error)
-            global_cleanup_failed = global_cleanup_failed or p in global_paths
+            cleanup_failed = True
         elif state.found:
             hook_targets.append(str(p))
     slash = _global_slash_path()
@@ -833,9 +833,9 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
         except OSError as exc:
             slash_error = f"Could not read slash command: {exc}"
             slash_present = False
-            global_cleanup_failed = True
+            cleanup_failed = True
     data = []
-    purge_skipped = purge and scope in ("global", "all") and global_cleanup_failed
+    purge_skipped = purge and scope in ("global", "all") and cleanup_failed
     if purge and scope in ("global", "all") and not purge_skipped:
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             if p.exists():
@@ -895,6 +895,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
             result["project_opt_out_set"] = True
         except OSError as exc:
             result["errors"].append(f"Could not persist project uninstall opt-out: {exc}")
+            project_cleanup_failed = True
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()
@@ -922,7 +923,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
             result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
             global_cleanup_failed = True
 
-    if purge and scope in ("global", "all") and global_cleanup_failed:
+    if purge and scope in ("global", "all") and (global_cleanup_failed or project_cleanup_failed):
         result["purge_skipped"] = True
     elif purge and scope in ("global", "all"):
         import shutil as _sh
