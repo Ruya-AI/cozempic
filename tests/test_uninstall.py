@@ -178,6 +178,19 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_purge_is_skipped_when_slash_cleanup_fails(self):
+        self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["purged"], [])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
     def test_purge_preview_is_skipped_when_global_hook_cleanup_fails(self):
         from cozempic import cli
 
@@ -198,6 +211,24 @@ class TestRunUninstall(_Base):
                 argparse.Namespace(project=False, all=False, purge=True, dry_run=True)
             )
         self.assertIn("Purge data: skipped due to a hook/settings error above", output.getvalue())
+
+    def test_purge_preview_is_skipped_when_slash_read_fails(self):
+        slash = self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        original_read_text = Path.read_text
+
+        def fail_slash_read(path, *args, **kwargs):
+            if path == slash:
+                raise OSError("permission denied")
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=fail_slash_read):
+            preview = cz_init.preview_uninstall("global", purge=True)
+
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+        self.assertTrue(preview["slash_error"])
 
     def test_uninstall_write_failure_is_reported(self):
         self._write_global_settings(_settings_with({

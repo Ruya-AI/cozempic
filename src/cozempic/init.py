@@ -833,6 +833,7 @@ def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
         except OSError as exc:
             slash_error = f"Could not read slash command: {exc}"
             slash_present = False
+            global_cleanup_failed = True
     data = []
     purge_skipped = purge and scope in ("global", "all") and global_cleanup_failed
     if purge and scope in ("global", "all") and not purge_skipped:
@@ -899,6 +900,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
         result["slash_command"] = uninstall_slash_command()
         if result["slash_command"].get("error"):
             result["errors"].append(result["slash_command"]["error"])
+            global_cleanup_failed = True
 
     # Cleanup the nudge counter (cosmetic, safe).
     if scope in ("global", "all"):
