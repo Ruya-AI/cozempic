@@ -354,8 +354,8 @@ class _SettingsLock:
                 # __exit__ rewinds to byte 0 before LK_UNLCK, so without
                 # this matching seek(0) before LK_LOCK the two operations
                 # would target different byte ranges and silently fail to
-                # serialize. Mirrors the _HostFileLock pattern in helpers.py
-                # (which has the same defense-in-depth gap — separate fix).
+                # serialize. Mirrors the same seek-before-lock safeguard in
+                # helpers.py's _HostFileLock.
                 import msvcrt
                 self._fh.seek(0)
                 msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
