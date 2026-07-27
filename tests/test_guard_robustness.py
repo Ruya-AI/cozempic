@@ -71,6 +71,15 @@ class TestReloadStateRegularFiles(unittest.TestCase):
             with patch("cozempic.guard._reload_armed_path", return_value=sentinel):
                 self.assertIsNone(read_armed("test-session"))
 
+    def test_read_armed_ignores_non_object_json(self):
+        from cozempic.guard import read_armed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sentinel = Path(tmpdir) / "armed.json"
+            sentinel.write_text("[]")
+            with patch("cozempic.guard._reload_armed_path", return_value=sentinel):
+                self.assertIsNone(read_armed("test-session"))
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
     def test_reload_ledger_ignores_fifo_without_blocking(self):
         from cozempic.guard import _reload_rate_exceeded

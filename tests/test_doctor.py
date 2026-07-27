@@ -474,6 +474,14 @@ class TestStaleTmpArtifacts(unittest.TestCase):
             result = check_stale_tmp_artifacts()
         self.assertEqual(result.status, "ok")
 
+    def test_lock_probe_is_nonblocking(self):
+        from cozempic.doctor import _is_lock_held
+
+        lock_path = self._make_lock_file("nonblocking-06")
+        with patch("cozempic.doctor.os.open", wraps=os.open) as open_file:
+            _is_lock_held(lock_path)
+        self.assertTrue(open_file.call_args.args[1] & os.O_NONBLOCK)
+
     def test_orphan_marker_is_reported_and_removed_when_guard_is_dead(self):
         marker = self.tmpdir / "cozempic_guard_orphan-06.orphan"
         marker.write_text("999999\n")

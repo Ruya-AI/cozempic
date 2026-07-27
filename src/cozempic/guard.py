@@ -3185,7 +3185,8 @@ def read_armed(session_id: str | None, session_path: Path | None = None) -> dict
         from .reload_lock import _read_regular_text
         p = _reload_armed_path(session_id, session_path)
         text = _read_regular_text(p)
-        return _json.loads(text) if text is not None else None
+        armed = _json.loads(text) if text is not None else None
+        return armed if isinstance(armed, dict) else None
     except Exception:
         return None
 

@@ -298,7 +298,7 @@ def _is_lock_held(lock_path: Path) -> bool:
     except ImportError:
         return True
     try:
-        flags = os.O_RDWR
+        flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(str(lock_path), flags)
