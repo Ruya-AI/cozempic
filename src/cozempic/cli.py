@@ -1304,25 +1304,7 @@ def cmd_init(args):
     if getattr(args, "uninstall_global", False):
         # Deprecated alias → `cozempic uninstall --global`.
         print("  Note: `init --uninstall-global` is deprecated; use `cozempic uninstall`.", file=sys.stderr)
-        from .init import uninstall_hooks
-        global_settings = _global_claude_dir() / "settings.json"
-        result = uninstall_hooks(str(Path.home()), settings_path=global_settings)
-        print("\n  COZEMPIC INIT — UNINSTALL GLOBAL")
-        print("  ═══════════════════════════════════════════════════════════════════")
-        if result.get("error"):
-            print(f"  Hooks: ERROR — {result['error']}")
-        elif result.get("removed"):
-            print(f"  Removed {len(result['removed'])} hook(s) from {result['settings_path']}")
-            for h in result["removed"]:
-                print(f"    - {h}")
-            if result.get("backup_path"):
-                print(f"  Backup: {result['backup_path']}")
-        else:
-            print("  No cozempic hooks found in ~/.claude/settings.json — nothing to remove.")
-        if not result.get("error"):
-            # Mark as opted-out so global auto-init doesn't re-fire.
-            _persist_global_init_marker()
-        print()
+        cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
         return
 
     if getattr(args, "global_install", False):

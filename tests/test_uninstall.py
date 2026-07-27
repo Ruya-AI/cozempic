@@ -191,6 +191,26 @@ class TestRunUninstall(_Base):
         self.assertTrue(result["purge_skipped"])
         self.assertTrue(data_dir.exists())
 
+    def test_purge_is_skipped_when_global_opt_out_cannot_be_persisted(self):
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        marker = self.home / "blocked" / ".cozempic_global_initialized"
+        original_touch = Path.touch
+
+        def fail_marker_touch(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("permission denied")
+            return original_touch(path, *args, **kwargs)
+
+        with patch.object(cz_init, "_global_init_marker", return_value=marker), patch.object(
+            Path, "touch", autospec=True, side_effect=fail_marker_touch
+        ):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
     def test_purge_preview_is_skipped_when_global_hook_cleanup_fails(self):
         from cozempic import cli
 
@@ -428,6 +448,22 @@ class TestPreviewAndDryRun(_Base):
         self.assertIn(str(local), preview["hooks_in"])
         cz_init.run_uninstall("global")
         self.assertNotIn("cozempic", local.read_text())
+
+    def test_deprecated_global_uninstall_removes_local_settings_too(self):
+        from cozempic import cli
+
+        settings = _settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        })
+        primary = self._write_global_settings(settings)
+        local = self._write_global_local_settings(settings)
+
+        with patch("sys.stdout", io.StringIO()):
+            cli.cmd_init(argparse.Namespace(uninstall_global=True))
+
+        self.assertNotIn("cozempic", primary.read_text())
+        self.assertNotIn("cozempic", local.read_text())
+        self.assertTrue((self.home / ".cozempic_global_initialized").exists())
 
     def test_cmd_dry_run_changes_nothing(self):
         from cozempic import cli

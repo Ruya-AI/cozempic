@@ -920,6 +920,7 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
             result["opt_out_set"] = True
         except OSError as exc:
             result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
+            global_cleanup_failed = True
 
     if purge and scope in ("global", "all") and global_cleanup_failed:
         result["purge_skipped"] = True
