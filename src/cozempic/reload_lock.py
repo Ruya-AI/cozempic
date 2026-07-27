@@ -160,8 +160,8 @@ class ReloadLockHeld(Exception):
         )
 
 
-def _read_regular_text(path: Path) -> str | None:
-    """Read a small metadata file without following a symlink."""
+def _read_regular_metadata(path: Path) -> tuple[str, float] | None:
+    """Read small metadata and mtime without following a symlink."""
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -172,13 +172,20 @@ def _read_regular_text(path: Path) -> str | None:
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
             return None
-        return os.read(fd, 4096).decode("utf-8")
+        return os.read(fd, 4096).decode("utf-8"), file_stat.st_mtime
     except (OSError, UnicodeDecodeError):
         return None
     finally:
         os.close(fd)
+
+
+def _read_regular_text(path: Path) -> str | None:
+    """Read a small metadata file without following a symlink."""
+    metadata = _read_regular_metadata(path)
+    return metadata[0] if metadata is not None else None
 
 
 def _read_lock_metadata(lock_path: Path) -> tuple[int, str, Optional[float]]:
@@ -517,16 +524,13 @@ def _reload_sentinel_active(session_id: str) -> bool:
     verbose. The docstring makes the side-effect explicit.
     """
     sentinel_path = _reload_sentinel_path_for(session_id)
-    if not sentinel_path.exists():
+    metadata = _read_regular_metadata(sentinel_path)
+    if metadata is None:
         return False
 
     # Use mtime for freshness — tests can manipulate it via os.utime, and it's
     # set atomically by the OS on file write (no parse errors possible).
-    try:
-        age = time.time() - sentinel_path.stat().st_mtime
-    except OSError:
-        # File disappeared between exists() and stat() — treat as absent
-        return False
+    age = time.time() - metadata[1]
 
     if age >= SENTINEL_TTL_SECONDS:
         # Stale — GC it

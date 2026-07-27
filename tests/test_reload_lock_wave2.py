@@ -70,6 +70,24 @@ class TestReloadLockAcquireRelease(unittest.TestCase):
                 lock.__enter__()
             self.assertEqual(held.exception.holder_pid, 0)
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_symlinked_fresh_sentinel_is_not_active(self):
+        from cozempic.reload_lock import _reload_sentinel_active
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            target = tmp / "fresh-sentinel"
+            sentinel_path = tmp / "reload.in-flight"
+            target.write_text("123\\n")
+            sentinel_path.symlink_to(target)
+
+            with patch(
+                "cozempic.reload_lock._reload_sentinel_path_for",
+                return_value=sentinel_path,
+            ):
+                self.assertFalse(_reload_sentinel_active("test-sentinel"))
+            self.assertTrue(sentinel_path.is_symlink())
+
 
 # ─── Single-flight: two acquirers race ───────────────────────────────────────
 
