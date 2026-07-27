@@ -52,6 +52,24 @@ class TestReloadLockAcquireRelease(unittest.TestCase):
         finally:
             lock_path.unlink(missing_ok=True)
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_symlinked_non_utf8_lock_is_not_followed(self):
+        from cozempic.reload_lock import _ReloadLock, ReloadLockHeld, _read_lock_metadata
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            target = tmp / "non-utf8"
+            lock_path = tmp / "reload.lock"
+            target.write_bytes(b"\xff")
+            lock_path.symlink_to(target)
+
+            self.assertEqual(_read_lock_metadata(lock_path), (0, "unknown", None))
+            lock = _ReloadLock("test-symlinked-lock")
+            lock._lock_path = lock_path
+            with self.assertRaises(ReloadLockHeld) as held:
+                lock.__enter__()
+            self.assertEqual(held.exception.holder_pid, 0)
+
 
 # ─── Single-flight: two acquirers race ───────────────────────────────────────
 

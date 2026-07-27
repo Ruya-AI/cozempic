@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -159,16 +160,37 @@ class ReloadLockHeld(Exception):
         )
 
 
+def _read_regular_text(path: Path) -> str | None:
+    """Read a small metadata file without following a symlink."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 4096).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
 def _read_lock_metadata(lock_path: Path) -> tuple[int, str, Optional[float]]:
     """Parse a lock file. Returns (pid, initiator, age_sec) — best effort.
 
     On any read/parse failure, returns (0, "unknown", None) so the caller
     can decide whether to treat as stale.
     """
-    try:
-        content = lock_path.read_text(encoding="utf-8").strip().split("\n")
-    except OSError:
+    text = _read_regular_text(lock_path)
+    if text is None:
         return 0, "unknown", None
+    content = text.strip().split("\n")
     pid = 0
     initiator = "unknown"
     age = None
@@ -382,10 +404,10 @@ def _read_sentinel_metadata(sentinel_path: Path) -> tuple[int, Optional[float]]:
     whether to treat as stale. Does NOT return the initiator field — callers
     only need pid and age for GC decisions.
     """
-    try:
-        content = sentinel_path.read_text(encoding="utf-8").strip().split("\n")
-    except OSError:
+    text = _read_regular_text(sentinel_path)
+    if text is None:
         return 0, None
+    content = text.strip().split("\n")
     pid = 0
     age = None
     if len(content) >= 1:
