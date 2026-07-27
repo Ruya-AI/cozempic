@@ -791,6 +791,19 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
         )
         mock_makedirs.assert_called_once()
 
+    def test_log_open_error_is_reported_as_log_failure(self):
+        from cozempic.guard import start_guard_daemon
+
+        with (
+            patch("cozempic.guard.find_claude_pid", return_value=12345),
+            patch("cozempic.guard._cleanup_legacy_pid"),
+            patch("cozempic.guard._open_guard_log", side_effect=OSError("permission denied")),
+        ):
+            result = start_guard_daemon(cwd=os.getcwd(), session_id=self.SESSION_ID)
+
+        self.assertFalse(result["started"])
+        self.assertIn("log file: permission denied", result["reason"])
+
 
 class TestDaemonSpawnLockUnit(unittest.TestCase):
     """Direct contract tests on the spawn_lock module."""

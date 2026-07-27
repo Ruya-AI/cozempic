@@ -770,8 +770,8 @@ def start_guard(
         claude_pid = find_claude_pid()
     # Record PID + start_time NOW — earliest point where both claude_pid and
     # session_id are known and Claude's identity is confirmed by find_claude_pid.
-    if claude_pid and session_id:
-        _record_claude_identity(session_id, claude_pid)
+    if claude_pid:
+        _record_claude_identity(sess["session_id"], claude_pid)
     claude_alive = True
 
     prune_count = 0
@@ -1017,7 +1017,7 @@ def start_guard(
                         # PID reuse (daemon started hours ago; original Claude exited and
                         # kernel recycled its PID to an unrelated process).
                         try:
-                            if not _pid_identity_match(claude_pid, session_id) \
+                            if not _pid_identity_match(claude_pid, sess["session_id"]) \
                                     or not _is_claude_process(claude_pid, session_path=session_path):
                                 claude_alive = False
                         except ProcessLookupError:
@@ -1025,8 +1025,7 @@ def start_guard(
                     if not claude_alive:
                         print(f"  [{_now()}] Claude process exited (PID {claude_pid}). Final checkpoint...")
                         # Clear start-time record: this session's Claude is gone.
-                        if session_id:
-                            _CLAUDE_IDENTITY.pop(session_id, None)
+                        _CLAUDE_IDENTITY.pop(sess["session_id"], None)
                         # Option (b) defense-in-depth: unlink pidfile IMMEDIATELY so a
                         # concurrent SessionStart for the new Claude doesn't see a stale
                         # transient-daemon slot. The finally-block call is a no-op after
@@ -3640,10 +3639,9 @@ def start_guard_daemon(
         # structured `{started: False, reason: ...}`. The claim's
         # __exit__ will unlink the PID file on exception, so a retry is
         # possible.
+        # Defense-in-depth: if the log file's parent dir was removed mid-spawn
+        # (race with operator cleanup, /tmp eviction, etc.), recreate it once.
         try:
-            # Defense-in-depth: if the log file's parent dir was removed
-            # mid-spawn (race with operator cleanup, /tmp eviction, etc.)
-            # recreate it once and retry the open.
             try:
                 lf = _open_guard_log(log_file)
             except FileNotFoundError:
@@ -3651,6 +3649,17 @@ def start_guard_daemon(
                 if log_dir:
                     os.makedirs(log_dir, exist_ok=True)
                 lf = _open_guard_log(log_file)
+        except OSError as exc:
+            return {
+                "started": False,
+                "reason": f"log file: {exc}",
+                "pid": None,
+                "pid_file": str(pid_path),
+                "log_file": None,
+                "already_running": False,
+            }
+
+        try:
 
             try:
                 from datetime import datetime
