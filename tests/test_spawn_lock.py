@@ -109,13 +109,14 @@ class TestThreeProcessContention(unittest.TestCase):
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.session_id = f"race3-{uuid.uuid4()}"
+        self.session_id = uuid.uuid4().hex
         self.pid_path = _pid_file_for_session(self.session_id)
+        self.log_path = self.pid_path.with_suffix(".log")
         self.paths = (
             self.pid_path,
-            self.pid_path.with_suffix(".log"),
+            self.log_path,
             self.pid_path.with_suffix(".pid.tmp"),
-            self.pid_path.with_suffix(".reclaim-lock"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
         )
         for path in self.paths:
             path.unlink(missing_ok=True)
@@ -196,13 +197,13 @@ class TestV4TenProcessContention(unittest.TestCase):
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.session_id = f"race10-{uuid.uuid4()}"
+        self.session_id = uuid.uuid4().hex
         self.pid_path = _pid_file_for_session(self.session_id)
         self.paths = (
             self.pid_path,
             self.pid_path.with_suffix(".log"),
             self.pid_path.with_suffix(".pid.tmp"),
-            self.pid_path.with_suffix(".reclaim-lock"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
         )
         for path in self.paths:
             path.unlink(missing_ok=True)
@@ -280,20 +281,23 @@ class TestNoPlaceholderPidVisible(unittest.TestCase):
     only "no file" or "file with real PID > 0" should ever be observable.
     """
 
-    SESSION_ID = "babe1234-5678-9abc-def0-2026051811dd"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_no_placeholder_pid_ever_visible(self):
         """Run start_guard_daemon while a tight reader loop observes the
@@ -324,7 +328,7 @@ class TestNoPlaceholderPidVisible(unittest.TestCase):
             mock_popen.return_value.pid = 88888
             result = start_guard_daemon(
                 cwd=os.getcwd(),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -532,7 +536,7 @@ class TestFreshClaimProtection(unittest.TestCase):
         from cozempic import spawn_lock
         from cozempic.guard import _pid_file_for_session, start_guard_daemon
 
-        session_id = "beef1234-5678-9abc-def0-2026051811aa"
+        session_id = uuid.uuid4().hex
         pid_path = _pid_file_for_session(session_id)
         tmp_path = pid_path.with_suffix(".pid.tmp")
         pid_path.unlink(missing_ok=True)
@@ -621,12 +625,11 @@ class TestSymlinkDefense(unittest.TestCase):
       - leaves the symlink target untouched
     """
 
-    SESSION_ID = "ca7ec0de-1234-5678-9abc-2026051811f0"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
         self.tmp_pid_path = self.pid_path.with_suffix(".pid.tmp")
         self.log_path = self.pid_path.with_suffix(".log")
         # Clean slate
@@ -682,7 +685,7 @@ class TestSymlinkDefense(unittest.TestCase):
         ):
             result = start_guard_daemon(
                 cwd=str(self.tmpdir),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -720,7 +723,7 @@ class TestSymlinkDefense(unittest.TestCase):
         ):
             result = start_guard_daemon(
                 cwd=str(self.tmpdir),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -742,20 +745,24 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
     """If the log file's parent dir vanishes mid-spawn, the daemon must
     recover with one retry — not crash the SessionStart hook."""
 
-    SESSION_ID = "feed1234-5678-9abc-def0-2026051811ee"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
         self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.paths = (
+            self.pid_path,
+            self.log_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_filenotfounderror_recovery(self):
         """First log open raises FileNotFoundError, second succeeds."""
@@ -784,7 +791,7 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
             mock_popen.return_value.pid = 77777
             result = start_guard_daemon(
                 cwd=os.getcwd(),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -808,7 +815,7 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
             patch("cozempic.guard._cleanup_legacy_pid"),
             patch("cozempic.guard._open_guard_log", side_effect=OSError("permission denied")),
         ):
-            result = start_guard_daemon(cwd=os.getcwd(), session_id=self.SESSION_ID)
+            result = start_guard_daemon(cwd=os.getcwd(), session_id=self.session_id)
 
         self.assertFalse(result["started"])
         self.assertIn("log file: permission denied", result["reason"])
