@@ -160,11 +160,21 @@ class TestArmNudgeFromResult(unittest.TestCase):
             a1 = guard.read_armed("sess-at", None)
             self.assertIn("armed_at", a1)
             guard.mark_armed_warned("sess-at", None)
-            guard.write_armed("sess-at", None, 55, 0.0)  # re-arm same tier, no proj
+            guard.write_armed("sess-at", None, 55, None)  # re-arm same tier, no new projection
             a2 = guard.read_armed("sess-at", None)
         self.assertEqual(a1["armed_at"], a2["armed_at"], "grace clock preserved on re-arm")
         self.assertTrue(a2["warned"], "warned preserved on same-tier re-arm")
         self.assertEqual(a2["projected_pct"], 30.0, "projection preserved when re-arm has none")
+
+    def test_write_armed_overwrites_projection_with_zero(self):
+        from cozempic import guard
+
+        with patch("cozempic.guard._guard_tmp_root", return_value=self.scratch):
+            guard.write_armed("sess-zero", None, 55, 30.0)
+            guard.write_armed("sess-zero", None, 55, 0.0)
+            armed = guard.read_armed("sess-zero", None)
+
+        self.assertEqual(armed["projected_pct"], 0.0)
 
     def test_mark_armed_warned_upserts(self):
         # The nudge can warn before the daemon arms — mark must CREATE the sentinel.

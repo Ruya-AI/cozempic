@@ -3199,7 +3199,7 @@ def _write_armed_atomic(path: Path, data: dict) -> None:
     atomic_write_text(path, _json.dumps(data))
 
 
-def write_armed(session_id, session_path, tier: int, projected_pct: float) -> None:
+def write_armed(session_id, session_path, tier: int, projected_pct: float | None) -> None:
     import time as _time
     try:
         p = _reload_armed_path(session_id, session_path)
@@ -3212,7 +3212,7 @@ def write_armed(session_id, session_path, tier: int, projected_pct: float) -> No
         # the warned-before-reload timeout; keep a known projection if none given.
         warned = bool(existing.get("warned"))
         armed_at = existing.get("armed_at") or _time.time()
-        proj = round(projected_pct, 1) if projected_pct else existing.get("projected_pct", 0.0)
+        proj = round(projected_pct, 1) if projected_pct is not None else existing.get("projected_pct", 0.0)
         _write_armed_atomic(p, {"tier": tier, "projected_pct": proj,
                                 "warned": warned, "armed_at": armed_at})
     except Exception:
