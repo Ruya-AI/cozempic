@@ -178,6 +178,27 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                         cli._maybe_auto_init(["list"])
                         ri.assert_called_once()
 
+    def test_refreshes_stale_project_hooks_despite_uninstall_marker(self):
+        """A stale installation establishes consent even if marker cleanup failed."""
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            self._write_stale_hooks(project / ".claude")
+            (project / ".claude" / ".cozempic_uninstalled").touch()
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(
+                        cli,
+                        "run_init",
+                        return_value={"hooks": {"added": [], "updated": ["SessionStart[]"]}},
+                    ) as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_called_once()
+
     def test_warns_when_global_current_and_local_hooks_present(self):
         """Global hooks current + local hooks exist -> warn to stderr."""
         from cozempic import cli

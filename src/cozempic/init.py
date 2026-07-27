@@ -283,7 +283,7 @@ def _save_settings(path: Path, settings: dict) -> None:
     entire Claude Code config on a bad interrupt.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    import os as _os, tempfile as _tempfile, stat as _stat
+    import os as _os, tempfile as _tempfile
 
     # Capture original permissions before we replace (Claude Code creates
     # settings.json as 0o644; mkstemp creates 0o600 — we must restore).
@@ -895,8 +895,8 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
             if _REMIND_COUNTER.exists():
                 _REMIND_COUNTER.unlink()
                 result["remind_counter_removed"] = True
-        except OSError:
-            pass
+        except OSError as exc:
+            result["errors"].append(f"Could not remove remind counter: {exc}")
 
     if scope in ("global", "all") and not global_cleanup_failed:
         # Opt-out: keep global auto-init from re-wiring after global uninstall.

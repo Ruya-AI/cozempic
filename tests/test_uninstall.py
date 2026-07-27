@@ -242,6 +242,13 @@ class TestRunUninstall(_Base):
         self.assertTrue(res["remind_counter_removed"])
         self.assertFalse((self.home / ".cozempic_remind_counter").exists())
 
+    def test_reports_remind_counter_removal_failure(self):
+        counter = self.home / ".cozempic_remind_counter"
+        counter.write_text("3")
+        with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
+            res = cz_init.run_uninstall("global")
+        self.assertIn("Could not remove remind counter: permission denied", res["errors"])
+
     def test_surfaces_malformed_global_settings(self):
         path = self.home / ".claude" / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)

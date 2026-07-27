@@ -1235,7 +1235,7 @@ def cmd_uninstall(args):
         )
         print(f"    Slash command (~/.claude/commands/cozempic.md): {slash_status}")
         print(f"    Remind counter: {'remove' if prev['remind_counter'] else '(none)'}")
-        for error in prev.get("hook_errors", prev.get("errors", [])):
+        for error in prev["hook_errors"]:
             print(f"    Hooks: ERROR — {error}")
         if prev.get("slash_error"):
             print(f"    Slash command: ERROR — {prev['slash_error']}")
@@ -2341,9 +2341,6 @@ def _maybe_auto_init(argv: list[str]) -> None:
     claude_dir = Path.cwd() / ".claude"
     if not claude_dir.exists():
         return  # not a Claude project — never modify foreign directories
-    if project_uninstall_marker(str(Path.cwd())).exists():
-        return  # explicit project uninstall is an opt-out until `cozempic init`
-
     cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
     if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:
         return
@@ -2384,6 +2381,8 @@ def _maybe_auto_init(argv: list[str]) -> None:
         return
     if project_state.found and project_state.current:
         return  # already initialized
+    if project_uninstall_marker(str(Path.cwd())).exists() and not project_state.found:
+        return  # explicit project uninstall remains an opt-out for first install
 
     try:
         result = run_init(str(Path.cwd()))
