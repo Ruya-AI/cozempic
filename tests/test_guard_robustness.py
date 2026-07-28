@@ -133,14 +133,13 @@ class TestReloadSelfDaemon(unittest.TestCase):
         self.assertIsNone(result.get("new_pid"))
         self.assertIn("no daemon", result["reason"].lower())
 
-    def test_retry_preserves_orphaned_pid_from_first_spawn(self):
+    def test_orphaned_spawn_is_not_retried(self):
         from cozempic.guard import reload_self_daemon
 
         session_id = "11111111-2222-3333-4444-555555555555"
         with tempfile.TemporaryDirectory() as tmpdir:
             pid_path = Path(tmpdir) / "guard.pid"
             first = {"started": False, "already_running": False, "orphaned_pid": 111}
-            second = {"started": True, "already_running": False, "pid": 222, "log_file": "guard.log"}
             with (
                 patch("cozempic.guard._is_guard_running_for_session", return_value=123),
                 patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
@@ -148,13 +147,14 @@ class TestReloadSelfDaemon(unittest.TestCase):
                 patch("cozempic.guard._wait_for_exit", return_value=True),
                 patch("cozempic.guard.os.kill"),
                 patch("cozempic.guard.time.sleep"),
-                patch("cozempic.guard.start_guard_daemon", side_effect=[first, second]),
+                patch("cozempic.guard.start_guard_daemon", return_value=first) as start,
             ):
                 result = reload_self_daemon(cwd=tmpdir, session_id=session_id)
 
-        self.assertTrue(result["reloaded"])
-        self.assertEqual(result["new_pid"], 222)
+        self.assertFalse(result["reloaded"])
+        self.assertIsNone(result["new_pid"])
         self.assertEqual(result["orphaned_pid"], 111)
+        start.assert_called_once()
 
 
 class TestGuardDaemonPidHandoff(unittest.TestCase):

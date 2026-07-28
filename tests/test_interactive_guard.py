@@ -176,12 +176,15 @@ class TestArmNudgeFromResult(unittest.TestCase):
 
         self.assertEqual(armed["projected_pct"], 0.0)
 
-    def test_read_armed_drops_nonnumeric_grace_fields(self):
+    def test_read_armed_drops_invalid_fields(self):
         from cozempic import guard
 
         with patch("cozempic.guard._guard_tmp_root", return_value=self.scratch):
             path = guard._reload_armed_path("sess-malformed", None)
-            path.write_text('{"armed_at": "later", "tier": "hard"}')
+            path.write_text(
+                '{"armed_at": true, "tier": "hard", '
+                '"projected_pct": "unknown", "warned": "yes"}'
+            )
             armed = guard.read_armed("sess-malformed", None)
 
         self.assertEqual(armed, {})

@@ -3188,9 +3188,14 @@ def read_armed(session_id: str | None, session_path: Path | None = None) -> dict
         armed = _json.loads(text) if text is not None else None
         if not isinstance(armed, dict):
             return None
-        for key in ("armed_at", "tier"):
-            if key in armed and not isinstance(armed[key], (int, float)):
+        for key in ("armed_at", "tier", "projected_pct"):
+            if key in armed and (
+                isinstance(armed[key], bool)
+                or not isinstance(armed[key], (int, float))
+            ):
                 armed.pop(key)
+        if "warned" in armed and not isinstance(armed["warned"], bool):
+            armed.pop("warned")
         return armed
     except Exception:
         return None
@@ -4251,7 +4256,11 @@ def reload_self_daemon(
     )
     result = start_guard_daemon(**daemon_args)
     orphaned_pid = result.get("orphaned_pid")
-    if not result.get("started") and not result.get("already_running"):
+    if (
+        not result.get("started")
+        and not result.get("already_running")
+        and orphaned_pid is None
+    ):
         time.sleep(1)
         # Only clear a pid file we know is stale (pointing at a dead pid).
         # Do NOT blindly unlink — a live concurrent daemon may have written it.
