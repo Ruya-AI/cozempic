@@ -1,5 +1,7 @@
 # Cozempic
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FRuya-AI%2Fcozempic.svg)](https://mcptoplist.com/server/glama%2FRuya-AI%2Fcozempic)
+
 ![Downloads](https://img.shields.io/badge/downloads-100k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.8.39-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **100,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
