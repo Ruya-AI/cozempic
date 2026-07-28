@@ -1,6 +1,6 @@
 """Tests for _maybe_auto_init() skipping local init when global hooks are current."""
+import io
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,16 +10,26 @@ from unittest import mock
 class TestAutoInitGlobalSkip(unittest.TestCase):
     """_maybe_auto_init() must skip local init when global hooks are current."""
 
+    def setUp(self):
+        self._config_patch = mock.patch(
+            "cozempic.session.get_claude_dir",
+            side_effect=lambda: Path.home() / ".claude",
+        )
+        self._config_patch.start()
+
+    def tearDown(self):
+        self._config_patch.stop()
+
     def _make_project(self, tmpdir):
         """Create a fake project with .claude/ dir under tmpdir."""
         project = Path(tmpdir) / "myproject"
         (project / ".claude").mkdir(parents=True)
         return project
 
-    def _write_current_hooks(self, claude_dir):
+    def _write_current_hooks(self, claude_dir, filename="settings.json"):
         """Write a settings.json with current-schema cozempic hooks."""
         from cozempic.init import HOOK_SCHEMA_MARKER
-        settings = claude_dir / "settings.json"
+        settings = claude_dir / filename
         settings.write_text(json.dumps({
             "hooks": {
                 "SessionStart": [{
@@ -32,9 +42,9 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             }
         }))
 
-    def _write_stale_hooks(self, claude_dir):
+    def _write_stale_hooks(self, claude_dir, filename="settings.json"):
         """Write a settings.json with stale (pre-schema) cozempic hooks."""
-        settings = claude_dir / "settings.json"
+        settings = claude_dir / filename
         settings.write_text(json.dumps({
             "hooks": {
                 "SessionStart": [{
@@ -64,6 +74,61 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                         cli._maybe_auto_init(["list"])
                         ri.assert_not_called()
 
+    def test_skips_when_managed_global_hooks_current_despite_stale_local_file(self):
+        """Global settings.local.json must not override managed global hooks."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            self._write_current_hooks(home_claude)
+            self._write_stale_hooks(home_claude, "settings.local.json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
+
+    def test_skips_when_managed_global_hooks_current_despite_malformed_local_file(self):
+        """Unreadable unmanaged global-local state must not trigger local hooks."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            self._write_current_hooks(home_claude)
+            (home_claude / "settings.local.json").write_text("{broken json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
+
+    def test_skips_local_init_when_managed_global_settings_are_malformed(self):
+        """Do not install local hooks while managed global settings need repair."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home_claude = home / ".claude"
+            home_claude.mkdir(parents=True)
+            (home_claude / "settings.json").write_text("{broken json")
+            project = self._make_project(tmp)
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch("sys.stderr") as mock_stderr:
+                        with mock.patch.object(cli, "run_init") as ri:
+                            cli._maybe_auto_init(["list"])
+                            ri.assert_not_called()
+            output = "".join(
+                call.args[0] for call in mock_stderr.write.call_args_list if call.args
+            )
+            self.assertIn("auto-init skipped", output)
+
     def test_fires_when_global_hooks_absent(self):
         """No global hooks -> local auto-init should fire."""
         from cozempic import cli
@@ -81,6 +146,21 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
                         cli._maybe_auto_init(["list"])
                         ri.assert_called_once()
 
+    def test_skips_when_project_local_hooks_current(self):
+        """A current local hook must not be duplicated into settings.json."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            self._write_current_hooks(project / ".claude", "settings.local.json")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_not_called()
+
     def test_fires_when_global_hooks_stale(self):
         """Global hooks stale (old schema) -> local auto-init should fire."""
         from cozempic import cli
@@ -95,6 +175,27 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             with mock.patch.object(cli.Path, "home", return_value=home):
                 with mock.patch.object(cli.Path, "cwd", return_value=project):
                     with mock.patch.object(cli, "run_init", return_value={"hooks": {"added": ["SessionStart[]"], "updated": []}}) as ri:
+                        cli._maybe_auto_init(["list"])
+                        ri.assert_called_once()
+
+    def test_refreshes_stale_project_hooks_despite_uninstall_marker(self):
+        """A stale installation establishes consent even if marker cleanup failed."""
+        from cozempic import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            self._write_stale_hooks(project / ".claude")
+            (project / ".claude" / ".cozempic_uninstalled").touch()
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(
+                        cli,
+                        "run_init",
+                        return_value={"hooks": {"added": [], "updated": ["SessionStart[]"]}},
+                    ) as ri:
                         cli._maybe_auto_init(["list"])
                         ri.assert_called_once()
 
@@ -165,14 +266,83 @@ class TestAutoInitGlobalSkip(unittest.TestCase):
             # cwd IS the home dir -- home_claude == claude_dir
             with mock.patch.object(cli.Path, "home", return_value=home):
                 with mock.patch.object(cli.Path, "cwd", return_value=home):
-                    # Return False so the local check falls through to run_init.
+                    # Return an empty local state so the local check falls through to run_init.
                     # If the guard were missing, the global-skip branch would fire
                     # (real hooks ARE current) and return early -- run_init would
                     # never be called. So run_init being called proves the guard works.
-                    with mock.patch.object(cli, "_project_is_cozempic_current", return_value=False):
+                    with mock.patch.object(
+                        cli,
+                        "_project_cozempic_hook_state",
+                        return_value=mock.Mock(found=False, current=False, error=None),
+                    ):
                         with mock.patch.object(cli, "run_init", return_value={"hooks": {"added": ["SessionStart[]"], "updated": []}}) as ri:
                             cli._maybe_auto_init(["list"])
                             ri.assert_called_once()
+
+    def test_skips_when_project_settings_are_malformed(self):
+        """A broken local settings file must not be overwritten by auto-init."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            (project / ".claude" / "settings.local.json").write_text("{broken json")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as run_init:
+                        cli._maybe_auto_init(["list"])
+                        run_init.assert_not_called()
+
+    def test_skips_when_project_settings_are_valid_non_object_json(self):
+        """A scalar settings.local.json must not crash or be overwritten."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".claude").mkdir(parents=True)
+            project = self._make_project(tmp)
+            (project / ".claude" / "settings.local.json").write_text("[]")
+
+            with mock.patch.object(cli.Path, "home", return_value=home):
+                with mock.patch.object(cli.Path, "cwd", return_value=project):
+                    with mock.patch.object(cli, "run_init") as run_init:
+                        cli._maybe_auto_init(["list"])
+                        run_init.assert_not_called()
+
+    def test_reports_local_cleanup_error_after_auto_init(self):
+        """A cleanup failure must not hide behind a successful main settings write."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self._make_project(tmp)
+            stderr = io.StringIO()
+            result = {
+                "hooks": {
+                    "added": [], "updated": [], "repaired": False,
+                    "warnings": ["Could not clear project uninstall marker: permission denied"],
+                },
+                "local_cleanup": {"error": "could not parse settings.local.json"},
+            }
+            with mock.patch.object(cli.Path, "cwd", return_value=project), \
+                    mock.patch.object(cli, "_global_claude_dir", return_value=project / ".claude"), \
+                    mock.patch.object(cli, "_project_cozempic_hook_state", return_value=mock.Mock(found=False, current=False, error=None)), \
+                    mock.patch.object(cli, "run_init", return_value=result), \
+                    mock.patch.object(cli.sys, "stderr", stderr):
+                cli._maybe_auto_init(["list"])
+            self.assertIn("local settings cleanup FAILED", stderr.getvalue())
+            self.assertIn("Could not clear project uninstall marker", stderr.getvalue())
+
+    def test_global_uninstall_opt_out_blocks_project_auto_init(self):
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self._make_project(tmp)
+            marker = Path(tmp) / "global-uninstalled"
+            marker.touch()
+            with mock.patch.object(cli.Path, "cwd", return_value=project), \
+                    mock.patch.object(cli, "_global_init_marker", return_value=marker), \
+                    mock.patch.object(cli, "_managed_cozempic_hook_state", return_value=mock.Mock(found=False, current=False, error=None)), \
+                    mock.patch.object(cli, "run_init") as run_init:
+                cli._maybe_auto_init(["list"])
+            run_init.assert_not_called()
 
 
 if __name__ == "__main__":

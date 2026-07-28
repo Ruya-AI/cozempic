@@ -54,6 +54,11 @@ class TestResolveAndBake(unittest.TestCase):
                 _, eph = cz._resolve_cozempic_python()
                 self.assertTrue(eph, f"{p} should be ephemeral")
 
+    def test_resolve_flags_windows_uvx_ephemeral(self):
+        with patch("cozempic.init.sys.executable", r"C:\Users\x\.cache\uv\environments-v2\abc\python.exe"):
+            _, ephemeral = cz._resolve_cozempic_python()
+        self.assertTrue(ephemeral)
+
     def test_resolve_degrades_when_sys_executable_empty(self):
         # exotic frozen interpreters can have an empty sys.executable — must NOT
         # return "" (which would bake an empty `'' -m cozempic` no-op command).
@@ -73,6 +78,115 @@ class TestResolveAndBake(unittest.TestCase):
             with patch("cozempic.init.sys.executable", p):
                 _, eph = cz._resolve_cozempic_python()
                 self.assertFalse(eph, f"{p} should be persistent")
+
+    def test_settings_scalar_returns_error_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text("[]")
+            self.assertTrue(cz.cozempic_hook_schema_state(path).error)
+            self.assertIn("JSON object", cz.wire_hooks(tmp)["error"])
+            self.assertIn("JSON object", cz.uninstall_hooks(tmp)["error"])
+
+    def test_wire_hooks_reports_non_dict_top_level_hooks_as_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": "broken"}')
+            result = cz.wire_hooks(tmp)
+            self.assertTrue(result["repaired"])
+            self.assertIsInstance(json.loads(path.read_text())["hooks"], dict)
+
+    def test_null_hook_containers_are_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": null}}')
+            result = cz.wire_hooks(tmp)
+            self.assertFalse(result.get("error"))
+            settings = json.loads(path.read_text())
+            self.assertIsInstance(settings["hooks"]["SessionStart"], list)
+
+    def test_wire_hooks_repairs_malformed_nested_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [null, {"matcher": "", "hooks": null}]}}')
+            result = cz.wire_hooks(tmp)
+            self.assertFalse(result.get("error"))
+            settings = json.loads(path.read_text())
+            entries = settings["hooks"]["SessionStart"]
+            self.assertTrue(entries)
+            self.assertTrue(all(isinstance(entry, dict) for entry in entries))
+            self.assertTrue(all(isinstance(entry.get("hooks"), list) for entry in entries))
+
+    def test_wire_hooks_repairs_non_object_hook_elements(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                '{"hooks": {"SessionStart": [{"hooks": ["bad", {"command": "echo ok"}]}]}}'
+            )
+            result = cz.wire_hooks(tmp)
+            self.assertTrue(result["repaired"])
+            settings = json.loads(path.read_text())
+            hooks = settings["hooks"]["SessionStart"][0]["hooks"]
+            self.assertTrue(all(isinstance(hook, dict) for hook in hooks))
+
+    def test_wire_hooks_drops_entries_with_only_invalid_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": ["bad"]}]}}')
+            cz.wire_hooks(tmp)
+            settings = json.loads(path.read_text())
+            entries = settings["hooks"]["SessionStart"]
+            self.assertTrue(all(entry.get("hooks") for entry in entries))
+
+    def test_hook_state_tolerates_truthy_non_list_containers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": 5}]}}')
+            self.assertFalse(cz.cozempic_hook_schema_state(path).error)
+
+    def test_hook_commands_tolerate_non_string_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"hooks": {"SessionStart": [{"hooks": [{"command": null}]}]}}')
+            self.assertFalse(cz.wire_hooks(tmp).get("error"))
+            self.assertFalse(cz.uninstall_hooks(tmp).get("error"))
+
+    def test_init_replaces_stale_local_hooks_with_project_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text('{"hooks": {"SessionStart": [{"hooks": [{"command": "{ cozempic guard; } # cozempic-hook-schema=v1"}]}]}}')
+            cz.run_init(tmp, skip_slash=True)
+            self.assertNotIn("cozempic", local.read_text())
+            settings = json.loads((Path(tmp) / ".claude" / "settings.json").read_text())
+            self.assertIn("cozempic", json.dumps(settings))
+
+    def test_init_reports_malformed_local_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text("{broken json")
+            result = cz.run_init(tmp, skip_slash=True)
+            self.assertIn("error", result["local_cleanup"])
+
+    def test_init_keeps_local_hooks_when_primary_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text('{"hooks": {"SessionStart": []}}')
+            with patch("cozempic.init.wire_hooks", return_value={"error": "primary failed"}), \
+                    patch("cozempic.init.uninstall_hooks") as uninstall_hooks:
+                result = cz.run_init(tmp, skip_slash=True)
+            self.assertEqual(result["hooks"]["error"], "primary failed")
+            self.assertIsNone(result["local_cleanup"])
+            uninstall_hooks.assert_not_called()
 
 
 class TestWireHooksBakes(unittest.TestCase):

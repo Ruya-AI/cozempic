@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +50,12 @@ class _Base(unittest.TestCase):
         p.write_text(json.dumps(settings))
         return p
 
+    def _write_global_local_settings(self, settings):
+        p = self.home / ".claude" / "settings.local.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(settings))
+        return p
+
     def _write_slash(self, content):
         p = self.home / ".claude" / "commands" / "cozempic.md"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +64,57 @@ class _Base(unittest.TestCase):
 
 
 class TestRunUninstall(_Base):
+    def test_project_uninstall_blocks_auto_init_until_explicit_init(self):
+        from cozempic import cli
+
+        project = self.home / "project"
+        (project / ".claude").mkdir(parents=True)
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            result = cz_init.run_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        marker = project / ".claude" / ".cozempic_uninstalled"
+        self.assertTrue(marker.exists())
+        self.assertTrue(result["project_opt_out_set"])
+        self.assertFalse((self.home / ".cozempic_global_initialized").exists())
+
+        with patch.object(cli.Path, "cwd", return_value=project):
+            with patch.object(cli, "run_init") as auto_init:
+                cli._maybe_auto_init(["list"])
+                auto_init.assert_not_called()
+
+        cz_init.run_init(str(project), skip_slash=True)
+        self.assertFalse(marker.exists())
+
+    def test_project_uninstall_error_does_not_set_opt_out_marker(self):
+        project = self.home / "project-error"
+        claude = project / ".claude"
+        claude.mkdir(parents=True)
+        (claude / "settings.json").write_text('{"hooks": {}}')
+        (claude / "settings.local.json").write_text("{broken json")
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            result = cz_init.run_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue(result["errors"])
+        self.assertFalse((claude / ".cozempic_uninstalled").exists())
+
+    def test_global_local_settings_error_still_sets_managed_opt_out_marker(self):
+        claude = self.home / ".claude"
+        claude.mkdir(parents=True, exist_ok=True)
+        (claude / "settings.json").write_text('{"hooks": {}}')
+        (claude / "settings.local.json").write_text("{broken json")
+
+        result = cz_init.run_uninstall("global")
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["opt_out_set"])
+        self.assertTrue((self.home / ".cozempic_global_initialized").exists())
+
     def test_removes_global_hooks_and_slash(self):
         self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
@@ -99,6 +158,256 @@ class TestRunUninstall(_Base):
         # opt-out marker still set even on purge (so auto-init doesn't re-fire)
         self.assertTrue((self.home / ".cozempic_global_initialized").exists())
 
+    def test_purge_failure_is_reported(self):
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        with patch("shutil.rmtree", side_effect=OSError("permission denied")):
+            result = cz_init.run_uninstall("global", purge=True)
+        self.assertIn("Purge failed", result["errors"][0])
+
+    def test_purge_is_skipped_when_global_hook_cleanup_fails(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["purged"], [])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
+    def test_purge_is_skipped_when_global_local_cleanup_fails(self):
+        path = self.home / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["opt_out_set"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
+    def test_purge_is_skipped_when_slash_cleanup_fails(self):
+        self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["purged"], [])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
+    def test_purge_is_skipped_when_global_opt_out_cannot_be_persisted(self):
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        marker = self.home / "blocked" / ".cozempic_global_initialized"
+        original_touch = Path.touch
+
+        def fail_marker_touch(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("permission denied")
+            return original_touch(path, *args, **kwargs)
+
+        with patch.object(cz_init, "_global_init_marker", return_value=marker), patch.object(
+            Path, "touch", autospec=True, side_effect=fail_marker_touch
+        ):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
+    def test_purge_is_skipped_when_remind_counter_cleanup_fails(self):
+        counter = self.home / ".cozempic_remind_counter"
+        counter.write_text("3")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        original_unlink = Path.unlink
+
+        def fail_counter_unlink(path, *args, **kwargs):
+            if path == counter:
+                raise OSError("permission denied")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", autospec=True, side_effect=fail_counter_unlink):
+            result = cz_init.run_uninstall("global", purge=True)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertTrue(data_dir.exists())
+
+    def test_all_purge_is_skipped_when_project_cleanup_fails(self):
+        project = self.home / "project"
+        local_settings = project / ".claude" / "settings.local.json"
+        local_settings.parent.mkdir(parents=True)
+        local_settings.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            result = cz_init.run_uninstall("all", purge=True)
+            preview = cz_init.preview_uninstall("all", purge=True)
+        finally:
+            os.chdir(previous_cwd)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertFalse(result["project_opt_out_set"])
+        self.assertTrue(data_dir.exists())
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+
+    def test_all_purge_is_skipped_when_project_opt_out_cannot_be_persisted(self):
+        project = self.home / "project"
+        (project / ".claude").mkdir(parents=True)
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        marker = project / ".claude" / ".cozempic_uninstalled"
+        original_touch = Path.touch
+
+        def fail_project_marker_touch(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("permission denied")
+            return original_touch(path, *args, **kwargs)
+
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            with patch.object(cz_init, "project_uninstall_marker", return_value=marker), patch.object(
+                Path, "touch", autospec=True, side_effect=fail_project_marker_touch
+            ):
+                result = cz_init.run_uninstall("all", purge=True)
+        finally:
+            os.chdir(previous_cwd)
+
+        self.assertTrue(result["errors"])
+        self.assertTrue(result["purge_skipped"])
+        self.assertFalse(result["project_opt_out_set"])
+        self.assertTrue(data_dir.exists())
+
+    def test_purge_preview_is_skipped_when_global_hook_cleanup_fails(self):
+        from cozempic import cli
+
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+
+        preview = cz_init.preview_uninstall("global", purge=True)
+
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("sys.stdout", output):
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=True, dry_run=True)
+            )
+        self.assertIn("Purge data: skipped due to a hook/settings error above", output.getvalue())
+
+    def test_purge_preview_is_skipped_when_slash_read_fails(self):
+        slash = self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        data_dir = self.home / ".cozempic"
+        data_dir.mkdir()
+        original_read_text = Path.read_text
+
+        def fail_slash_read(path, *args, **kwargs):
+            if path == slash:
+                raise OSError("permission denied")
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=fail_slash_read):
+            preview = cz_init.preview_uninstall("global", purge=True)
+
+        self.assertTrue(preview["purge_skipped"])
+        self.assertEqual(preview["purge_data"], [])
+        self.assertTrue(preview["slash_error"])
+
+    def test_uninstall_write_failure_is_reported(self):
+        self._write_global_settings(_settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        }))
+        with patch("cozempic.init._save_settings", side_effect=OSError("disk full")):
+            result = cz_init.run_uninstall("global")
+        self.assertEqual(result["errors"], [
+            f"could not write {self.home / '.claude' / 'settings.json'}: disk full"
+        ])
+
+    def test_project_scope_purge_keeps_global_data(self):
+        (self.home / ".cozempic").mkdir()
+        (self.home / ".cozempic_savings.json").write_text("{}")
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            cz_init.run_uninstall("project", purge=True)
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue((self.home / ".cozempic").exists())
+        self.assertTrue((self.home / ".cozempic_savings.json").exists())
+
+    def test_cmd_uninstall_prints_non_hook_errors(self):
+        from cozempic import cli
+
+        result = {
+            "hooks": [],
+            "slash_command": None,
+            "purged": [],
+            "opt_out_set": False,
+            "errors": ["Purge failed for /home/example/.cozempic: permission denied"],
+        }
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
+        self.assertIn("ERROR: Purge failed", output.getvalue())
+
+    def test_cmd_uninstall_reports_skipped_purge(self):
+        from cozempic import cli
+
+        result = {
+            "hooks": [], "slash_command": None, "purged": [], "purge_skipped": True,
+            "opt_out_set": False, "errors": ["could not parse settings"],
+        }
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("cozempic.init.run_uninstall", return_value=result), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=False))
+        self.assertIn("Purge skipped due to a hook/settings error", output.getvalue())
+
+    def test_slash_backup_failure_is_reported_without_removal(self):
+        slash = self._write_slash("# cozempic\nDiagnose and prune bloated Claude Code context\n")
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.uninstall_slash_command()
+        self.assertIn("Could not back up", result["error"])
+        self.assertTrue(slash.exists())
+
+    def test_init_marker_cleanup_failure_is_a_warning(self):
+        project = self.home / "project-marker-error"
+        project.mkdir()
+        marker = unittest.mock.Mock()
+        marker.unlink.side_effect = OSError("permission denied")
+        result = None
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            with patch.object(cz_init, "project_uninstall_marker", return_value=marker):
+                result = cz_init.run_init(".", skip_slash=True)
+        finally:
+            os.chdir(previous_cwd)
+        self.assertIn("Could not clear project uninstall marker", result["hooks"]["warnings"][0])
+
     def test_no_purge_keeps_data(self):
         (self.home / ".cozempic").mkdir()
         (self.home / ".cozempic_savings.json").write_text("{}")
@@ -120,8 +429,116 @@ class TestRunUninstall(_Base):
         self.assertTrue(res["remind_counter_removed"])
         self.assertFalse((self.home / ".cozempic_remind_counter").exists())
 
+    def test_reports_remind_counter_removal_failure(self):
+        counter = self.home / ".cozempic_remind_counter"
+        counter.write_text("3")
+        with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
+            res = cz_init.run_uninstall("global")
+        self.assertIn("Could not remove remind counter: permission denied", res["errors"])
+
+    def test_backup_settings_avoids_same_second_collisions(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"before": true}')
+        fixed_time = datetime(2026, 7, 27, 9, 0, 0)
+
+        with patch.object(cz_init, "datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_time
+            first = cz_init._backup_settings(path)
+            path.write_text('{"after": true}')
+            second = cz_init._backup_settings(path)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.read_text(), '{"before": true}')
+        self.assertEqual(second.read_text(), '{"after": true}')
+        self.assertTrue(first.name.startswith("settings.json.20260727_090000"))
+
+    def test_surfaces_malformed_global_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        result = cz_init.run_uninstall("global")
+        self.assertTrue(result["errors"])
+        self.assertFalse(result["opt_out_set"])
+
+        from cozempic import cli
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("sys.stdout", output):
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=False, dry_run=False)
+            )
+        self.assertIn("ERROR", output.getvalue())
+
+    def test_surfaces_valid_non_object_global_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("null")
+        result = cz_init.run_uninstall("global")
+        self.assertTrue(result["errors"])
+        self.assertIn("JSON object", result["errors"][0])
+
 
 class TestPreviewAndDryRun(_Base):
+    def test_purge_uses_bounded_confirmation(self):
+        from cozempic import cli
+
+        with self.assertRaisesRegex(SystemExit, "1"), \
+                patch.object(cli.sys.stdin, "isatty", return_value=True), \
+                patch.object(cli.sys.stderr, "isatty", return_value=True), \
+                patch.object(cli, "_prompt_with_timeout", return_value="n") as prompt, \
+                patch.object(cz_init, "run_uninstall") as run_uninstall:
+            cli.cmd_uninstall(
+                argparse.Namespace(project=False, all=False, purge=True, dry_run=False)
+            )
+        prompt.assert_called_once_with("  Continue? [y/N] ", timeout=30, default="n")
+        run_uninstall.assert_not_called()
+
+    def test_purge_requires_interactive_confirmation(self):
+        from cozempic import cli
+
+        with patch.object(cli.sys.stdin, "isatty", return_value=False), \
+                patch.object(cli, "_prompt_with_timeout") as prompt, \
+                patch.object(cz_init, "run_uninstall") as run_uninstall:
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=False))
+        prompt.assert_not_called()
+        run_uninstall.assert_called_once_with("global", False)
+
+    def test_project_purge_is_rejected(self):
+        from cozempic import cli
+
+        output = io.StringIO()
+        with self.assertRaisesRegex(SystemExit, "2"), patch("sys.stdout", output), patch.object(cz_init, "run_uninstall") as run_uninstall:
+            cli.cmd_uninstall(argparse.Namespace(project=True, all=False, purge=True, dry_run=False))
+        self.assertIn("only applies to global data", output.getvalue())
+        run_uninstall.assert_not_called()
+
+    def test_project_preview_does_not_offer_global_remind_counter_removal(self):
+        (self.home / ".cozempic_remind_counter").write_text("3")
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            preview = cz_init.preview_uninstall("project")
+        finally:
+            os.chdir(previous_cwd)
+        self.assertFalse(preview["remind_counter"])
+
+    def test_project_dry_run_omits_global_uninstall_items(self):
+        from cozempic import cli
+
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=True, all=False, purge=False, dry_run=True))
+
+        self.assertNotIn("Slash command", output.getvalue())
+        self.assertNotIn("Remind counter", output.getvalue())
+
+    def test_project_preview_does_not_offer_global_purge(self):
+        (self.home / ".cozempic").mkdir()
+        preview = cz_init.preview_uninstall("project", purge=True)
+        self.assertEqual(preview["purge_data"], [])
+
     def test_preview_reports_without_mutating(self):
         sp = self._write_global_settings(_settings_with({
             "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
@@ -130,6 +547,32 @@ class TestPreviewAndDryRun(_Base):
         prev = cz_init.preview_uninstall("global")
         self.assertIn(str(sp), prev["hooks_in"])
         self.assertEqual(sp.read_text(), before)  # untouched
+
+    def test_global_uninstall_and_preview_include_local_settings(self):
+        settings = _settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        })
+        local = self._write_global_local_settings(settings)
+        preview = cz_init.preview_uninstall("global")
+        self.assertIn(str(local), preview["hooks_in"])
+        cz_init.run_uninstall("global")
+        self.assertNotIn("cozempic", local.read_text())
+
+    def test_deprecated_global_uninstall_removes_local_settings_too(self):
+        from cozempic import cli
+
+        settings = _settings_with({
+            "SessionStart": [{"hooks": [{"type": "command", "command": COZ_CMD}]}]
+        })
+        primary = self._write_global_settings(settings)
+        local = self._write_global_local_settings(settings)
+
+        with patch("sys.stdout", io.StringIO()):
+            cli.cmd_init(argparse.Namespace(uninstall_global=True))
+
+        self.assertNotIn("cozempic", primary.read_text())
+        self.assertNotIn("cozempic", local.read_text())
+        self.assertTrue((self.home / ".cozempic_global_initialized").exists())
 
     def test_cmd_dry_run_changes_nothing(self):
         from cozempic import cli
@@ -141,6 +584,60 @@ class TestPreviewAndDryRun(_Base):
         cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=False, dry_run=True))
         self.assertEqual(sp.read_text(), before)
         self.assertFalse((self.home / ".cozempic_global_initialized").exists())  # no opt-out write either
+
+    def test_preview_reports_malformed_settings(self):
+        path = self.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken json")
+        preview = cz_init.preview_uninstall("global")
+        self.assertTrue(preview["errors"])
+
+    def test_uninstall_creates_missing_opt_out_marker_parents(self):
+        self.assertTrue(cz_init.run_uninstall("global")["opt_out_set"])
+        self.assertTrue((self.home / ".cozempic_global_initialized").exists())
+
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            self.assertTrue(cz_init.run_uninstall("project")["project_opt_out_set"])
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue((project / ".claude" / ".cozempic_uninstalled").exists())
+
+    def test_install_slash_command_returns_error_instead_of_raising(self):
+        with patch("cozempic.init.shutil.copy2", side_effect=OSError("disk full")):
+            result = cz_init.install_slash_command(".")
+        self.assertIn("Could not install slash command", result["error"])
+
+    def test_uninstall_rejects_unknown_scope(self):
+        with self.assertRaisesRegex(ValueError, "Unknown uninstall scope"):
+            cz_init.preview_uninstall("typo")
+        with self.assertRaisesRegex(ValueError, "Unknown uninstall scope"):
+            cz_init.run_uninstall("typo")
+
+    def test_dry_run_labels_slash_errors_and_formats_paths(self):
+        from cozempic import cli
+
+        preview = {
+            "hooks_in": ["/one/settings.json", "/two/settings.local.json"],
+            "slash_command": False,
+            "remind_counter": False,
+            "purge_data": ["/home/example/.cozempic"],
+            "hook_errors": ["invalid settings"],
+            "slash_error": "Could not read slash command: permission denied",
+        }
+        output = io.StringIO()
+        with self.assertRaises(SystemExit), patch("cozempic.init.preview_uninstall", return_value=preview), patch("sys.stdout", output):
+            cli.cmd_uninstall(argparse.Namespace(project=False, all=False, purge=True, dry_run=True))
+        text = output.getvalue()
+        self.assertIn("Hooks: ERROR — invalid settings", text)
+        self.assertIn("Slash command: ERROR — Could not read slash command", text)
+        self.assertIn("Slash command (~/.claude/commands/cozempic.md): (could not determine)", text)
+        self.assertNotIn("(not present / not ours)", text)
+        self.assertIn("/one/settings.json, /two/settings.local.json", text)
+        self.assertNotIn("['/one/settings.json'", text)
 
 
 class TestOptOutHolds(_Base):

@@ -10,8 +10,10 @@ This module automates both so `cozempic init` is the only setup step.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -66,7 +68,10 @@ def _load_canonical_hooks() -> dict:
             data = files("cozempic").joinpath("data/hooks.json").read_text(encoding="utf-8")
         except Exception:
             data = (Path(__file__).parent / "data" / "hooks.json").read_text(encoding="utf-8")
-        return json.loads(data).get("hooks", {})
+        hooks = json.loads(data).get("hooks", {})
+        if not isinstance(hooks, dict):
+            raise ValueError("bundled hooks must be a JSON object")
+        return hooks
     except Exception as exc:
         _LOAD_ERROR = (
             f"could not load bundled hook definitions ({exc}). "
@@ -80,18 +85,26 @@ COZEMPIC_HOOKS = _load_canonical_hooks()
 
 # ─── Core logic ──────────────────────────────────────────────────────────────
 
-def _is_cozempic_hook(hook_entry: dict) -> bool:
+def _hooks_list(entry: object) -> list:
+    """Return a hook entry's commands only when its container is a list."""
+    if not isinstance(entry, dict):
+        return []
+    hooks = entry.get("hooks", [])
+    return hooks if isinstance(hooks, list) else []
+
+
+def _is_cozempic_hook(hook_entry: object) -> bool:
     """Return True if this entry contains AT LEAST ONE cozempic-installed
     command. See `_is_cozempic_command` for per-command granularity used by
     uninstall (which must preserve user-authored commands in mixed entries).
     """
-    for h in hook_entry.get("hooks", []):
-        if _is_cozempic_command(h.get("command", "")):
+    for h in _hooks_list(hook_entry):
+        if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
             return True
     return False
 
 
-def _is_cozempic_command(command: str) -> bool:
+def _is_cozempic_command(command: object) -> bool:
     """Return True if this single hook command was installed by cozempic.
 
     Detection order:
@@ -111,6 +124,8 @@ def _is_cozempic_command(command: str) -> bool:
     are left alone; only commands produced by our `_c()` template / canonical
     hooks.json entries are recognized as ours.
     """
+    if not isinstance(command, str):
+        return False
     if "cozempic-hook-schema=" in command:
         return True
     has_wrapper_open = "{ cozempic " in command
@@ -120,20 +135,86 @@ def _is_cozempic_command(command: str) -> bool:
     return has_wrapper_open and has_python_fallback
 
 
-def _is_current_cozempic_command(command: str) -> bool:
+def _is_current_cozempic_command(command: object) -> bool:
     """Return True if this command is at the CURRENT schema version (fresh).
     Used by auto-init to decide whether to refresh stale hooks."""
-    return HOOK_SCHEMA_MARKER in command
+    return isinstance(command, str) and HOOK_SCHEMA_MARKER in command
 
 
-def _entry_has_current_cozempic_hook(hook_entry: dict) -> bool:
+def _entry_has_current_cozempic_hook(hook_entry: object) -> bool:
     """Return True if at least one command in this entry matches the current
     schema. Used by `_maybe_auto_init` and `_maybe_global_init` to decide
     whether the project/user needs a refresh."""
-    for h in hook_entry.get("hooks", []):
-        if _is_current_cozempic_command(h.get("command", "")):
+    for h in _hooks_list(hook_entry):
+        if isinstance(h, dict) and _is_current_cozempic_command(h.get("command", "")):
             return True
     return False
+
+
+@dataclass(frozen=True)
+class CozempicHookSchemaState:
+    """Managed-hook state for one or more Claude settings files."""
+
+    found: bool
+    current: bool
+    error: str | None = None
+
+
+def _iter_entry_hook_commands(entry: object):
+    for hook in _hooks_list(entry):
+        if isinstance(hook, dict):
+            command = hook.get("command")
+            if isinstance(command, str):
+                yield command
+
+
+def _iter_hook_commands(settings: dict):
+    hooks = settings.get("hooks", {}) or {}
+    if not isinstance(hooks, dict):
+        return
+    for entries in hooks.values():
+        if isinstance(entries, list):
+            for entry in entries:
+                yield from _iter_entry_hook_commands(entry)
+
+
+def _hook_schema_state(settings: dict) -> CozempicHookSchemaState:
+    commands = [
+        command for command in _iter_hook_commands(settings)
+        if _is_cozempic_command(command)
+    ]
+    return CozempicHookSchemaState(
+        found=bool(commands),
+        current=all(_is_current_cozempic_command(command) for command in commands),
+    )
+
+
+def cozempic_hook_schema_state(settings_path: Path) -> CozempicHookSchemaState:
+    """Return managed-hook state for ``settings_path`` without masking errors."""
+    try:
+        settings = _load_settings(settings_path)
+    except (OSError, ValueError) as exc:
+        return CozempicHookSchemaState(
+            found=False,
+            current=False,
+            error=f"could not parse {settings_path}: {exc}",
+        )
+    return _hook_schema_state(settings)
+
+
+def cozempic_hook_schema_state_for_paths(
+    settings_paths: tuple[Path, ...],
+) -> CozempicHookSchemaState:
+    """Return combined state for settings files that jointly affect a project."""
+    found = False
+    current = True
+    for settings_path in settings_paths:
+        state = cozempic_hook_schema_state(settings_path)
+        if state.error:
+            return state
+        found = found or state.found
+        current = current and state.current
+    return CozempicHookSchemaState(found=found, current=current)
 
 
 def has_current_schema(settings: dict) -> bool:
@@ -157,11 +238,28 @@ def _settings_path(project_dir: str) -> Path:
     return Path(project_dir) / ".claude" / "settings.json"
 
 
+def _project_settings_paths(project_dir: str) -> list[Path]:
+    settings = _settings_path(project_dir)
+    return [settings, settings.with_name("settings.local.json")]
+
+
+def _global_settings_paths() -> list[Path]:
+    settings = _global_settings_path()
+    return [settings, settings.with_name("settings.local.json")]
+
+
+def project_uninstall_marker(project_dir: str) -> Path:
+    return Path(project_dir) / ".claude" / ".cozempic_uninstalled"
+
+
 def _load_settings(path: Path) -> dict:
     """Load settings.json, returning empty dict if missing."""
     if path.exists():
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            settings = json.load(f)
+        if not isinstance(settings, dict):
+            raise ValueError(f"settings.json must be a JSON object, got {type(settings).__name__}")
+        return settings
     return {}
 
 
@@ -170,7 +268,11 @@ def _backup_settings(path: Path) -> Path | None:
     if not path.exists():
         return None
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = path.with_suffix(f".{ts}.bak")
+    backup = path.with_name(f"{path.name}.{ts}.bak")
+    suffix = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.{ts}.{suffix}.bak")
+        suffix += 1
     shutil.copy2(path, backup)
     return backup
 
@@ -185,7 +287,7 @@ def _save_settings(path: Path, settings: dict) -> None:
     entire Claude Code config on a bad interrupt.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    import os as _os, tempfile as _tempfile, stat as _stat
+    import os as _os, tempfile as _tempfile
 
     # Capture original permissions before we replace (Claude Code creates
     # settings.json as 0o644; mkstemp creates 0o600 — we must restore).
@@ -256,8 +358,8 @@ class _SettingsLock:
                 # __exit__ rewinds to byte 0 before LK_UNLCK, so without
                 # this matching seek(0) before LK_LOCK the two operations
                 # would target different byte ranges and silently fail to
-                # serialize. Mirrors the _HostFileLock pattern in helpers.py
-                # (which has the same defense-in-depth gap — separate fix).
+                # serialize. Mirrors the same seek-before-lock safeguard in
+                # helpers.py's _HostFileLock.
                 import msvcrt
                 self._fh.seek(0)
                 msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
@@ -336,7 +438,8 @@ def _resolve_cozempic_python() -> tuple[str, bool]:
     # Degrade to a real `python3` if sys.executable is empty (exotic frozen
     # interpreters) so the baked fallback is never an empty command.
     exe = sys.executable or shutil.which("python3") or "python3"
-    ephemeral = any(m in exe for m in (
+    normalized_exe = exe.replace("\\", "/")
+    ephemeral = any(m in normalized_exe for m in (
         "/.cache/uv/", "/cache/uv/", "/environments-v", "/uv-run", "/tmp/", "/var/folders/",
     ))
     return exe, ephemeral
@@ -359,15 +462,15 @@ def _bake_cozempic_path(hooks: dict, abs_python: str) -> dict:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            for h in _hooks_list(entry):
                 cmd = h.get("command") if isinstance(h, dict) else None
                 if isinstance(cmd, str) and "python3 -m cozempic" in cmd:
                     h["command"] = cmd.replace("python3 -m cozempic", f"{q} -m cozempic")
     return out
 
 
-def wire_hooks(project_dir: str) -> dict:
-    """Add cozempic checkpoint hooks to .claude/settings.json.
+def wire_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
+    """Add cozempic checkpoint hooks to a project's settings.json.
 
     Idempotent within a schema version. Detects STALE cozempic hooks
     (installed by an older cozempic whose schema marker is absent/old) and
@@ -380,7 +483,7 @@ def wire_hooks(project_dir: str) -> dict:
       skipped  — list of hook events already at current schema
       settings_path, backup_path
     """
-    path = _settings_path(project_dir)
+    path = settings_path or _settings_path(project_dir)
 
     if not COZEMPIC_HOOKS:
         return {
@@ -392,7 +495,7 @@ def wire_hooks(project_dir: str) -> dict:
     with _SettingsLock(path):
         try:
             settings = _load_settings(path)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             # Malformed or unreadable settings.json — don't crash cmd_init with
             # a raw traceback. Surface via the `error` field like uninstall does.
             return {
@@ -401,7 +504,12 @@ def wire_hooks(project_dir: str) -> dict:
                 "backup_path": None,
                 "error": f"could not parse {path}: {exc}. Back up + fix the file, then rerun.",
             }
-        hooks = settings.setdefault("hooks", {})
+        repaired = False
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+            settings["hooks"] = hooks
+            repaired = True
 
         added: list[str] = []
         updated: list[str] = []
@@ -414,69 +522,128 @@ def wire_hooks(project_dir: str) -> dict:
 
         for event_name, hook_entries in canonical_hooks.items():
             existing = hooks.get(event_name, [])
+            if not isinstance(existing, list):
+                existing = []
+                repaired = True
+            valid_existing = []
+            for entry in existing:
+                if not isinstance(entry, dict) or (
+                    "hooks" in entry and not isinstance(entry["hooks"], list)
+                ):
+                    repaired = True
+                    continue
+                if "hooks" in entry:
+                    hooks_list = [hook for hook in entry["hooks"] if isinstance(hook, dict)]
+                    if len(hooks_list) != len(entry["hooks"]):
+                        repaired = True
+                        if not hooks_list:
+                            continue
+                        entry = {**entry, "hooks": hooks_list}
+                valid_existing.append(entry)
+            existing = valid_existing
 
             for new_entry in hook_entries:
                 matcher = new_entry.get("matcher", "")
                 display = new_entry.get("matcher", "(all)")
 
-                # Find the cozempic-installed entry with the same matcher (if any).
-                # Mixed entries (cozempic + user command in the same hooks-list)
-                # are preserved — we only replace the cozempic commands within.
-                our_entry_idx = None
+                # Find every Cozempic entry with this matcher. Canonical hooks
+                # have one entry per matcher, but older installs can contain
+                # duplicates. Keep one canonical command set while preserving
+                # user commands in every matching entry.
+                our_entry_idxs = []
                 for idx, existing_entry in enumerate(existing):
+                    if not isinstance(existing_entry, dict):
+                        continue
                     if existing_entry.get("matcher", "") != matcher:
                         continue
                     if _is_cozempic_hook(existing_entry):
-                        our_entry_idx = idx
-                        break
+                        our_entry_idxs.append(idx)
 
-                if our_entry_idx is None:
+                if not our_entry_idxs:
                     existing.append(new_entry)
                     added.append(f"{event_name}[{display}]")
                     continue
 
-                # Check if existing is at current schema
-                our_entry = existing[our_entry_idx]
-                if _entry_has_current_cozempic_hook(our_entry):
-                    skipped.append(f"{event_name}[{display}]")
-                    continue
-
-                # STALE — refresh. Replace cozempic commands IN PLACE (preserve
-                # original position of user-authored commands in the list).
-                old_hooks = our_entry.get("hooks", []) or []
+                # Refresh the first matching entry unless every one of its
+                # Cozempic commands is current. Replace commands in place so
+                # user-authored commands retain their original order.
+                primary_idx = our_entry_idxs[0]
+                primary = existing[primary_idx]
+                primary_hooks = _hooks_list(primary)
+                primary_current = all(
+                    _is_current_cozempic_command(h.get("command", ""))
+                    for h in primary_hooks
+                    if isinstance(h, dict)
+                    and _is_cozempic_command(h.get("command", ""))
+                )
                 canonical_new = list(new_entry.get("hooks", []))
-                new_hooks: list = []
-                canonical_inserted = False
-                for h in old_hooks:
-                    if _is_cozempic_command(h.get("command", "")):
-                        # Splice in the new canonical commands at the position
-                        # of the FIRST stale cozempic command; drop the rest.
-                        if not canonical_inserted:
-                            new_hooks.extend(canonical_new)
-                            canonical_inserted = True
-                        # else: this stale cozempic command is skipped
+                changed = len(our_entry_idxs) > 1
+                if not primary_current:
+                    new_hooks: list = []
+                    canonical_inserted = False
+                    for hook in primary_hooks:
+                        if isinstance(hook, dict) and _is_cozempic_command(
+                            hook.get("command", "")
+                        ):
+                            if not canonical_inserted:
+                                new_hooks.extend(canonical_new)
+                                canonical_inserted = True
+                        else:
+                            new_hooks.append(hook)
+                    primary["hooks"] = new_hooks
+                    changed = True
+
+                # Strip duplicate Cozempic commands from later entries. Work
+                # backwards so dropping an empty entry cannot shift an index we
+                # have yet to process.
+                for duplicate_idx in reversed(our_entry_idxs[1:]):
+                    duplicate = existing[duplicate_idx]
+                    kept_hooks = [
+                        hook
+                        for hook in _hooks_list(duplicate)
+                        if not (
+                            isinstance(hook, dict)
+                            and _is_cozempic_command(hook.get("command", ""))
+                        )
+                    ]
+                    if kept_hooks:
+                        duplicate["hooks"] = kept_hooks
                     else:
-                        new_hooks.append(h)
-                if not canonical_inserted:
-                    # Defensive: shouldn't happen (we only entered refresh path
-                    # because a stale cozempic command exists), but fall back
-                    # to appending.
-                    new_hooks.extend(canonical_new)
-                our_entry["hooks"] = new_hooks
-                updated.append(f"{event_name}[{display}]")
+                        del existing[duplicate_idx]
+
+                if changed:
+                    updated.append(f"{event_name}[{display}]")
+                else:
+                    skipped.append(f"{event_name}[{display}]")
 
             hooks[event_name] = existing
 
         # Only write if something changed
         backup = None
-        if added or updated:
-            backup = _backup_settings(path)
-            _save_settings(path, settings)
+        if added or updated or repaired:
+            try:
+                backup = _backup_settings(path)
+            except OSError as exc:
+                return {
+                    "added": [], "updated": [], "skipped": [],
+                    "settings_path": str(path), "backup_path": None,
+                    "error": f"could not back up {path}: {exc}",
+                }
+            try:
+                _save_settings(path, settings)
+            except OSError as exc:
+                return {
+                    "added": [], "updated": [], "skipped": [],
+                    "settings_path": str(path),
+                    "backup_path": str(backup) if backup else None,
+                    "error": f"could not write {path}: {exc}",
+                }
 
     return {
         "added": added,
         "updated": updated,
         "skipped": skipped,
+        "repaired": repaired,
         "settings_path": str(path),
         "backup_path": str(backup) if backup else None,
         "ephemeral": ephemeral,        # #158: True if cozempic runs from a throwaway env
@@ -506,32 +673,50 @@ def install_slash_command(project_dir: str) -> dict:
     if not source.exists():
         return {"installed": False, "path": None, "already_existed": False, "updated": False}
 
-    already_existed = target.exists()
-
-    # Check if content differs
-    if already_existed:
-        if source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8"):
+    try:
+        already_existed = target.exists()
+        if already_existed and source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8"):
             return {"installed": False, "path": str(target), "already_existed": True, "updated": False}
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"installed": False, "path": str(target), "already_existed": False,
+                "updated": False, "error": f"Could not install slash command: {exc}"}
 
     return {"installed": True, "path": str(target), "already_existed": already_existed, "updated": already_existed}
 
 
-def run_init(project_dir: str, skip_slash: bool = False) -> dict:
+def run_init(
+    project_dir: str,
+    skip_slash: bool = False,
+    settings_path: Path | None = None,
+) -> dict:
     """Full init: wire hooks + install slash command.
+
+    ``settings_path`` lets global init target Claude's configured profile.
 
     Returns combined result dict.
     """
-    hook_result = wire_hooks(project_dir)
-    slash_result = {"installed": False, "path": None, "already_existed": False}
+    hook_result = wire_hooks(project_dir, settings_path=settings_path)
+    local_cleanup = None
+    if settings_path is None and not hook_result.get("error"):
+        local_settings = _settings_path(project_dir).with_name("settings.local.json")
+        if local_settings.exists():
+            local_cleanup = uninstall_hooks(project_dir, settings_path=local_settings)
+        try:
+            project_uninstall_marker(project_dir).unlink(missing_ok=True)
+        except OSError as exc:
+            hook_result.setdefault("warnings", []).append(
+                f"Could not clear project uninstall marker: {exc}"
+            )
+    slash_result = {"installed": False, "path": None, "already_existed": False, "updated": False}
 
     if not skip_slash:
         slash_result = install_slash_command(project_dir)
 
     return {
         "hooks": hook_result,
+        "local_cleanup": local_cleanup,
         "slash_command": slash_result,
     }
 
@@ -541,13 +726,36 @@ def run_init(project_dir: str, skip_slash: bool = False) -> dict:
 # Stable content signature of cozempic's /cozempic slash command, used to avoid
 # clobbering an unrelated user-authored ~/.claude/commands/cozempic.md.
 _SLASH_SIGNATURE = "prune bloated Claude Code context"
-_GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
+# Compatibility seam for callers that patch this in tests. Production resolves
+# dynamically so each CLAUDE_CONFIG_DIR profile gets its own decision.
+_GLOBAL_INIT_MARKER: Path | None = None
 _REMIND_COUNTER = Path.home() / ".cozempic_remind_counter"
 
 
 def _global_slash_path() -> Path:
     from .session import get_claude_dir
     return get_claude_dir() / "commands" / "cozempic.md"
+
+
+def _global_settings_path() -> Path:
+    from .session import get_claude_dir
+    return get_claude_dir() / "settings.json"
+
+
+def global_init_marker_path() -> Path:
+    from .session import get_claude_dir
+    marker = get_claude_dir() / ".cozempic_global_initialized"
+    legacy_marker = Path.home() / ".cozempic_global_initialized"
+    if not os.environ.get("CLAUDE_CONFIG_DIR") and legacy_marker != marker and legacy_marker.exists():
+        try:
+            marker.touch(exist_ok=True)
+        except OSError:
+            return legacy_marker
+    return marker
+
+
+def _global_init_marker() -> Path:
+    return _GLOBAL_INIT_MARKER or global_init_marker_path()
 
 
 def _slash_is_ours(content: str) -> bool:
@@ -561,16 +769,24 @@ def uninstall_slash_command() -> dict:
     cozempic.md is never deleted. Backs it up (.md.bak) first. Idempotent;
     never raises destructively.
 
-    Returns: {removed: bool, path: str|None, backup_path: str|None, skipped_foreign: bool}
+    Returns: {removed: bool, path: str|None, backup_path: str|None,
+              skipped_foreign: bool, error: str|None}
     """
     target = _global_slash_path()
-    out = {"removed": False, "path": str(target), "backup_path": None, "skipped_foreign": False}
+    out = {
+        "removed": False,
+        "path": str(target),
+        "backup_path": None,
+        "skipped_foreign": False,
+        "error": None,
+    }
     if not target.exists():
         out["path"] = None
         return out
     try:
         content = target.read_text(encoding="utf-8", errors="surrogateescape")
-    except OSError:
+    except OSError as exc:
+        out["error"] = f"Could not read slash command: {exc}"
         return out
     if not _slash_is_ours(content):
         out["skipped_foreign"] = True
@@ -579,95 +795,142 @@ def uninstall_slash_command() -> dict:
         backup = target.with_suffix(".md.bak")
         shutil.copy2(target, backup)
         out["backup_path"] = str(backup)
-    except OSError:
-        pass
+    except OSError as exc:
+        out["error"] = f"Could not back up slash command: {exc}"
+        return out
     try:
         target.unlink()
         out["removed"] = True
-    except OSError:
-        pass
+    except OSError as exc:
+        out["error"] = f"Could not remove slash command: {exc}"
     return out
 
 
 def preview_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Read-only: report what `run_uninstall(scope, purge)` WOULD remove. No writes."""
-    scopes = {"global": [str(Path.home())], "project": ["."],
-              "all": [str(Path.home()), "."]}.get(scope, [str(Path.home())])
+    global_paths = _global_settings_paths()
+    project_paths = _project_settings_paths(".")
+    scopes_by_name = {
+        "global": global_paths,
+        "project": project_paths,
+        "all": [*global_paths, *project_paths],
+    }
+    if scope not in scopes_by_name:
+        raise ValueError(f"Unknown uninstall scope: {scope}")
+    scopes = scopes_by_name[scope]
     hook_targets = []
-    for d in scopes:
-        p = _settings_path(d)
-        if p.exists() and _settings_has_cozempic_hooks(p):
+    hook_errors = []
+    cleanup_failed = False
+    for p in scopes:
+        state = cozempic_hook_schema_state(p)
+        if state.error:
+            hook_errors.append(state.error)
+            cleanup_failed = True
+        elif state.found:
             hook_targets.append(str(p))
     slash = _global_slash_path()
     slash_present = False
+    slash_error = None
     if scope in ("global", "all") and slash.exists():
         try:
             slash_present = _slash_is_ours(slash.read_text(encoding="utf-8", errors="surrogateescape"))
-        except OSError:
+        except OSError as exc:
+            slash_error = f"Could not read slash command: {exc}"
             slash_present = False
+            cleanup_failed = True
     data = []
-    if purge:
+    purge_skipped = purge and scope in ("global", "all") and cleanup_failed
+    if purge and scope in ("global", "all") and not purge_skipped:
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             if p.exists():
                 data.append(str(p))
     return {"hooks_in": hook_targets, "slash_command": slash_present,
-            "remind_counter": _REMIND_COUNTER.exists(), "purge_data": data}
-
-
-def _settings_has_cozempic_hooks(path: Path) -> bool:
-    try:
-        settings = _load_settings(path)
-    except (OSError, json.JSONDecodeError):
-        return False
-    hooks = settings.get("hooks", {})
-    if not isinstance(hooks, dict):
-        return False
-    for entries in hooks.values():
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, dict):
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and _is_cozempic_command(h.get("command", "")):
-                        return True
-    return False
+            "remind_counter": scope in ("global", "all") and _REMIND_COUNTER.exists(), "purge_data": data,
+            "purge_skipped": purge_skipped,
+            "hook_errors": hook_errors, "slash_error": slash_error,
+            "errors": [*hook_errors, *([slash_error] if slash_error else [])]}
 
 
 def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
     """Reverse cozempic init. scope: 'global' | 'project' | 'all'.
 
     Removes hooks (per scope), the global slash command (global/all), the remind
-    counter, and — with purge — the ~/.cozempic data dir + savings ledger. ALWAYS
-    leaves the global-init marker in place as the auto-init opt-out, so init does
-    not silently re-wire on the next run (explicit `cozempic init` still works).
+    counter, and — with global/all purge — the ~/.cozempic data dir + savings ledger.
+    On successful global/all cleanup, leaves the global-init marker as the auto-init
+    opt-out; successful project/all cleanup similarly leaves the project opt-out.
+    Explicit `cozempic init` still works in either case.
     """
-    dirs = {"global": [str(Path.home())], "project": ["."],
-            "all": [str(Path.home()), "."]}.get(scope, [str(Path.home())])
+    global_paths = _global_settings_paths()
+    managed_global_path = global_paths[0]
+    targets_by_scope = {
+        "global": [(str(Path.home()), path) for path in global_paths],
+        "project": [(".", path) for path in _project_settings_paths(".")],
+        "all": [(str(Path.home()), path) for path in global_paths]
+        + [(".", path) for path in _project_settings_paths(".")],
+    }
+    if scope not in targets_by_scope:
+        raise ValueError(f"Unknown uninstall scope: {scope}")
+    targets = targets_by_scope[scope]
     result: dict = {"scope": scope, "hooks": [], "slash_command": None,
-                    "remind_counter_removed": False, "purged": [], "opt_out_set": False}
+                    "remind_counter_removed": False, "purged": [], "purge_skipped": False,
+                    "opt_out_set": False,
+                    "project_opt_out_set": False,
+                    "errors": []}
 
-    for d in dirs:
-        result["hooks"].append(uninstall_hooks(d))
+    global_cleanup_failed = False
+    managed_global_cleanup_failed = False
+    project_cleanup_failed = False
+    has_project_target = False
+    for directory, settings_path in targets:
+        hook_result = uninstall_hooks(directory, settings_path=settings_path)
+        result["hooks"].append(hook_result)
+        has_project_target = has_project_target or directory == "."
+        if hook_result.get("error"):
+            result["errors"].append(hook_result["error"])
+            global_cleanup_failed = global_cleanup_failed or directory != "."
+            managed_global_cleanup_failed = managed_global_cleanup_failed or settings_path == managed_global_path
+            project_cleanup_failed = project_cleanup_failed or directory == "."
+
+    if has_project_target and not project_cleanup_failed:
+        try:
+            marker = project_uninstall_marker(".")
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            result["project_opt_out_set"] = True
+        except OSError as exc:
+            result["errors"].append(f"Could not persist project uninstall opt-out: {exc}")
+            project_cleanup_failed = True
 
     if scope in ("global", "all"):
         result["slash_command"] = uninstall_slash_command()
+        if result["slash_command"].get("error"):
+            result["errors"].append(result["slash_command"]["error"])
+            global_cleanup_failed = True
 
-    # Cleanup the nudge counter (cosmetic, safe).
-    try:
-        if _REMIND_COUNTER.exists():
-            _REMIND_COUNTER.unlink()
-            result["remind_counter_removed"] = True
-    except OSError:
-        pass
+    # Remove the global nudge counter before a purge.
+    if scope in ("global", "all"):
+        try:
+            if _REMIND_COUNTER.exists():
+                _REMIND_COUNTER.unlink()
+                result["remind_counter_removed"] = True
+        except OSError as exc:
+            result["errors"].append(f"Could not remove remind counter: {exc}")
+            global_cleanup_failed = True
 
-    # Opt-out: keep auto-init from re-wiring after uninstall.
-    try:
-        _GLOBAL_INIT_MARKER.touch()
-        result["opt_out_set"] = True
-    except OSError:
-        pass
+    if scope in ("global", "all") and not managed_global_cleanup_failed:
+        # Opt-out: keep global auto-init from re-wiring after global uninstall.
+        try:
+            marker = _global_init_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            result["opt_out_set"] = True
+        except OSError as exc:
+            result["errors"].append(f"Could not persist global uninstall opt-out: {exc}")
+            global_cleanup_failed = True
 
-    if purge:
+    if purge and scope in ("global", "all") and (global_cleanup_failed or project_cleanup_failed):
+        result["purge_skipped"] = True
+    elif purge and scope in ("global", "all"):
         import shutil as _sh
         for p in (Path.home() / ".cozempic", Path.home() / ".cozempic_savings.json"):
             try:
@@ -675,13 +938,13 @@ def run_uninstall(scope: str = "global", purge: bool = False) -> dict:
                     _sh.rmtree(p); result["purged"].append(str(p))
                 elif p.exists():
                     p.unlink(); result["purged"].append(str(p))
-            except OSError:
-                pass
+            except OSError as exc:
+                result["errors"].append(f"Purge failed for {p}: {exc}")
 
     return result
 
 
-def uninstall_hooks(project_dir: str) -> dict:
+def uninstall_hooks(project_dir: str, settings_path: Path | None = None) -> dict:
     """Remove cozempic-installed hooks from a settings.json. Idempotent.
 
     Surgical — removes only cozempic commands, preserving any user-authored
@@ -690,20 +953,20 @@ def uninstall_hooks(project_dir: str) -> dict:
 
     Returns: {removed: list[str], settings_path: str | None, backup_path: str | None}
     """
-    path = _settings_path(project_dir)
+    path = settings_path or _settings_path(project_dir)
     if not path.exists():
         return {"removed": [], "settings_path": None, "backup_path": None}
 
     with _SettingsLock(path):
         try:
             settings = _load_settings(path)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             # Malformed settings.json — don't crash, just report and bail.
             return {
                 "removed": [],
                 "settings_path": str(path),
                 "backup_path": None,
-                "error": f"could not parse settings.json: {exc}",
+                "error": f"could not parse {path}: {exc}",
             }
 
         hooks = settings.get("hooks", {})
@@ -724,7 +987,7 @@ def uninstall_hooks(project_dir: str) -> dict:
                     new_entries.append(entry)
                     continue
 
-                old_inner = entry.get("hooks", []) or []
+                old_inner = _hooks_list(entry)
                 kept_inner = [
                     h for h in old_inner
                     if not (isinstance(h, dict) and _is_cozempic_command(h.get("command", "")))
@@ -753,12 +1016,27 @@ def uninstall_hooks(project_dir: str) -> dict:
         if not changed:
             return {"removed": [], "settings_path": str(path), "backup_path": None}
 
-        backup = _backup_settings(path)
+        backup = None
         if hooks:
             settings["hooks"] = hooks
         else:
             settings.pop("hooks", None)
-        _save_settings(path, settings)
+        try:
+            backup = _backup_settings(path)
+        except OSError as exc:
+            return {
+                "removed": [], "settings_path": str(path), "backup_path": None,
+                "error": f"could not back up {path}: {exc}",
+            }
+        try:
+            _save_settings(path, settings)
+        except OSError as exc:
+            return {
+                "removed": [],
+                "settings_path": str(path),
+                "backup_path": str(backup) if backup else None,
+                "error": f"could not write {path}: {exc}",
+            }
 
     return {
         "removed": removed,

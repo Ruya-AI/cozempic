@@ -12,6 +12,8 @@ from unittest.mock import patch
 from cozempic.doctor import (
     check_agent_model_mismatch,
     check_claude_json_corruption,
+    check_cozempic_hooks,
+    check_cozempic_project_init,
     check_corrupted_tool_use,
     check_hooks_trust_flag,
     check_orphaned_tool_results,
@@ -22,6 +24,71 @@ from cozempic.doctor import (
     fix_hooks_trust_flag,
     fix_stale_tmp_artifacts,
 )
+
+
+class TestCozempicSettingsShape(unittest.TestCase):
+    def test_global_scalar_settings_is_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)
+            (config / "settings.json").write_text("null")
+            with patch("cozempic.doctor.get_claude_dir", return_value=config):
+                result = check_cozempic_hooks()
+        self.assertEqual(result.status, "warning")
+        self.assertIn("JSON object", result.message)
+
+    def test_project_scalar_settings_is_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".claude").mkdir()
+            (project / ".claude" / "settings.json").write_text("[]")
+            with patch("cozempic.doctor.Path.cwd", return_value=project):
+                result = check_cozempic_project_init()
+        self.assertEqual(result.status, "warning")
+        self.assertIn("JSON object", result.message)
+
+    def test_project_malformed_settings_is_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".claude").mkdir()
+            (project / ".claude" / "settings.json").write_text("{broken json")
+            with patch("cozempic.doctor.Path.cwd", return_value=project):
+                result = check_cozempic_project_init()
+        self.assertEqual(result.status, "warning")
+        self.assertIn("could not parse", result.message)
+
+    def test_global_local_settings_contribute_expected_hooks(self):
+        from cozempic.init import HOOK_SCHEMA_MARKER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)
+            expected = ("SessionStart", "PreCompact", "PostCompact", "Stop")
+            (config / "settings.local.json").write_text(json.dumps({
+                "hooks": {
+                    event: [{"hooks": [{"command": f"cozempic guard # {HOOK_SCHEMA_MARKER}"}]}]
+                    for event in expected
+                }
+            }))
+            with patch("cozempic.doctor.get_claude_dir", return_value=config):
+                result = check_cozempic_hooks()
+        self.assertEqual(result.status, "ok")
+
+    def test_malformed_nested_hooks_are_actionable_warnings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)
+            (config / "settings.json").write_text('{"hooks": {"SessionStart": [{"hooks": null}]}}')
+            with patch("cozempic.doctor.get_claude_dir", return_value=config):
+                result = check_cozempic_hooks()
+        self.assertEqual(result.status, "warning")
+        self.assertIn("SessionStart", result.message)
+
+    def test_project_non_object_hooks_is_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".claude").mkdir()
+            (project / ".claude" / "settings.json").write_text('{"hooks": "broken"}')
+            with patch("cozempic.doctor.Path.cwd", return_value=project):
+                result = check_cozempic_project_init()
+        self.assertEqual(result.status, "warning")
 
 
 class TestClaudeJsonCorruption(unittest.TestCase):
