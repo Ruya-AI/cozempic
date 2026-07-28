@@ -348,7 +348,14 @@ class TestRunUninstall(_Base):
     def test_project_scope_purge_keeps_global_data(self):
         (self.home / ".cozempic").mkdir()
         (self.home / ".cozempic_savings.json").write_text("{}")
-        cz_init.run_uninstall("project", purge=True)
+        project = self.home / "project"
+        project.mkdir()
+        previous_cwd = Path.cwd()
+        os.chdir(project)
+        try:
+            cz_init.run_uninstall("project", purge=True)
+        finally:
+            os.chdir(previous_cwd)
         self.assertTrue((self.home / ".cozempic").exists())
         self.assertTrue((self.home / ".cozempic_savings.json").exists())
 
