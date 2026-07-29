@@ -21,6 +21,7 @@ import os
 import platform
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -193,6 +194,7 @@ def _hard_prune_counts_as_futile(result: dict) -> bool:
 from ._validation import ConfigError
 from .executor import run_prescription
 from .helpers import (
+    atomic_write_text,
     hashable_str,
     _pid_is_alive as _pid_is_alive_canonical,
     is_ssh_session,
@@ -552,11 +554,11 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
             if overflow_watcher:
                 try:
                     overflow_watcher.stop()
-                except Exception:
+                except (Exception, KeyboardInterrupt):
                     pass
             try:
                 _safe_unlink_session_pidfile(session_id)
-            except Exception:
+            except (Exception, KeyboardInterrupt):
                 pass
             try:
                 clear_armed(session_id, session_path)
@@ -769,8 +771,10 @@ def start_guard(
         claude_pid = find_claude_pid()
     # Record PID + start_time NOW — earliest point where both claude_pid and
     # session_id are known and Claude's identity is confirmed by find_claude_pid.
-    if claude_pid and session_id:
-        _record_claude_identity(session_id, claude_pid)
+    if claude_pid:
+        _record_claude_identity(
+            sess["session_id"], claude_pid, session_path=session_path
+        )
     claude_alive = True
 
     prune_count = 0
@@ -1016,7 +1020,7 @@ def start_guard(
                         # PID reuse (daemon started hours ago; original Claude exited and
                         # kernel recycled its PID to an unrelated process).
                         try:
-                            if not _pid_identity_match(claude_pid, session_id) \
+                            if not _pid_identity_match(claude_pid, sess["session_id"]) \
                                     or not _is_claude_process(claude_pid, session_path=session_path):
                                 claude_alive = False
                         except ProcessLookupError:
@@ -1024,8 +1028,7 @@ def start_guard(
                     if not claude_alive:
                         print(f"  [{_now()}] Claude process exited (PID {claude_pid}). Final checkpoint...")
                         # Clear start-time record: this session's Claude is gone.
-                        if session_id:
-                            _CLAUDE_IDENTITY.pop(session_id, None)
+                        _CLAUDE_IDENTITY.pop(sess["session_id"], None)
                         # Option (b) defense-in-depth: unlink pidfile IMMEDIATELY so a
                         # concurrent SessionStart for the new Claude doesn't see a stale
                         # transient-daemon slot. The finally-block call is a no-op after
@@ -1394,6 +1397,12 @@ def start_guard(
         # so this single call site is sufficient for all 6 surfaces.
         try:
             _safe_unlink_session_pidfile(sess["session_id"])
+        except Exception:
+            pass
+        # A daemon that exits through a normal loop path must not leave an
+        # armed reload from an earlier turn for its successor to trust.
+        try:
+            clear_armed(sess["session_id"], session_path)
         except Exception:
             pass
 
@@ -1886,7 +1895,7 @@ def guard_prune_cycle(
             _write_holder["error"] = "conflict"
             print(f"  [{_now()}] Deferred prune write skipped — {exc}", file=sys.stderr)
             _repair_after_terminate()
-        except OSError as exc:
+        except (OSError, KeyboardInterrupt) as exc:
             _write_holder["error"] = "oserror"
             # Disk-full / EIO / permission at the post-kill write instant. The
             # write is atomic (save_messages leaves the original intact on any
@@ -2092,7 +2101,7 @@ def _detect_claude_flags(pid: int) -> str:
     try:
         import psutil
         parts = psutil.Process(pid).cmdline()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     # Fallback: ps -o args= + shlex.split (loses space-boundary info on macOS).
@@ -2192,7 +2201,9 @@ def _wait_for_exit(pid: int, timeout: float = 5.0) -> bool:
         try:
             os.kill(pid, 0)
             time.sleep(0.2)
-        except (ProcessLookupError, PermissionError, OSError):
+        except PermissionError:
+            return False
+        except (ProcessLookupError, OSError):
             return True
     return False
 
@@ -2648,6 +2659,23 @@ def _guard_tmp_root() -> Path:
     if os.name == "nt":
         return Path(tempfile.gettempdir())
     return Path("/tmp")
+
+
+def _open_guard_log(log_file: Path):
+    """Open a guard log without following a planted symlink."""
+    flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    fd = os.open(str(log_file), flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("guard log is not a regular file")
+        return os.fdopen(fd, "a", encoding="utf-8", errors="surrogateescape")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 # ── Cross-respawn reload-rate ledger (regrow-loop / reload-storm backstop) ────
@@ -3154,8 +3182,22 @@ def _reload_armed_path(session_id: str | None, session_path: Path | None = None)
 def read_armed(session_id: str | None, session_path: Path | None = None) -> dict | None:
     import json as _json
     try:
+        from .reload_lock import _read_regular_text
         p = _reload_armed_path(session_id, session_path)
-        return _json.loads(p.read_text()) if p.exists() else None
+        text = _read_regular_text(p)
+        armed = _json.loads(text) if text is not None else None
+        if not isinstance(armed, dict):
+            return None
+        for key in ("armed_at", "tier", "projected_pct"):
+            if key in armed and (
+                isinstance(armed[key], bool)
+                or not isinstance(armed[key], (int, float))
+                or not math.isfinite(armed[key])
+            ):
+                armed.pop(key)
+        if "warned" in armed and not isinstance(armed["warned"], bool):
+            armed.pop("warned")
+        return armed
     except Exception:
         return None
 
@@ -3165,18 +3207,10 @@ def _write_armed_atomic(path: Path, data: dict) -> None:
     the nudge process — which both write it — can't tear each other's writes. The
     temp is always cleaned up (no .tmp orphan on a write/replace failure)."""
     import json as _json
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    try:
-        tmp.write_text(_json.dumps(data))
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)  # no-op after a successful replace
-        except Exception:
-            pass
+    atomic_write_text(path, _json.dumps(data))
 
 
-def write_armed(session_id, session_path, tier: int, projected_pct: float) -> None:
+def write_armed(session_id, session_path, tier: int, projected_pct: float | None) -> None:
     import time as _time
     try:
         p = _reload_armed_path(session_id, session_path)
@@ -3189,7 +3223,7 @@ def write_armed(session_id, session_path, tier: int, projected_pct: float) -> No
         # the warned-before-reload timeout; keep a known projection if none given.
         warned = bool(existing.get("warned"))
         armed_at = existing.get("armed_at") or _time.time()
-        proj = round(projected_pct, 1) if projected_pct else existing.get("projected_pct", 0.0)
+        proj = round(projected_pct, 1) if projected_pct is not None else existing.get("projected_pct", 0.0)
         _write_armed_atomic(p, {"tier": tier, "projected_pct": proj,
                                 "warned": warned, "armed_at": armed_at})
     except Exception:
@@ -3251,7 +3285,9 @@ def _reload_rate_exceeded(ledger_path: Path, now: float | None = None) -> tuple[
         now = _time.time()
     window = _reload_ledger_window_s()
     try:
-        hist = _json.loads(ledger_path.read_text()) if ledger_path.exists() else []
+        from .reload_lock import _read_regular_text
+        text = _read_regular_text(ledger_path)
+        hist = _json.loads(text) if text is not None else []
         if not isinstance(hist, list):
             hist = []
     except Exception:
@@ -3261,19 +3297,7 @@ def _reload_rate_exceeded(ledger_path: Path, now: float | None = None) -> tuple[
         return True, len(hist)
     hist.append(now)
     try:
-        # Atomic write (tmp + os.replace): a SIGKILL mid-write leaves a stale
-        # .tmp rather than a partial ledger, preventing the `except Exception:
-        # hist = []` silent reset that would clear the storm-guard count.
-        # Mirrors _write_armed_atomic (guard.py:2780) — same pattern, string payload.
-        _tmp = ledger_path.with_suffix(ledger_path.suffix + f".tmp{os.getpid()}")
-        try:
-            _tmp.write_text(_json.dumps(hist[-_RELOAD_LEDGER_HIST_CAP:]))
-            os.replace(_tmp, ledger_path)
-        finally:
-            try:
-                _tmp.unlink(missing_ok=True)  # no-op after a successful replace
-            except Exception:
-                pass
+        atomic_write_text(ledger_path, _json.dumps(hist[-_RELOAD_LEDGER_HIST_CAP:]))
     except Exception:
         pass
     return False, len(hist)
@@ -3315,7 +3339,11 @@ def _cleanup_legacy_pid(cwd: str) -> None:
     legacy = _pid_file_for_cwd(cwd)
     if legacy.exists():
         try:
-            pid = int(legacy.read_text().strip())
+            from .spawn_lock import _parse_pidfile_pid
+
+            pid = _parse_pidfile_pid(legacy)
+            if pid <= 0:
+                raise ValueError("invalid legacy pidfile")
             os.kill(pid, 0)
             # Only SIGTERM if we can confirm this is actually our daemon.
             if _is_cozempic_guard_process(pid):
@@ -3380,84 +3408,32 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
     except ValueError:
         # Invalid session_id shape — no daemon can exist for it.
         return None
-    if not pid_path.exists():
-        return None
-
     try:
         # Tolerant parse: handles both legacy 1-line and new 3-line
-        # pidfile formats (PR #93 item #5). Returns 0 on garbled/empty
-        # content — caller's `if pid <= 0` branch then unlinks the stale
-        # file. Replaces `int(read_text().strip())` which would raise
-        # ValueError on 3-line content and (via the except below) skip
-        # the unlink, leaking the stale file.
+        # pidfile formats (PR #93 item #5). This probe never unlinks a
+        # pidfile: a peer can create its exclusive claim between a stale
+        # observation and an unlink. DaemonSpawnClaim owns serialized stale
+        # recovery immediately before any new spawn.
         from .spawn_lock import _parse_pidfile_pid
         pid = _parse_pidfile_pid(pid_path)
         if pid <= 0:
-            # Pidfile contains a sentinel/placeholder — treat as stale.
-            # Guards against the PID-reuse footgun where os.kill(0, sig)
-            # broadcasts to the caller's process group rather than
-            # targeting a sentinel. Cross-process freshness for in-flight
-            # claims is enforced by DaemonSpawnClaim's O_CREAT|O_EXCL +
-            # _FRESH_PIDFILE_SECONDS gate, not by an in-process dict.
-            pid_path.unlink(missing_ok=True)
             return None
         os.kill(pid, 0)
         # Verify the PID is actually our guard — defend against PID reuse.
         if not _is_cozempic_guard_process(pid):
-            # Don't eagerly unlink a fresh-looking pidfile here. A peer
-            # process that just did O_CREAT|O_EXCL in DaemonSpawnClaim has
-            # written its own parent PID into the file BEFORE renaming to
-            # the daemon PID; in that brief window the holding PID is a
-            # legitimate Python process that isn't yet a cozempic guard.
-            # Treating it as PID-reuse and unlinking would destroy the
-            # peer's claim and let multiple workers spawn. Only unlink
-            # truly old pidfiles — those are real PID-reuse or genuine
-            # stale state from a crashed prior spawn. The threshold is
-            # shared with ``DaemonSpawnClaim._is_pidfile_fresh`` so both
-            # sides of the claim/probe dichotomy agree on what "fresh"
-            # means (H1 fix — single source of truth).
-            from .spawn_lock import _FRESH_PIDFILE_SECONDS
-            try:
-                age = time.time() - pid_path.stat().st_mtime
-            except OSError:
-                age = 0.0
-            if age >= _FRESH_PIDFILE_SECONDS:
-                pid_path.unlink(missing_ok=True)
             return None
         return pid
-    except (ValueError, ProcessLookupError, PermissionError):
-        # Apparently dead PID — but a freshly-written pidfile that holds
-        # the soon-to-exist daemon PID can momentarily look "dead" while
-        # the daemon is still starting (a real Popen returns the child
-        # PID before the OS finishes wiring up the process; test mocks
-        # use fake PIDs that are never alive). Only unlink truly old
-        # pidfiles to avoid destroying a peer's just-completed claim
-        # and letting another worker spawn a duplicate daemon. Same
-        # threshold as the holder-alive-but-not-guard branch above.
-        from .spawn_lock import _FRESH_PIDFILE_SECONDS
-        try:
-            age = time.time() - pid_path.stat().st_mtime
-        except OSError:
-            age = 0.0
-        if age >= _FRESH_PIDFILE_SECONDS:
-            pid_path.unlink(missing_ok=True)
+    except PermissionError:
+        return pid if _is_cozempic_guard_process(pid) else None
+    except (ValueError, ProcessLookupError):
         return None
     except OSError:
         # Windows: os.kill(pid, 0) raises a bare OSError [WinError 87]
         # (invalid parameter) for a non-existent PID instead of the POSIX
-        # ProcessLookupError caught above. Treat it as a dead PID, reusing the
-        # same freshness-aware unlink so we don't destroy a peer's just-written
-        # claim. Re-raise on POSIX, where a bare OSError here is unexpected and
-        # must not be silently masked.
+        # ProcessLookupError caught above. Treat it as dead without mutating
+        # the path; DaemonSpawnClaim serializes stale recovery before spawn.
         if os.name != "nt":
             raise
-        from .spawn_lock import _FRESH_PIDFILE_SECONDS
-        try:
-            age = time.time() - pid_path.stat().st_mtime
-        except OSError:
-            age = 0.0
-        if age >= _FRESH_PIDFILE_SECONDS:
-            pid_path.unlink(missing_ok=True)
         return None
 
 
@@ -3600,21 +3576,39 @@ def start_guard_daemon(
         log_file = _guard_tmp_root() / f"cozempic_guard_{pid_key}.log"
         pid_path = _guard_tmp_root() / f"cozempic_guard_{pid_key}.pid"
 
+    # A failed PID handoff can leave a detached child alive without a pidfile.
+    # Preserve that child as an in-flight daemon until it exits rather than
+    # letting a later hook invocation start a duplicate.
+    orphan_prefix = f"{pid_path.with_suffix('').name}.orphan."
+    try:
+        for orphan_marker in pid_path.parent.glob(f"{orphan_prefix}*"):
+            try:
+                orphan_pid = int(orphan_marker.name[len(orphan_prefix):])
+            except ValueError:
+                orphan_marker.unlink(missing_ok=True)
+                continue
+            if _pid_is_alive(orphan_pid) and _is_cozempic_guard_process(orphan_pid):
+                return {
+                    "started": False,
+                    "pid": orphan_pid,
+                    "pid_file": str(pid_path),
+                    "log_file": None,
+                    "already_running": True,
+                }
+            orphan_marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     if claude_pid is None:
         claude_pid = find_claude_pid()
 
     # ── Cross-process spawn claim (Bug 2 + Bug 3 fix, V4 rework) ────────────
-    # The PID file IS the lock. O_CREAT|O_EXCL on the PID file is the only
-    # primitive used: POSIX guarantees exactly one process wins the create,
-    # all others see EEXIST and become losers via DaemonAlreadyStarting.
-    # This mirrors reload_lock.py:200-262 (same pattern, different file).
+    # The PID file is the fast-path claim: O_CREAT|O_EXCL guarantees exactly
+    # one winner. Stale recovery also takes a persistent companion lock so two
+    # contenders cannot replace the same stale PID file concurrently.
     #
-    # Why not fcntl.flock on a separate sentinel? Race-reproducer's V4 stress
-    # (10 processes × 30 iterations) found a textbook flock-unlink race: when
-    # the holder unlinks the sentinel on release, peers immediately O_CREAT
-    # NEW inodes and their flocks attach to those new inodes — different
-    # kernel objects, so multiple "winners" each acquire flock simultaneously.
-    # See spawn_lock.py module docstring for the full failure mode + evidence.
+    # The companion lock path is never unlinked, avoiding the old flock-unlink
+    # race where contenders could lock separate replacement inodes.
     from .spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
 
     try:
@@ -3632,8 +3626,33 @@ def start_guard_daemon(
             "log_file": None,
             "already_running": True,
         }
+    except OSError as exc:
+        return {
+            "started": False,
+            "reason": f"pidfile claim: {exc}",
+            "pid": None,
+            "pid_file": str(pid_path),
+            "log_file": None,
+            "already_running": False,
+        }
+
+    def record_orphan(pid: int) -> None:
+        orphan_marker = pid_path.with_suffix(f".orphan.{pid}")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{orphan_marker.name}.", suffix=".tmp", dir=orphan_marker.parent
+        )
+        try:
+            os.write(fd, f"{pid}\n".encode("ascii"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(tmp_name, orphan_marker)
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
 
     try:
+        orphaned_guard_pid: int | None = None
         # Build the guard command
         cmd_parts = [
             sys.executable, "-m", "cozempic.cli", "guard",
@@ -3671,17 +3690,17 @@ def start_guard_daemon(
         # __exit__ will unlink the PID file on exception, so a retry is
         # possible.
         try:
+            artifact = "log file"
             # Defense-in-depth: if the log file's parent dir was removed
             # mid-spawn (race with operator cleanup, /tmp eviction, etc.)
             # recreate it once and retry the open.
             try:
-                lf = open(log_file, "a", encoding="utf-8")
+                lf = _open_guard_log(log_file)
             except FileNotFoundError:
                 log_dir = os.path.dirname(str(log_file))
                 if log_dir:
                     os.makedirs(log_dir, exist_ok=True)
-                lf = open(log_file, "a", encoding="utf-8")
-
+                lf = _open_guard_log(log_file)
             try:
                 from datetime import datetime
                 lf.write(f"\n--- Guard daemon started at {datetime.now().isoformat()} ---\n")
@@ -3713,7 +3732,24 @@ def start_guard_daemon(
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
-                proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                # Reclaim only the legacy deterministic reservation name; the
+                # current mkstemp reservation below is unique per attempt.
+                stale_tmp_path = pid_path.with_suffix(".pid.tmp")
+                if stale_tmp_path.is_symlink() or stale_tmp_path.exists():
+                    stale_tmp_path.unlink(missing_ok=True)
+                artifact = "pidfile"
+                _tmp_fd, tmp_name = tempfile.mkstemp(
+                    prefix=f"{pid_path.name}.", suffix=".tmp", dir=pid_path.parent
+                )
+                tmp_path = Path(tmp_name)
+                try:
+                    artifact = "guard subprocess"
+                    proc = subprocess.Popen(cmd_parts, **popen_kwargs)
+                    artifact = "pidfile"
+                except BaseException:
+                    os.close(_tmp_fd)
+                    tmp_path.unlink(missing_ok=True)
+                    raise
             finally:
                 lf.close()
 
@@ -3723,15 +3759,9 @@ def start_guard_daemon(
             # rename see either the parent PID (alive) or the daemon PID
             # (alive). Never empty, never "0", never partial.
             #
-            # CRIT C1 fix: open the .pid.tmp via os.open(O_CREAT|O_EXCL|
-            # O_NOFOLLOW) instead of Path.write_text. The default write_text
-            # follows symlinks — an attacker who pre-plants the .pid.tmp
-            # path as a symlink to ~/.zshrc or ~/.ssh/authorized_keys would
-            # have the file overwritten with the PID number. O_EXCL also
-            # surfaces orphan .pid.tmp files (from a prior SIGKILLed spawn)
-            # as a FileExistsError instead of silently truncating them,
-            # which closes a re-attack window in CRIT C3.
-            tmp_path = pid_path.with_suffix(".pid.tmp")
+            # Use a unique mkstemp reservation rather than a deterministic
+            # .pid.tmp path: it cannot collide with a peer or follow a planted
+            # symlink, and os.replace publishes it atomically.
             # CRIT C3 fix: catch ANY exception (not just OSError) around
             # the write+rename block. A SIGINT/InterruptedError or other
             # non-OSError between write_text and rename used to leak the
@@ -3739,10 +3769,6 @@ def start_guard_daemon(
             try:
                 from .spawn_lock import INIT_SPAWN_DAEMON
                 from datetime import datetime as _dt
-                _tmp_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                if hasattr(os, "O_NOFOLLOW"):
-                    _tmp_flags |= os.O_NOFOLLOW
-                _tmp_fd = os.open(str(tmp_path), _tmp_flags, 0o600)
                 try:
                     # 3-line payload: pid + iso-timestamp + initiator.
                     # Mirrors DaemonSpawnClaim._claim and
@@ -3790,10 +3816,48 @@ def start_guard_daemon(
                     # Some filesystems (network FS, tmpfs on certain
                     # kernels) reject directory fsync — best-effort.
                     pass
-            except Exception:
+            except BaseException:
                 # Unlink any partial .pid.tmp we may have created so a
                 # retry can succeed. unlink is symlink-safe (operates on
                 # the directory entry, not the symlink target).
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except ProcessLookupError:
+                    pass
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except ProcessLookupError:
+                        pass
+                    except (AttributeError, OSError, subprocess.TimeoutExpired):
+                        orphaned_guard_pid = proc.pid
+                except (AttributeError, OSError):
+                    orphaned_guard_pid = proc.pid
+                if orphaned_guard_pid is not None:
+                    try:
+                        record_orphan(orphaned_guard_pid)
+                    except OSError:
+                        pass
+                    try:
+                        from .spawn_lock import INIT_SPAWN_DAEMON
+                        from datetime import datetime as _dt
+
+                        atomic_write_text(
+                            pid_path,
+                            f"{orphaned_guard_pid}\n"
+                            f"{_dt.now().isoformat(timespec='seconds')}\n"
+                            f"{INIT_SPAWN_DAEMON}\n",
+                        )
+                        claim.handed_off = True
+                    except Exception:
+                        pass
+                    print(
+                        f"  Cozempic: guard PID {orphaned_guard_pid} may still be running; "
+                        "stop it manually.",
+                        file=sys.stderr,
+                    )
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:
@@ -3802,15 +3866,20 @@ def start_guard_daemon(
             # Tell the claim "we wrote the real PID — leave the file in
             # place on clean exit; the daemon now owns its lifecycle."
             claim.handed_off = True
-        except OSError as exc:
+        except Exception as exc:
             # The .pid.tmp orphan was already cleaned by the inner
             # try/except above; here we only need to surface the failure.
             # The claim's __exit__ will unlink the .pid file because
             # handed_off is still False, so a retry can re-claim.
             return {
                 "started": False,
-                "reason": f"pidfile: {exc}",
+                "reason": (
+                    f"{artifact}: {exc}"
+                    + (f"; guard PID {orphaned_guard_pid} may still be running"
+                       if orphaned_guard_pid is not None else "")
+                ),
                 "pid": None,
+                "orphaned_pid": orphaned_guard_pid,
                 "pid_file": str(pid_path),
                 "log_file": None,
                 "already_running": False,
@@ -3964,13 +4033,15 @@ def _get_pid_start_time(pid: int) -> float | None:
     return _get_pid_start_time_psutil(pid)
 
 
-def _record_claude_identity(session_id: str, pid: int) -> None:
+def _record_claude_identity(
+    session_id: str, pid: int, session_path: Path | None = None
+) -> None:
     """Record (pid, start_time) for the anti-recycling gate. Call once at startup.
 
     Validates pid is actually Claude (argv check) before recording — defense
     in depth in case a future caller bypasses find_claude_pid's identity gate.
     """
-    if not _is_claude_process(pid):
+    if not _is_claude_process(pid, session_path=session_path):
         return
     start_time = _get_pid_start_time(pid)
     if start_time is not None and session_id:
@@ -4169,6 +4240,16 @@ def reload_self_daemon(
     if not old_pid:
         return {"reloaded": False, "reason": "no daemon running for session"}
 
+    def refuse_replacement(reason: str) -> dict:
+        return {
+            "reloaded": False,
+            "old_pid": old_pid,
+            "new_pid": None,
+            "log_file": None,
+            "orphaned_pid": None,
+            "reason": reason,
+        }
+
     # Verify the PID is actually our daemon — defend against PID reuse.
     if not _is_cozempic_guard_process(old_pid):
         # Stale pid file pointing at a recycled (non-cozempic) PID. Clear it
@@ -4180,10 +4261,14 @@ def reload_self_daemon(
     else:
         try:
             os.kill(old_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             if _pid_file_points_to(session_id, old_pid):
                 _pid_file_for_session(session_id).unlink(missing_ok=True)
             old_pid = None
+        except PermissionError:
+            return refuse_replacement(
+                "existing daemon cannot be signaled; refusing to start a second daemon"
+            )
 
         if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
             # Didn't exit on SIGTERM — escalate, but only if we still see our
@@ -4192,10 +4277,18 @@ def reload_self_daemon(
             if _is_cozempic_guard_process(old_pid):
                 try:
                     os.kill(old_pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                except ProcessLookupError:
+                    old_pid = None
+                except PermissionError:
+                    return refuse_replacement(
+                        "existing daemon cannot be killed; refusing to start a second daemon"
+                    )
+            if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
+                return refuse_replacement(
+                    "existing daemon did not exit after SIGKILL; refusing to start a second daemon"
+                )
             # CAS unlink — don't wipe a fresh pid file from a concurrent spawn
-            if _pid_file_points_to(session_id, old_pid):
+            if old_pid is not None and _pid_file_points_to(session_id, old_pid):
                 _pid_file_for_session(session_id).unlink(missing_ok=True)
         elif old_pid is not None:
             # Clean exit. CAS unlink — if a concurrent SessionStart hook
@@ -4221,41 +4314,51 @@ def reload_self_daemon(
         protect_patterns=protect_patterns,
     )
     result = start_guard_daemon(**daemon_args)
-    if not result.get("started") and not result.get("already_running"):
+    orphaned_pid = result.get("orphaned_pid")
+    if (
+        not result.get("started")
+        and not result.get("already_running")
+        and orphaned_pid is None
+    ):
         time.sleep(1)
         # Only clear a pid file we know is stale (pointing at a dead pid).
         # Do NOT blindly unlink — a live concurrent daemon may have written it.
         pid_path = _pid_file_for_session(session_id)
         try:
             if pid_path.exists():
-                from .spawn_lock import _parse_pidfile_pid
+                from .spawn_lock import _parse_pidfile_pid, pidfile_is_fresh
                 stale_pid = _parse_pidfile_pid(pid_path)
                 if stale_pid <= 0:
-                    # Garbled or empty — treat as stale and unlink.
-                    pid_path.unlink(missing_ok=True)
+                    if not pidfile_is_fresh(pid_path):
+                        pid_path.unlink(missing_ok=True)
                     stale_pid = 0
                 try:
                     if stale_pid > 0:
                         os.kill(stale_pid, 0)
                     # Still alive — leave the pid file alone and let
                     # start_guard_daemon below return already_running.
-                except (ProcessLookupError, PermissionError):
+                except ProcessLookupError:
                     pid_path.unlink(missing_ok=True)
+                except PermissionError:
+                    pass
         except (ValueError, OSError):
             pid_path.unlink(missing_ok=True)
         result = start_guard_daemon(**daemon_args)
+        orphaned_pid = orphaned_pid or result.get("orphaned_pid")
 
     reloaded = bool(result.get("started") or result.get("already_running"))
     if reloaded:
         reason = "ok"
     else:
-        reason = "could not start fresh daemon after retry — session is unprotected"
+        detail = result.get("reason", "unknown failure")
+        reason = f"could not start fresh daemon after retry — session is unprotected ({detail})"
 
     return {
         "reloaded": reloaded,
         "old_pid": old_pid,
         "new_pid": result.get("pid"),
         "log_file": result.get("log_file"),
+        "orphaned_pid": orphaned_pid,
         "reason": reason,
     }
 

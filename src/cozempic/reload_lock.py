@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -159,16 +160,44 @@ class ReloadLockHeld(Exception):
         )
 
 
+def _read_regular_metadata(path: Path) -> tuple[str, float] | None:
+    """Read small metadata and mtime without following a symlink."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            return None
+        return os.read(fd, 4096).decode("utf-8"), file_stat.st_mtime
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _read_regular_text(path: Path) -> str | None:
+    """Read a small metadata file without following a symlink."""
+    metadata = _read_regular_metadata(path)
+    return metadata[0] if metadata is not None else None
+
+
 def _read_lock_metadata(lock_path: Path) -> tuple[int, str, Optional[float]]:
     """Parse a lock file. Returns (pid, initiator, age_sec) — best effort.
 
     On any read/parse failure, returns (0, "unknown", None) so the caller
     can decide whether to treat as stale.
     """
-    try:
-        content = lock_path.read_text(encoding="utf-8").strip().split("\n")
-    except OSError:
+    text = _read_regular_text(lock_path)
+    if text is None:
         return 0, "unknown", None
+    content = text.strip().split("\n")
     pid = 0
     initiator = "unknown"
     age = None
@@ -382,10 +411,10 @@ def _read_sentinel_metadata(sentinel_path: Path) -> tuple[int, Optional[float]]:
     whether to treat as stale. Does NOT return the initiator field — callers
     only need pid and age for GC decisions.
     """
-    try:
-        content = sentinel_path.read_text(encoding="utf-8").strip().split("\n")
-    except OSError:
+    text = _read_regular_text(sentinel_path)
+    if text is None:
         return 0, None
+    content = text.strip().split("\n")
     pid = 0
     age = None
     if len(content) >= 1:
@@ -495,16 +524,13 @@ def _reload_sentinel_active(session_id: str) -> bool:
     verbose. The docstring makes the side-effect explicit.
     """
     sentinel_path = _reload_sentinel_path_for(session_id)
-    if not sentinel_path.exists():
+    metadata = _read_regular_metadata(sentinel_path)
+    if metadata is None:
         return False
 
     # Use mtime for freshness — tests can manipulate it via os.utime, and it's
     # set atomically by the OS on file write (no parse errors possible).
-    try:
-        age = time.time() - sentinel_path.stat().st_mtime
-    except OSError:
-        # File disappeared between exists() and stat() — treat as absent
-        return False
+    age = time.time() - metadata[1]
 
     if age >= SENTINEL_TTL_SECONDS:
         # Stale — GC it

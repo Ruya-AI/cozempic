@@ -13,8 +13,10 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
+import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,13 +49,8 @@ def _race_worker(
 
     def _fake_popen(cmd_parts, **kwargs):
         # Fake ONLY the daemon-spawn Popen (python -m cozempic.cli guard).
-        # Every other subprocess use — notably the `ps` identity probe inside
-        # _is_cozempic_guard_process, which subprocess.run drives via
-        # `with Popen(...) as p: p.communicate()` — must run for real; the
-        # global Popen patch otherwise hands `ps` a _DummyProc with no
-        # __enter__/communicate, raising AttributeError and turning every
-        # loser worker into an 'undefined' outcome (the deterministically-dead
-        # gate this test is supposed to be).
+        # Every other subprocess use must run for real. This is defensive
+        # against future changes that remove the current identity-probe mocks.
         parts = cmd_parts if isinstance(cmd_parts, (list, tuple)) else [cmd_parts]
         is_daemon_spawn = any("cozempic.cli" in str(p) for p in parts) or (
             any("cozempic" in str(p) for p in parts) and any(str(p) == "guard" for p in parts)
@@ -87,22 +84,66 @@ def _race_worker(
         result_queue.put(r)
 
 
+def _stale_claim_worker(barrier_handle, result_queue, pid_file: str, worker_index: int):
+    """Race stale-claim recovery without spawning a real guard."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from cozempic.spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
+
+    try:
+        barrier_handle.wait(timeout=10.0)
+        claim = DaemonSpawnClaim("stale-claim-test", Path(pid_file))
+        claim.__enter__()
+        claim.handed_off = True
+        result_queue.put({"claimed": True, "worker": worker_index})
+        time.sleep(0.1)
+        claim.__exit__(None, None, None)
+    except DaemonAlreadyStarting as exc:
+        result_queue.put({"claimed": False, "holder_pid": exc.holder_pid, "worker": worker_index})
+    except Exception as exc:
+        result_queue.put({"error": repr(exc), "worker": worker_index})
+
+
+def _reap_processes(procs) -> list[str]:
+    lingering = []
+    for proc in procs:
+        try:
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                lingering.append(proc.name)
+        except Exception as exc:
+            lingering.append(f"{proc.name}: {exc!r}")
+    return lingering
+
+
 class TestThreeProcessContention(unittest.TestCase):
     """Three processes race for the same session — exactly ONE must win."""
-
-    SESSION_ID = "fade1234-5678-9abc-def0-2026051811cc"
 
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
         self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.paths = (
+            self.pid_path,
+            self.log_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        self._clean_paths()
+
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
+        self._clean_paths()
 
     def test_three_process_contention(self):
 
@@ -113,39 +154,35 @@ class TestThreeProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(ITERATIONS):
-            self.pid_path.unlink(missing_ok=True)
-            self.log_path.unlink(missing_ok=True)
+            self._clean_paths()
 
             barrier = ctx.Barrier(N)
             queue = ctx.Queue()
             procs = [
                 ctx.Process(
                     target=_race_worker,
-                    args=(barrier, queue, self.SESSION_ID, cwd, i),
+                    args=(barrier, queue, self.session_id, cwd, i),
                     name=f"race-3-{i}",
                 )
                 for i in range(N)
             ]
-            for p in procs:
-                p.start()
-
             results = []
-            for _ in range(N):
-                try:
-                    results.append(queue.get(timeout=15.0))
-                except Exception as e:
-                    results.append({"error": f"queue.get failed: {e!r}"})
-            for p in procs:
-                p.join(timeout=5.0)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=2.0)
+            try:
+                for p in procs:
+                    p.start()
+                for _ in range(N):
+                    try:
+                        results.append(queue.get(timeout=15.0))
+                    except Exception as e:
+                        results.append({"error": f"queue.get failed: {e!r}"})
+            finally:
+                lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
 
-            if len(started) != 1 or len(already) != (N - 1):
-                failures.append({"iteration": it, "results": results})
+            if len(started) != 1 or len(already) != (N - 1) or lingering:
+                failures.append({"iteration": it, "results": results, "lingering": lingering})
 
         if failures:
             self.fail(
@@ -170,22 +207,28 @@ class TestV4TenProcessContention(unittest.TestCase):
     gate for any change to spawn_lock.py or start_guard_daemon.
     """
 
-    SESSION_ID = "feedbeef-1234-5678-9abc-2026051811ff"
     N = 10
     ITERATIONS = 30
 
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        self._clean_paths()
+
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        self._clean_paths()
 
     def test_ten_process_contention_30x(self):
         ctx = mp.get_context("spawn")
@@ -193,33 +236,29 @@ class TestV4TenProcessContention(unittest.TestCase):
 
         failures = []
         for it in range(self.ITERATIONS):
-            self.pid_path.unlink(missing_ok=True)
-            self.log_path.unlink(missing_ok=True)
+            self._clean_paths()
 
             barrier = ctx.Barrier(self.N)
             queue = ctx.Queue()
             procs = [
                 ctx.Process(
                     target=_race_worker,
-                    args=(barrier, queue, self.SESSION_ID, cwd, i),
+                    args=(barrier, queue, self.session_id, cwd, i),
                     name=f"v4-{i}",
                 )
                 for i in range(self.N)
             ]
-            for p in procs:
-                p.start()
-
             results = []
-            for _ in range(self.N):
-                try:
-                    results.append(queue.get(timeout=20.0))
-                except Exception as e:
-                    results.append({"error": f"queue.get: {e!r}"})
-            for p in procs:
-                p.join(timeout=5.0)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=2.0)
+            try:
+                for p in procs:
+                    p.start()
+                for _ in range(self.N):
+                    try:
+                        results.append(queue.get(timeout=20.0))
+                    except Exception as e:
+                        results.append({"error": f"queue.get: {e!r}"})
+            finally:
+                lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -229,7 +268,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                 if r.get("started") is not True and r.get("already_running") is not True
             ]
 
-            if len(started) != 1 or len(already) != (self.N - 1) or undefined:
+            if len(started) != 1 or len(already) != (self.N - 1) or undefined or lingering:
                 failures.append(
                     {
                         "iter": it,
@@ -237,6 +276,7 @@ class TestV4TenProcessContention(unittest.TestCase):
                         "already_count": len(already),
                         "undefined_count": len(undefined),
                         "started_workers": [r.get("worker") for r in started],
+                        "lingering": lingering,
                         "first_undefined": undefined[0] if undefined else None,
                     }
                 )
@@ -256,20 +296,23 @@ class TestNoPlaceholderPidVisible(unittest.TestCase):
     only "no file" or "file with real PID > 0" should ever be observable.
     """
 
-    SESSION_ID = "babe1234-5678-9abc-def0-2026051811dd"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_no_placeholder_pid_ever_visible(self):
         """Run start_guard_daemon while a tight reader loop observes the
@@ -300,7 +343,7 @@ class TestNoPlaceholderPidVisible(unittest.TestCase):
             mock_popen.return_value.pid = 88888
             result = start_guard_daemon(
                 cwd=os.getcwd(),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -433,6 +476,157 @@ class TestFreshWindowEnvVarClamping(unittest.TestCase):
         self.assertEqual(self._reload_with_env(None), _DEFAULT_FRESH)
 
 
+class TestFreshClaimProtection(unittest.TestCase):
+    """The race fixtures must not be the only coverage of fresh claims."""
+
+    def test_fresh_empty_pidfile_is_not_unlinked_by_guard_probe(self):
+        """A probe must not delete a peer's not-yet-written exclusive claim."""
+        from cozempic import guard
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            pid_file.touch()
+            with patch.object(guard, "_pid_file_for_session", return_value=pid_file):
+                self.assertIsNone(guard._is_guard_running_for_session("test-session"))
+            self.assertTrue(pid_file.exists())
+
+    def test_fresh_dead_pid_is_not_reclaimed(self):
+        """A freshly written dead PID is a peer claim, not stale state."""
+        from cozempic import spawn_lock
+        from cozempic.spawn_lock import DaemonAlreadyStarting, DaemonSpawnClaim
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            pid_file.write_text("900000\n", encoding="utf-8")
+            fresh_window = spawn_lock._FRESH_PIDFILE_SECONDS
+            fresh_now = pid_file.stat().st_mtime + fresh_window / 2
+            claim = DaemonSpawnClaim("test-session", pid_file)
+
+            with (
+                patch("cozempic.spawn_lock._is_process_alive", return_value=False),
+                patch("cozempic.spawn_lock.time.time", return_value=fresh_now),
+                self.assertRaises(DaemonAlreadyStarting) as raised,
+            ):
+                claim.__enter__()
+
+        self.assertEqual(raised.exception.holder_pid, 900000)
+
+    def test_write_failure_removes_claim_file(self):
+        """A failed claim write cannot strand a fresh-looking pidfile."""
+        from cozempic.spawn_lock import DaemonSpawnClaim
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            claim = DaemonSpawnClaim("test-session", pid_file)
+            with (
+                patch("cozempic.spawn_lock.os.write", side_effect=OSError("disk full")),
+                self.assertRaises(OSError),
+            ):
+                claim.__enter__()
+            self.assertFalse(pid_file.exists())
+
+    def test_guard_returns_claim_oserror_without_crashing(self):
+        """A claim I/O failure is a failed start, not a SessionStart traceback."""
+        from cozempic.guard import start_guard_daemon
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch(
+                    "cozempic.spawn_lock.DaemonSpawnClaim.__enter__",
+                    side_effect=OSError("disk full"),
+                ),
+            ):
+                result = start_guard_daemon(
+                    cwd=tmp_dir,
+                    session_id="bead1234-5678-9abc-def0-2026051811aa",
+                    threshold_tokens=1000,
+                )
+        self.assertFalse(result["started"])
+        self.assertIn("pidfile claim", result["reason"])
+
+    def _start_with_pid_tmp(self, *, stale: bool):
+        """Start against a fresh or stale leftover publication reservation."""
+        from cozempic import spawn_lock
+        from cozempic.guard import _pid_file_for_session, start_guard_daemon
+
+        session_id = uuid.uuid4().hex
+        pid_path = _pid_file_for_session(session_id)
+        tmp_path = pid_path.with_suffix(".pid.tmp")
+        pid_path.unlink(missing_ok=True)
+        tmp_path.write_text("stale\n", encoding="utf-8")
+        if stale:
+            stale_at = time.time() - spawn_lock._FRESH_PIDFILE_SECONDS - 1
+            os.utime(tmp_path, (stale_at, stale_at))
+
+        class _DummyProc:
+            pid = 987654
+
+        try:
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard.find_claude_pid", return_value=12345),
+                patch("cozempic.guard.subprocess.Popen", return_value=_DummyProc()) as popen,
+            ):
+                result = start_guard_daemon(
+                    cwd=tempfile.gettempdir(), session_id=session_id, threshold_tokens=1000
+                )
+            return result, popen
+        finally:
+            pid_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+
+    def test_fresh_pid_tmp_is_reclaimed_after_exclusive_claim(self):
+        """An exclusive PID claimant may reclaim any leftover publication temp."""
+        result, popen = self._start_with_pid_tmp(stale=False)
+        self.assertTrue(result["started"])
+        popen.assert_called_once()
+
+    def test_stale_pid_tmp_is_reclaimed_before_spawn(self):
+        """A reservation left by a killed parent must not block restart forever."""
+        result, popen = self._start_with_pid_tmp(stale=True)
+        self.assertTrue(result["started"])
+        popen.assert_called_once()
+
+
+class TestStaleClaimContention(unittest.TestCase):
+    """A stale PID file still admits exactly one cross-process claimant."""
+
+    def test_two_processes_one_reclaimer(self):
+        from cozempic import spawn_lock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = Path(tmp_dir) / "guard.pid"
+            ctx = mp.get_context("spawn")
+            for _ in range(10):
+                pid_file.write_text("999999999\n", encoding="utf-8")
+                stale_at = time.time() - spawn_lock._FRESH_PIDFILE_SECONDS - 1
+                os.utime(pid_file, (stale_at, stale_at))
+                barrier = ctx.Barrier(2)
+                queue = ctx.Queue()
+                procs = [
+                    ctx.Process(target=_stale_claim_worker, args=(barrier, queue, str(pid_file), i))
+                    for i in range(2)
+                ]
+                results = []
+                try:
+                    for proc in procs:
+                        proc.start()
+                    for _ in procs:
+                        try:
+                            results.append(queue.get(timeout=10.0))
+                        except Exception as exc:
+                            results.append({"error": repr(exc)})
+                finally:
+                    lingering = _reap_processes(procs)
+                self.assertFalse(lingering, f"workers survived cleanup: {lingering}")
+                self.assertFalse([result for result in results if "error" in result], results)
+                self.assertEqual(sum(result["claimed"] for result in results), 1, results)
+                pid_file.unlink(missing_ok=True)
+
+
 class TestSymlinkDefense(unittest.TestCase):
     """Round-3 C1 regression test: the post-Popen ``.pid.tmp`` write must
     NOT follow symlinks. A local user with write access to ``/tmp`` (a
@@ -445,17 +639,16 @@ class TestSymlinkDefense(unittest.TestCase):
     which:
       - rejects symlinks with ``OSError`` (ELOOP on Linux, EEXIST on macOS
         since O_EXCL fires first when the path exists at all)
-      - rejects pre-existing regular files too (orphan ``.pid.tmp`` from
-        a crashed prior spawn)
-      - leaves the victim file untouched in both cases
+      - reclaims a pre-existing regular publication temp only after winning
+        the exclusive PID claim
+      - leaves the symlink target untouched
     """
-
-    SESSION_ID = "ca7ec0de-1234-5678-9abc-2026051811f0"
 
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
         self.tmp_pid_path = self.pid_path.with_suffix(".pid.tmp")
         self.log_path = self.pid_path.with_suffix(".log")
         # Clean slate
@@ -476,7 +669,8 @@ class TestSymlinkDefense(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        for p in (self.pid_path, self.tmp_pid_path, self.log_path):
+        reclaim_lock = self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock")
+        for p in (self.pid_path, self.tmp_pid_path, self.log_path, reclaim_lock):
             try:
                 p.unlink()
             except (FileNotFoundError, OSError):
@@ -484,8 +678,7 @@ class TestSymlinkDefense(unittest.TestCase):
 
     def test_pid_tmp_write_rejects_symlink(self):
         """Attacker pre-plants .pid.tmp as a symlink to a victim file.
-        The post-Popen atomic-rename write path MUST refuse it and leave
-        the victim untouched."""
+        The reservation is removed safely and the victim remains untouched."""
         from unittest.mock import patch
 
         from cozempic.guard import start_guard_daemon
@@ -511,80 +704,113 @@ class TestSymlinkDefense(unittest.TestCase):
         ):
             result = start_guard_daemon(
                 cwd=str(self.tmpdir),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
-        # The spawn body raised OSError on the os.open(O_EXCL|O_NOFOLLOW)
-        # and surfaced a structured failure (started=False, reason="pidfile:
-        # ..."). The DaemonSpawnClaim's __exit__ unlinked the parent-PID
-        # claim file we wrote at _claim time (handed_off=False).
-        self.assertFalse(
-            result.get("started"),
-            f"Spawn should have FAILED — symlink defense breached. " f"Got: {result!r}",
-        )
-        self.assertIn(
-            "reason",
-            result,
-            f"Failure path must carry a structured reason; got {result!r}",
-        )
+        self.assertTrue(result.get("started"), f"Spawn did not reclaim the symlink: {result!r}")
         # CRITICAL: the victim file must be untouched.
         self.assertEqual(
             self.victim.read_text(encoding="utf-8"),
             "ORIGINAL\n",
-            "Victim file was overwritten — C1 symlink TOCTOU regression. "
-            "The .pid.tmp write must use O_NOFOLLOW (or fail closed on "
-            "EEXIST when the path already exists, which O_EXCL guarantees).",
+            "Victim file was overwritten while reclaiming the reservation.",
         )
+
+    def test_reclaim_lock_rejects_symlink(self):
+        """The persistent stale-reclaim lock must not follow a symlink."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.spawn_lock import _stale_reclaim_lock
+
+        lock_path = self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock")
+        os.symlink(str(self.victim), str(lock_path))
+        with self.assertRaises(OSError):
+            with _stale_reclaim_lock(self.pid_path):
+                pass
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
+
+    def test_log_write_rejects_symlink(self):
+        """The deterministic guard log path must not follow a symlink."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.guard import start_guard_daemon
+
+        os.symlink(str(self.victim), str(self.log_path))
+        with (
+            patch("cozempic.guard.find_claude_pid", return_value=12345),
+            patch("cozempic.guard._cleanup_legacy_pid"),
+        ):
+            result = start_guard_daemon(
+                cwd=str(self.tmpdir),
+                session_id=self.session_id,
+                threshold_tokens=1000,
+            )
+
+        self.assertFalse(result["started"])
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
+
+    def test_pidfile_parse_rejects_symlink(self):
+        """PID readers must not follow a symlink planted at the claim path."""
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("platform has no O_NOFOLLOW")
+        from cozempic.spawn_lock import _parse_pidfile_pid
+
+        os.symlink(str(self.victim), str(self.pid_path))
+        self.assertEqual(_parse_pidfile_pid(self.pid_path), 0)
+        self.assertEqual(self.victim.read_text(encoding="utf-8"), "ORIGINAL\n")
 
 
 class TestFileNotFoundErrorRecovery(unittest.TestCase):
     """If the log file's parent dir vanishes mid-spawn, the daemon must
     recover with one retry — not crash the SessionStart hook."""
 
-    SESSION_ID = "feed1234-5678-9abc-def0-2026051811ee"
-
     def setUp(self):
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
         self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+        self.paths = (
+            self.pid_path,
+            self.log_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
-        self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_filenotfounderror_recovery(self):
-        """First open(log_file) raises FileNotFoundError, second succeeds."""
+        """First log open raises FileNotFoundError, second succeeds."""
+        from cozempic import guard
         from cozempic.guard import start_guard_daemon
 
-        # We track open() calls on the log_file path; the FIRST call raises,
-        # the rest are passed through. Mock os.makedirs to confirm the retry
-        # path is taken.
-        real_open = open
+        # We track the safe log opener; the FIRST call raises, the rest pass
+        # through. Mock os.makedirs to confirm the retry path is taken.
+        real_open = guard._open_guard_log
         call_state = {"n": 0}
 
-        def fake_open(path, *args, **kwargs):
+        def fake_open(path):
             if str(path) == str(self.log_path):
                 call_state["n"] += 1
                 if call_state["n"] == 1:
                     raise FileNotFoundError(2, "No such file or directory", str(path))
-            return real_open(path, *args, **kwargs)
+            return real_open(path)
 
         with (
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
             patch("cozempic.guard.find_claude_pid", return_value=12345),
             patch("cozempic.guard._cleanup_legacy_pid"),
-            patch("builtins.open", side_effect=fake_open),
+            patch("cozempic.guard._open_guard_log", side_effect=fake_open),
             patch("cozempic.guard.os.makedirs") as mock_makedirs,
         ):
             mock_popen.return_value.pid = 77777
             result = start_guard_daemon(
                 cwd=os.getcwd(),
-                session_id=self.SESSION_ID,
+                session_id=self.session_id,
                 threshold_tokens=1000,
             )
 
@@ -595,14 +821,44 @@ class TestFileNotFoundErrorRecovery(unittest.TestCase):
         self.assertEqual(
             call_state["n"],
             2,
-            "Expected exactly 2 open() calls on log file (1 fail + 1 retry); "
+            "Expected exactly 2 log-open calls (1 fail + 1 retry); "
             f"got {call_state['n']}.",
         )
         mock_makedirs.assert_called_once()
 
+    def test_log_open_error_is_reported_as_log_failure(self):
+        from cozempic.guard import start_guard_daemon
+
+        with (
+            patch("cozempic.guard.find_claude_pid", return_value=12345),
+            patch("cozempic.guard._cleanup_legacy_pid"),
+            patch("cozempic.guard._open_guard_log", side_effect=OSError("permission denied")),
+        ):
+            result = start_guard_daemon(cwd=os.getcwd(), session_id=self.session_id)
+
+        self.assertFalse(result["started"])
+        self.assertIn("log file: permission denied", result["reason"])
+
 
 class TestDaemonSpawnLockUnit(unittest.TestCase):
     """Direct contract tests on the spawn_lock module."""
+
+    def setUp(self):
+        from cozempic.spawn_lock import _spawn_lock_path
+
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _spawn_lock_path(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        for path in self.paths:
+            path.unlink(missing_ok=True)
+
+    def tearDown(self):
+        for path in self.paths:
+            path.unlink(missing_ok=True)
 
     def test_lock_yields_path(self):
         """Post-V4-rework: the spawn claim writes to the .pid file directly
@@ -610,8 +866,7 @@ class TestDaemonSpawnLockUnit(unittest.TestCase):
         contract."""
         from cozempic.spawn_lock import daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00deadbeef"
-        with daemon_spawn_lock(sid) as lock_path:
+        with daemon_spawn_lock(self.session_id) as lock_path:
             self.assertIsInstance(lock_path, Path)
             self.assertIn("cozempic_guard_", lock_path.name)
             self.assertTrue(
@@ -623,21 +878,19 @@ class TestDaemonSpawnLockUnit(unittest.TestCase):
         """A second concurrent acquire MUST raise DaemonAlreadyStarting."""
         from cozempic.spawn_lock import DaemonAlreadyStarting, daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00cafebabe"
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             with self.assertRaises(DaemonAlreadyStarting):
-                with daemon_spawn_lock(sid):
+                with daemon_spawn_lock(self.session_id):
                     pass
 
     def test_release_allows_reacquire(self):
         """After the first lock exits, a fresh acquire succeeds."""
         from cozempic.spawn_lock import daemon_spawn_lock
 
-        sid = "deadbeef-1234-5678-9abc-de00f00dbabe"
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             pass
         # Should not raise
-        with daemon_spawn_lock(sid):
+        with daemon_spawn_lock(self.session_id):
             pass
 
 
@@ -700,8 +953,7 @@ class TestC2_SlugConvergence(unittest.TestCase):
         name = p.name
         prefix = "cozempic_guard_"
         suffix = ".pid"
-        self_assert_invariant = name.startswith(prefix) and name.endswith(suffix)
-        assert self_assert_invariant, f"unexpected pid path shape: {name!r}"
+        assert name.startswith(prefix) and name.endswith(suffix), f"unexpected pid path shape: {name!r}"
         return name[len(prefix) : -len(suffix)]
 
     # ─────────────────────────────────────────────────────────────────────

@@ -1045,6 +1045,11 @@ def cmd_guard(args):
             print(f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})")
         else:
             print(f"  Guard reload skipped: {result.get('reason')}")
+        if result.get("orphaned_pid"):
+            print(
+                f"  Guard warning: PID {result['orphaned_pid']} may still be running; stop it manually.",
+                file=sys.stderr,
+            )
         return
 
     if args.daemon:
@@ -1073,6 +1078,11 @@ def cmd_guard(args):
         else:
             reason = result.get("reason") or "unknown (no started/already_running/reason set)"
             print(f"  Guard daemon failed to start: {reason}")
+        if result.get("orphaned_pid"):
+            print(
+                f"  Guard warning: PID {result['orphaned_pid']} may still be running; stop it manually.",
+                file=sys.stderr,
+            )
         return
 
     start_guard(

@@ -113,6 +113,19 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertTrue(self.breaker.can_recover())
         self.assertEqual(self.breaker.recovery_count(), 0)
 
+    def test_save_replaces_symlink_without_touching_target(self):
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            victim = Path(tmp.name)
+        try:
+            victim.write_text("keep")
+            self.breaker.state_path.unlink(missing_ok=True)
+            os.symlink(victim, self.breaker.state_path)
+            self.breaker._save([])
+            self.assertFalse(self.breaker.state_path.is_symlink())
+            self.assertEqual(victim.read_text(), "keep")
+        finally:
+            victim.unlink(missing_ok=True)
+
 
 class TestOverflowDetection(unittest.TestCase):
 

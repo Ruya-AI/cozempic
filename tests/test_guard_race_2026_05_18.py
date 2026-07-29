@@ -37,8 +37,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
-import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,16 +88,24 @@ def _race_worker(
         fake_pid = 900_000 + worker_index
         return _DummyProc(fake_pid)
 
+    def _fake_is_process_alive(pid: int) -> bool:
+        """Model the spawned fake guard as alive for the contention check."""
+        return pid > 0
+
     # Mock subprocess.Popen so no real daemon is spawned, and mock
     # find_claude_pid so we don't fail when no Claude is running.
     with (
         _patch("cozempic.guard.subprocess.Popen", side_effect=_fake_popen),
         _patch("cozempic.guard.find_claude_pid", return_value=12345),
         _patch("cozempic.guard._cleanup_legacy_pid"),
+        _patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+        _patch(
+            "cozempic.spawn_lock._is_process_alive", side_effect=_fake_is_process_alive
+        ),
     ):
         # Barrier sync: both children pile up here and release at the same instant
         try:
-            barrier_handle.wait(timeout=5.0)
+            barrier_handle.wait(timeout=10.0)
         except Exception as e:  # BrokenBarrierError or timeout
             result_queue.put(
                 {"error": f"barrier failed: {e!r}", "worker": worker_index}
@@ -117,6 +125,24 @@ def _race_worker(
         result_queue.put(r)
 
 
+def _reap_processes(procs) -> list[str]:
+    lingering = []
+    for proc in procs:
+        try:
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2.0)
+            if proc.is_alive():
+                lingering.append(proc.name)
+        except Exception as exc:
+            lingering.append(f"{proc.name}: {exc!r}")
+    return lingering
+
+
 class TestR1_DaemonProcessRace(unittest.TestCase):
     """Process-vs-process race on start_guard_daemon for the same session UUID.
 
@@ -125,60 +151,66 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
     O_CREAT|O_EXCL claim path holds across process boundaries.
     """
 
-    # Must match _SESSION_ID_RE = ^[0-9a-f][0-9a-f-]{11,}$  (hex chars + dashes only)
-    SESSION_ID = "abcd1234-5678-9abc-def0-2026051811aa"
     ITERATIONS = 50
 
     def setUp(self):
         # Compute and pre-clean the pidfile + log file for our session.
         from cozempic.guard import _pid_file_for_session
 
-        self.pid_path = _pid_file_for_session(self.SESSION_ID)
-        self.pid_path.unlink(missing_ok=True)
+        self.session_id = uuid.uuid4().hex
+        self.pid_path = _pid_file_for_session(self.session_id)
+        self.paths = (
+            self.pid_path,
+            self.pid_path.with_suffix(".pid.tmp"),
+            self.pid_path.with_suffix(".log"),
+            self.pid_path.with_name(f"{self.pid_path.name}.reclaim-lock"),
+        )
+        self._clean_paths()
         self.log_path = self.pid_path.with_suffix(".log")
-        self.log_path.unlink(missing_ok=True)
+
+    def _clean_paths(self):
+        for path in (*self.paths, *self.pid_path.parent.glob(f"{self.pid_path.name}.*.tmp")):
+            path.unlink(missing_ok=True)
 
     def tearDown(self):
-        self.pid_path.unlink(missing_ok=True)
-        self.log_path.unlink(missing_ok=True)
+        self._clean_paths()
 
     def _race_once(self) -> list[dict]:
         """Spawn two processes, sync at a barrier, collect results."""
         # On macOS the default start method is spawn; force it explicitly so
         # the test is platform-deterministic.
         ctx = mp.get_context("spawn")
+        self._clean_paths()
 
         barrier = ctx.Barrier(2)
         result_queue = ctx.Queue()
 
-        # Fresh cwd per iteration so the legacy-pid cleanup path doesn't
-        # interfere across iterations.
+        # The shared cwd is enough; pidfile and log cleanup isolate iterations.
         cwd = os.getcwd()
 
         procs = [
             ctx.Process(
                 target=_race_worker,
-                args=(barrier, result_queue, self.SESSION_ID, cwd, i),
+                args=(barrier, result_queue, self.session_id, cwd, i),
                 name=f"race-child-{i}",
             )
             for i in range(2)
         ]
-        for p in procs:
-            p.start()
-
-        # Collect both results
         results = []
-        for _ in range(2):
-            try:
-                results.append(result_queue.get(timeout=10.0))
-            except Exception as e:
-                results.append({"error": f"queue.get failed: {e!r}"})
+        try:
+            for p in procs:
+                p.start()
 
-        for p in procs:
-            p.join(timeout=5.0)
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=2.0)
+            # Collect both results
+            for _ in range(2):
+                try:
+                    results.append(result_queue.get(timeout=10.0))
+                except Exception as e:
+                    results.append({"error": f"queue.get failed: {e!r}"})
+        finally:
+            lingering = _reap_processes(procs)
+        if lingering:
+            results.append({"error": f"workers survived cleanup: {lingering}"})
 
         return results
 
@@ -197,6 +229,7 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
         for it in range(self.ITERATIONS):
             # Clean state before each race
             self.pid_path.unlink(missing_ok=True)
+            self.pid_path.with_suffix(".pid.tmp").unlink(missing_ok=True)
             self.log_path.unlink(missing_ok=True)
 
             results = self._race_once()
