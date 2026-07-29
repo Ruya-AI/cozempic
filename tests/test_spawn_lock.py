@@ -166,16 +166,17 @@ class TestThreeProcessContention(unittest.TestCase):
                 )
                 for i in range(N)
             ]
-            for p in procs:
-                p.start()
-
             results = []
-            for _ in range(N):
-                try:
-                    results.append(queue.get(timeout=15.0))
-                except Exception as e:
-                    results.append({"error": f"queue.get failed: {e!r}"})
-            lingering = _reap_processes(procs)
+            try:
+                for p in procs:
+                    p.start()
+                for _ in range(N):
+                    try:
+                        results.append(queue.get(timeout=15.0))
+                    except Exception as e:
+                        results.append({"error": f"queue.get failed: {e!r}"})
+            finally:
+                lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -247,16 +248,17 @@ class TestV4TenProcessContention(unittest.TestCase):
                 )
                 for i in range(self.N)
             ]
-            for p in procs:
-                p.start()
-
             results = []
-            for _ in range(self.N):
-                try:
-                    results.append(queue.get(timeout=20.0))
-                except Exception as e:
-                    results.append({"error": f"queue.get: {e!r}"})
-            lingering = _reap_processes(procs)
+            try:
+                for p in procs:
+                    p.start()
+                for _ in range(self.N):
+                    try:
+                        results.append(queue.get(timeout=20.0))
+                    except Exception as e:
+                        results.append({"error": f"queue.get: {e!r}"})
+            finally:
+                lingering = _reap_processes(procs)
 
             started = [r for r in results if r.get("started") is True]
             already = [r for r in results if r.get("already_running") is True]
@@ -608,10 +610,10 @@ class TestStaleClaimContention(unittest.TestCase):
                     ctx.Process(target=_stale_claim_worker, args=(barrier, queue, str(pid_file), i))
                     for i in range(2)
                 ]
-                for proc in procs:
-                    proc.start()
                 results = []
                 try:
+                    for proc in procs:
+                        proc.start()
                     for _ in procs:
                         try:
                             results.append(queue.get(timeout=10.0))

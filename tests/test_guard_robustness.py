@@ -156,6 +156,91 @@ class TestReloadSelfDaemon(unittest.TestCase):
         self.assertEqual(result["orphaned_pid"], 111)
         start.assert_called_once()
 
+    def test_refuses_reload_when_existing_daemon_cannot_be_signaled(self):
+        from cozempic.guard import reload_self_daemon
+
+        session_id = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "guard.pid"
+            pid_path.write_text("123\n")
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=123),
+                patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+                patch("cozempic.guard._pid_file_for_session", return_value=pid_path),
+                patch("cozempic.guard.os.kill", side_effect=PermissionError),
+                patch("cozempic.guard.start_guard_daemon") as start,
+            ):
+                result = reload_self_daemon(cwd=tmpdir, session_id=session_id)
+                pidfile_preserved = pid_path.exists()
+
+        self.assertFalse(result["reloaded"])
+        self.assertIn("cannot be signaled", result["reason"])
+        self.assertTrue(pidfile_preserved)
+        start.assert_not_called()
+
+    def test_refuses_reload_when_daemon_survives_sigkill(self):
+        from cozempic.guard import reload_self_daemon
+
+        session_id = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "guard.pid"
+            pid_path.write_text("123\n")
+            with (
+                patch("cozempic.guard._is_guard_running_for_session", return_value=123),
+                patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+                patch("cozempic.guard._pid_file_for_session", return_value=pid_path),
+                patch("cozempic.guard._wait_for_exit", return_value=False),
+                patch("cozempic.guard.os.kill") as kill,
+                patch("cozempic.guard.start_guard_daemon") as start,
+            ):
+                result = reload_self_daemon(cwd=tmpdir, session_id=session_id)
+                pidfile_preserved = pid_path.exists()
+
+        self.assertFalse(result["reloaded"])
+        self.assertIn("did not exit after SIGKILL", result["reason"])
+        self.assertTrue(pidfile_preserved)
+        self.assertEqual(kill.call_count, 2)
+        start.assert_not_called()
+
+    def test_orphan_marker_blocks_a_later_daemon_start(self):
+        from cozempic import guard
+
+        session_id = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_replace = os.replace
+
+            class DummyProc:
+                pid = 4242
+
+                def terminate(self):
+                    raise OSError("cannot terminate")
+
+            def fail_pid_replace(source, destination):
+                if Path(destination) == pid_path:
+                    raise OSError("cannot publish pid")
+                return original_replace(source, destination)
+
+            with (
+                patch("cozempic.guard._guard_tmp_root", return_value=root),
+                patch("cozempic.guard._cleanup_legacy_pid"),
+                patch("cozempic.guard._is_guard_running_for_session", return_value=None),
+                patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+                patch("cozempic.guard._pid_is_alive", return_value=True),
+                patch("cozempic.guard.find_claude_pid", return_value=9999),
+                patch("cozempic.guard.subprocess.Popen", return_value=DummyProc()) as popen,
+            ):
+                pid_path = guard._pid_file_for_session(session_id)
+                with patch("cozempic.guard.os.replace", side_effect=fail_pid_replace):
+                    first = guard.start_guard_daemon(cwd=tmpdir, session_id=session_id)
+                    second = guard.start_guard_daemon(cwd=tmpdir, session_id=session_id)
+
+        self.assertEqual(first["orphaned_pid"], 4242)
+        self.assertFalse(second["started"])
+        self.assertTrue(second["already_running"])
+        self.assertEqual(second["pid"], 4242)
+        popen.assert_called_once()
+
 
 class TestGuardDaemonPidHandoff(unittest.TestCase):
     def test_start_guard_daemon_passes_explicit_claude_pid_to_child(self):

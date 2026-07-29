@@ -3192,6 +3192,7 @@ def read_armed(session_id: str | None, session_path: Path | None = None) -> dict
             if key in armed and (
                 isinstance(armed[key], bool)
                 or not isinstance(armed[key], (int, float))
+                or not math.isfinite(armed[key])
             ):
                 armed.pop(key)
         if "warned" in armed and not isinstance(armed["warned"], bool):
@@ -3575,6 +3576,29 @@ def start_guard_daemon(
         log_file = _guard_tmp_root() / f"cozempic_guard_{pid_key}.log"
         pid_path = _guard_tmp_root() / f"cozempic_guard_{pid_key}.pid"
 
+    # A failed PID handoff can leave a detached child alive without a pidfile.
+    # Preserve that child as an in-flight daemon until it exits rather than
+    # letting a later hook invocation start a duplicate.
+    orphan_prefix = f"{pid_path.with_suffix('').name}.orphan."
+    try:
+        for orphan_marker in pid_path.parent.glob(f"{orphan_prefix}*"):
+            try:
+                orphan_pid = int(orphan_marker.name[len(orphan_prefix):])
+            except ValueError:
+                orphan_marker.unlink(missing_ok=True)
+                continue
+            if _pid_is_alive(orphan_pid) and _is_cozempic_guard_process(orphan_pid):
+                return {
+                    "started": False,
+                    "pid": orphan_pid,
+                    "pid_file": str(pid_path),
+                    "log_file": None,
+                    "already_running": True,
+                }
+            orphan_marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     if claude_pid is None:
         claude_pid = find_claude_pid()
 
@@ -3815,6 +3839,19 @@ def start_guard_daemon(
                     try:
                         record_orphan(orphaned_guard_pid)
                     except OSError:
+                        pass
+                    try:
+                        from .spawn_lock import INIT_SPAWN_DAEMON
+                        from datetime import datetime as _dt
+
+                        atomic_write_text(
+                            pid_path,
+                            f"{orphaned_guard_pid}\n"
+                            f"{_dt.now().isoformat(timespec='seconds')}\n"
+                            f"{INIT_SPAWN_DAEMON}\n",
+                        )
+                        claim.handed_off = True
+                    except Exception:
                         pass
                     print(
                         f"  Cozempic: guard PID {orphaned_guard_pid} may still be running; "
@@ -4203,6 +4240,16 @@ def reload_self_daemon(
     if not old_pid:
         return {"reloaded": False, "reason": "no daemon running for session"}
 
+    def refuse_replacement(reason: str) -> dict:
+        return {
+            "reloaded": False,
+            "old_pid": old_pid,
+            "new_pid": None,
+            "log_file": None,
+            "orphaned_pid": None,
+            "reason": reason,
+        }
+
     # Verify the PID is actually our daemon — defend against PID reuse.
     if not _is_cozempic_guard_process(old_pid):
         # Stale pid file pointing at a recycled (non-cozempic) PID. Clear it
@@ -4214,10 +4261,14 @@ def reload_self_daemon(
     else:
         try:
             os.kill(old_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             if _pid_file_points_to(session_id, old_pid):
                 _pid_file_for_session(session_id).unlink(missing_ok=True)
             old_pid = None
+        except PermissionError:
+            return refuse_replacement(
+                "existing daemon cannot be signaled; refusing to start a second daemon"
+            )
 
         if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
             # Didn't exit on SIGTERM — escalate, but only if we still see our
@@ -4226,10 +4277,18 @@ def reload_self_daemon(
             if _is_cozempic_guard_process(old_pid):
                 try:
                     os.kill(old_pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                except ProcessLookupError:
+                    old_pid = None
+                except PermissionError:
+                    return refuse_replacement(
+                        "existing daemon cannot be killed; refusing to start a second daemon"
+                    )
+            if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
+                return refuse_replacement(
+                    "existing daemon did not exit after SIGKILL; refusing to start a second daemon"
+                )
             # CAS unlink — don't wipe a fresh pid file from a concurrent spawn
-            if _pid_file_points_to(session_id, old_pid):
+            if old_pid is not None and _pid_file_points_to(session_id, old_pid):
                 _pid_file_for_session(session_id).unlink(missing_ok=True)
         elif old_pid is not None:
             # Clean exit. CAS unlink — if a concurrent SessionStart hook
@@ -4278,8 +4337,10 @@ def reload_self_daemon(
                         os.kill(stale_pid, 0)
                     # Still alive — leave the pid file alone and let
                     # start_guard_daemon below return already_running.
-                except (ProcessLookupError, PermissionError):
+                except ProcessLookupError:
                     pid_path.unlink(missing_ok=True)
+                except PermissionError:
+                    pass
         except (ValueError, OSError):
             pid_path.unlink(missing_ok=True)
         result = start_guard_daemon(**daemon_args)

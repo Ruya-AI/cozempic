@@ -196,18 +196,19 @@ class TestR1_DaemonProcessRace(unittest.TestCase):
             )
             for i in range(2)
         ]
-        for p in procs:
-            p.start()
-
-        # Collect both results
         results = []
-        for _ in range(2):
-            try:
-                results.append(result_queue.get(timeout=10.0))
-            except Exception as e:
-                results.append({"error": f"queue.get failed: {e!r}"})
+        try:
+            for p in procs:
+                p.start()
 
-        lingering = _reap_processes(procs)
+            # Collect both results
+            for _ in range(2):
+                try:
+                    results.append(result_queue.get(timeout=10.0))
+                except Exception as e:
+                    results.append({"error": f"queue.get failed: {e!r}"})
+        finally:
+            lingering = _reap_processes(procs)
         if lingering:
             results.append({"error": f"workers survived cleanup: {lingering}"})
 
