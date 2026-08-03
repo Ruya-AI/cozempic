@@ -157,7 +157,7 @@ class TestWriteDashboard(unittest.TestCase):
 class TestCliDashboardCommand(unittest.TestCase):
     def test_command_writes_file_no_open(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 with patch("webbrowser.open") as wb:
                     cli.cmd_dashboard(argparse.Namespace(no_open=True))
                     wb.assert_not_called()  # --no-open suppresses browser
@@ -167,7 +167,7 @@ class TestCliDashboardCommand(unittest.TestCase):
 
     def test_default_opens_browser(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 with patch("webbrowser.open", return_value=True) as wb:
                     cli.cmd_dashboard(argparse.Namespace(no_open=False))
                     wb.assert_called_once()
@@ -177,7 +177,7 @@ class TestCliDashboardCommand(unittest.TestCase):
         import io
 
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 with patch("webbrowser.open"):
                     buf = io.StringIO()
                     with contextlib.redirect_stdout(buf):

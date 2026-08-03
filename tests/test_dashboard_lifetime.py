@@ -171,7 +171,7 @@ class TestCliLifetimeLine(unittest.TestCase):
         import io
 
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 _ledger_file(home, {"tokens_saved": 456170685, "prune_count": 3309,
                                     "since": "2026-04-09"})
                 with patch("webbrowser.open"):
@@ -187,7 +187,7 @@ class TestCliLifetimeLine(unittest.TestCase):
         import io
 
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 _ledger_file(home, {"tokens_saved": 456170685, "prune_count": 3309})
                 with patch("webbrowser.open"):
                     buf = io.StringIO()

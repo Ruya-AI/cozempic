@@ -1174,7 +1174,7 @@ class TestMemdirHonorsConfigDir(unittest.TestCase):
         fake_home = self.tmpdir / "fake_home"
         (fake_home / ".claude" / "projects" / self.project_slug / "memory").mkdir(
             parents=True, exist_ok=True)
-        env = {"HOME": str(fake_home)}
+        env = {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}
         # Explicitly clear CLAUDE_CONFIG_DIR if it's set in the outer env
         with patch.dict("os.environ", env, clear=False):
             # Remove CLAUDE_CONFIG_DIR if present in parent env
@@ -1240,7 +1240,7 @@ class TestMemdirHonorsConfigDir(unittest.TestCase):
         ))
         with patch.dict("os.environ", {
             "CLAUDE_CONFIG_DIR": str(self.config_dir),
-            "HOME": str(fake_home),
+            "HOME": str(fake_home), "USERPROFILE": str(fake_home),
         }):
             sync_to_memdir(store, cwd=self.slug_cwd)
             leaked = shadow_memdir / "cozempic_digest.md"
