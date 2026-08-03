@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from types import SimpleNamespace
+
+import pytest
 
 from pathlib import Path
 from unittest.mock import patch
@@ -158,6 +161,11 @@ class TestLoadMessagesLimits:
         assert messages[1][1]["content"] == "second"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX ps ancestry walk — Windows uses a Toolhelp32 snapshot "
+           "(see tests/test_windows_lifecycle.py::TestWalkUpToClaude)",
+)
 class TestFindClaudePid:
     def test_finds_claude_process_in_ancestor_chain(self):
         with (

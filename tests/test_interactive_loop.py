@@ -73,6 +73,11 @@ def _run_guard(token_estimate: int, env: dict, context_window: int = 200_000):
         p("cozempic.guard.find_claude_pid", return_value=4242)
         p("cozempic.guard._record_claude_identity", return_value=None)
         p("cozempic.guard.os.kill", return_value=None)
+        # Windows watchdog probes liveness via guard._pid_is_alive (native
+        # OpenProcess — os.kill(pid, 0) is CTRL_C_EVENT delivery there, not a
+        # probe), so the fake claude_pid=4242 must read alive through that
+        # seam too. Inert on POSIX, where the loop keeps the raw os.kill probe.
+        p("cozempic.guard._pid_is_alive", return_value=True)
         p("cozempic.guard._pid_identity_match", return_value=True)
         p("cozempic.guard._is_claude_process", return_value=True)
         p("cozempic.guard.checkpoint_team", return_value=TeamState())

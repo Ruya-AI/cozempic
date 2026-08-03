@@ -42,6 +42,12 @@ def _pid_is_alive_windows(pid: int) -> bool:
     STILL_ACTIVE = 259
     ERROR_ACCESS_DENIED = 5
 
+    if pid > 0xFFFFFFFF:
+        # Windows PIDs are DWORDs. A larger value (malformed --claude-pid,
+        # garbled pidfile) cannot name a process — and would raise
+        # ctypes.ArgumentError out of OpenProcess instead of reading as dead.
+        return False
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -79,6 +85,9 @@ def _windows_process_cmdline(pid: int) -> str | None:
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     ProcessCommandLineInformation = 60
+
+    if pid <= 0 or pid > 0xFFFFFFFF:
+        return None  # not a valid Windows PID (DWORD range)
 
     class UNICODE_STRING(ctypes.Structure):
         _fields_ = [

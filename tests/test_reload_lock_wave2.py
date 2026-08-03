@@ -479,6 +479,7 @@ class TestReloadLockProcessAlive(unittest.TestCase):
     returns False, allowing _acquire to unlink a live holder's lock.
     """
 
+    @unittest.skipIf(os.name == "nt", "POSIX os.kill seam — Windows uses the native OpenProcess probe (see tests/test_windows_lifecycle.py)")
     def test_permissionerror_treats_as_alive(self):
         """PermissionError on kill(pid,0) must return True (cross-user = alive)."""
         from cozempic.reload_lock import _is_process_alive
