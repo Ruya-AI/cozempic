@@ -13,13 +13,122 @@ _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
 
 # ── Process-liveness probe ──────────────────────────────────────────────────
 
+def _pid_is_alive_windows(pid: int) -> bool:
+    """Windows liveness probe via ``OpenProcess`` + ``GetExitCodeProcess``.
+
+    ``os.kill(pid, 0)`` is NOT a liveness probe on Windows: signal 0 is
+    ``CTRL_C_EVENT``, which CPython forwards to ``GenerateConsoleCtrlEvent``
+    — a console-group broadcast whose success depends on the caller's and
+    target's console topology, not on whether the PID exists. Observed on
+    Windows 11 (the duplicate-daemon bug this fixes): a LIVE detached
+    pythonw guard daemon probed from a SessionStart hook subprocess raises
+    OSError [WinError 87] and reads as dead, so ``DaemonSpawnClaim``
+    classified the live peer's pidfile as stale, unlinked it, and spawned
+    a second daemon for the same session.
+
+    ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` answers existence
+    directly: a handle means the PID slot is valid; ERROR_INVALID_PARAMETER
+    means no such process. ERROR_ACCESS_DENIED means the process exists but
+    is protected (elevated/another user) — alive, mirroring the POSIX
+    EPERM→alive convention below. ``GetExitCodeProcess`` filters the
+    already-exited-but-handle-still-open case (returns the exit code, not
+    STILL_ACTIVE). Known Win32 caveat: a process that genuinely exited
+    with code 259 (STILL_ACTIVE) reads as alive — vanishingly rare and
+    fail-open, the safe direction for every caller.
+    """
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    ERROR_ACCESS_DENIED = 5
+
+    if pid > 0xFFFFFFFF:
+        # Windows PIDs are DWORDs. A larger value (malformed --claude-pid,
+        # garbled pidfile) cannot name a process — and would raise
+        # ctypes.ArgumentError out of OpenProcess instead of reading as dead.
+        return False
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_INVALID_PARAMETER (87): no such PID. ERROR_ACCESS_DENIED (5):
+        # exists but protected — alive. Anything else: fail-closed (dead) —
+        # a probe that can't even open a query-limited handle to a same-user
+        # cozempic daemon is answering "no such process" in practice.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        exit_code = ctypes.c_ulong(0)
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return exit_code.value == STILL_ACTIVE
+        return True  # handle opened but query failed — fail-open (alive)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_process_cmdline(pid: int) -> str | None:
+    """Read a process's command line on Windows via NtQueryInformationProcess.
+
+    The POSIX identity checks (``_is_cozempic_guard_process``,
+    ``_is_claude_process``) inspect argv via ``ps -o args=``, which does not
+    exist on Windows — so every identity gate failed closed there and
+    freshness-based pidfile cleanup treated live daemons as strangers.
+    ``ProcessCommandLineInformation`` (info class 60, Windows 8.1+) returns
+    the target's command line through a query-limited handle — no subprocess,
+    no console window, no elevated rights for same-user processes.
+
+    Returns None when the process is gone, protected, or the query is
+    unsupported — callers must treat None as "could not verify" (fail
+    closed), mirroring the ps-error path on POSIX.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ProcessCommandLineInformation = 60
+
+    if pid <= 0 or pid > 0xFFFFFFFF:
+        return None  # not a valid Windows PID (DWORD range)
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", ctypes.c_ushort),
+            ("MaximumLength", ctypes.c_ushort),
+            ("Buffer", ctypes.c_wchar_p),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.ULONG(0)
+        ntdll.NtQueryInformationProcess(
+            handle, ProcessCommandLineInformation, None, 0, ctypes.byref(size),
+        )
+        if size.value == 0:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        status = ntdll.NtQueryInformationProcess(
+            handle, ProcessCommandLineInformation, buf, size.value, ctypes.byref(size),
+        )
+        if status != 0:
+            return None
+        us = ctypes.cast(buf, ctypes.POINTER(UNICODE_STRING)).contents
+        return us.Buffer
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_is_alive(pid: int) -> bool:
-    """Bare process-liveness probe via ``os.kill(pid, 0)``.
+    """Bare process-liveness probe: ``os.kill(pid, 0)`` on POSIX, native
+    ``OpenProcess`` on Windows (see ``_pid_is_alive_windows`` for why
+    ``os.kill(pid, 0)`` cannot be trusted there).
 
     Fail-safe direction: on a POSIX-unknown OSError, return True (assume alive)
     so we never skip a legitimate reload / never prematurely kill a live session.
-    Windows ``os.kill`` raises OSError [WinError 87] for non-existent PIDs —
-    return False there. On POSIX any unexpected OSError is rare; fail-open.
 
     This is the canonical implementation shared by guard.py, session.py, and
     watchdog.py (GC-3). The guard.py ``_pid_is_alive`` is an alias; session.py
@@ -37,6 +146,8 @@ def _pid_is_alive(pid: int) -> bool:
             return False
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _pid_is_alive_windows(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -47,9 +158,8 @@ def _pid_is_alive(pid: int) -> bool:
     except OverflowError:
         return False  # pid too large — malformed input
     except OSError:
-        # Windows raises OSError [WinError 87] for a non-existent PID.
-        # On POSIX an unexpected OSError here is rare — fail-open (assume alive).
-        return os.name != "nt"
+        # Unexpected OSError on POSIX is rare — fail-open (assume alive).
+        return True
 
 
 # ── Atomic write primitive ──────────────────────────────────────────────────

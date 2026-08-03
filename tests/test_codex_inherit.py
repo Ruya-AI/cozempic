@@ -115,7 +115,7 @@ class TestDashboardInheritance(unittest.TestCase):
 
     def test_agent_filter_isolates_codex(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 write_receipt(self._claude_receipt(session="claudesess"))
                 write_receipt(_codex_receipt(session="codexsess"))
                 # data-level isolation: both load, filter keeps only codex
@@ -138,7 +138,7 @@ class TestDashboardInheritance(unittest.TestCase):
         import io
 
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 write_receipt(_codex_receipt(session="cx"))
                 with patch("webbrowser.open"):
                     buf = io.StringIO()

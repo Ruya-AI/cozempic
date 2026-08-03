@@ -261,13 +261,12 @@ def _is_live_guard_pid(pid: int) -> bool:
     Delegates process-argv verification to the canonical helper in guard.py
     (`_is_cozempic_guard_process`) so PID-reuse defense stays in one place.
     """
-    import os as _os
+    from .guard import _is_cozempic_guard_process, _kill0_probe
 
     try:
-        _os.kill(pid, 0)
+        _kill0_probe(pid)
     except (ProcessLookupError, PermissionError, OSError):
         return False
-    from .guard import _is_cozempic_guard_process
     return _is_cozempic_guard_process(pid)
 
 
@@ -1143,8 +1142,8 @@ def check_cozempic_daemon_running() -> CheckResult:
     stranger process doesn't produce a false-positive "daemon running".
     """
     from pathlib import Path as _Path
-    import os as _os, glob as _glob
-    from .guard import _is_cozempic_guard_process
+    import glob as _glob
+    from .guard import _is_cozempic_guard_process, _kill0_probe
     from .spawn_lock import _parse_pidfile_pid
     pids_alive: list[int] = []
     for pidf in _glob.glob("/tmp/cozempic_guard_*.pid"):
@@ -1154,7 +1153,7 @@ def check_cozempic_daemon_running() -> CheckResult:
         if pid <= 0:
             continue
         try:
-            _os.kill(pid, 0)
+            _kill0_probe(pid)
         except OSError:
             continue
         # Verify this PID is actually our guard (not a PID-reused stranger)

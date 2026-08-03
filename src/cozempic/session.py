@@ -297,8 +297,108 @@ def project_slug_to_path(slug: str) -> str:
     return slug.replace("-", "/")
 
 
+def _windows_process_map() -> dict[int, tuple[int, str]]:
+    """Snapshot all live processes as ``{pid: (ppid, exe_name)}`` via
+    ``CreateToolhelp32Snapshot`` (ctypes).
+
+    Pure Win32 — no subprocess, so no console window can flash and no
+    dependency on ``ps`` (Git Bash's ``ps`` does not support ``-o``, which
+    is why the POSIX walk below always came up empty on Windows, leaving
+    every guard daemon without a Claude PID to watch — the daemon-leak bug).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x2
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),  # ULONG_PTR
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    pmap: dict[int, tuple[int, str]] = {}
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            pmap[int(entry.th32ProcessID)] = (
+                int(entry.th32ParentProcessID), entry.szExeFile,
+            )
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return pmap
+
+
+def _walk_up_to_claude(
+    pmap: dict[int, tuple[int, str]], start_pid: int, max_hops: int = 10,
+) -> int | None:
+    """Walk ``pmap`` ancestry from ``start_pid`` looking for a Claude process.
+
+    Mirrors the POSIX ``ps`` walk: check the current PID's executable name
+    for a claude/node marker, then hop to its parent, at most ``max_hops``
+    times. Pure function over the snapshot dict so it is unit-testable on
+    any platform. Stops on a missing entry (parent already exited — a
+    detached daemon's dead ancestry), a self-parented root, or a repeated
+    PID (Toolhelp parent IDs can be stale after PID recycling; a cycle
+    must not loop forever).
+    """
+    pid = start_pid
+    seen: set[int] = set()
+    for _ in range(max_hops):
+        entry = pmap.get(pid)
+        if entry is None or pid in seen:
+            return None
+        seen.add(pid)
+        ppid, exe = entry
+        name = exe.lower()
+        if "node" in name or "claude" in name:
+            return pid
+        if ppid <= 0 or ppid == pid:
+            return None
+        pid = ppid
+    return None
+
+
+def _find_claude_pid_windows() -> int | None:
+    """Windows ancestry walk via a Toolhelp32 snapshot.
+
+    Runs in whichever process calls it: from the SessionStart hook's CLI
+    (a live descendant of Claude Code) the walk succeeds and the resolved
+    PID is handed to the daemon via ``--claude-pid``; from the detached
+    daemon itself the ancestry is already dead and this correctly returns
+    None rather than guessing.
+    """
+    try:
+        pmap = _windows_process_map()
+    except OSError:
+        return None
+    return _walk_up_to_claude(pmap, os.getpid())
+
+
 def find_claude_pid() -> int | None:
     """Walk up the process tree to find the Claude Code node process."""
+    if os.name == "nt":
+        # ``ps -o ppid=,comm=`` is unsupported by Git Bash's ps and native
+        # ancestry is invisible to it anyway — the POSIX walk below always
+        # returned None on Windows, which disarmed the guard daemon's
+        # Claude-exit watchdog and leaked one immortal pythonw per session.
+        return _find_claude_pid_windows()
     try:
         pid = os.getpid()
         for _ in range(10):

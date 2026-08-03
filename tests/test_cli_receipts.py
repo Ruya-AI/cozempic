@@ -23,7 +23,7 @@ def _pr():
 class TestCliEmitsReceipt(unittest.TestCase):
     def test_committed_receipt_written_under_home(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 cli._emit_prune_receipt(
                     Path(home) / "sess-xyz.jsonl", _pr(),
@@ -43,7 +43,7 @@ class TestCliEmitsReceipt(unittest.TestCase):
 
     def test_deferred_path_emits_valid_receipt(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 cli._emit_prune_receipt(
                     Path(home) / "s.jsonl", _pr(), source="manual",
@@ -61,7 +61,7 @@ class TestCliEmitsReceipt(unittest.TestCase):
         # a malformed result must not propagate out of the cli helper, and must
         # not persist a garbage receipt
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 cli._emit_prune_receipt(None, object(), source="manual", outcome="committed")
                 rec_dir = Path(home) / ".cozempic" / "receipts"

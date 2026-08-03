@@ -232,9 +232,20 @@ def _is_process_alive(pid: int) -> bool:
     ``PermissionError`` if the process exists but we lack permission.
     Conservative interpretation: PermissionError → alive (not ours, but
     real), since a guard daemon under another user counts as in-flight.
+
+    On Windows ``os.kill(pid, 0)`` is not a liveness probe (signal 0 is
+    CTRL_C_EVENT — see ``helpers._pid_is_alive_windows``); it raised
+    OSError for LIVE detached pythonw daemons, so this function classified
+    live peers' pidfiles as stale and every SessionStart hook firing past
+    the fresh window spawned a duplicate daemon for the same session.
+    Delegate to the native OpenProcess probe there. Lazy import keeps this
+    module's import graph (stdlib-only, spawn hot path) unchanged on POSIX.
     """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        from .helpers import _pid_is_alive_windows
+        return _pid_is_alive_windows(pid)
     try:
         os.kill(pid, 0)
         return True

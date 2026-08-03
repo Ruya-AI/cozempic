@@ -79,6 +79,7 @@ class TestG1_CleanupLegacyPidRequiresArgvVerify(unittest.TestCase):
                 "Legacy cleanup sent SIGTERM to a non-guard PID — confused deputy bug",
             )
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_sigterms_legitimate_guard_pid(self):
         """Positive case: pidfile points at a real cozempic guard — SIGTERM is allowed."""
         from cozempic.guard import _cleanup_legacy_pid
@@ -228,6 +229,7 @@ class TestG3_IsGuardRunningForSessionVerifiesPidOwnership(unittest.TestCase):
             # (we don't assert on _is_cozempic_guard_process call count, just on
             # the returned contract — some implementations may short-circuit)
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_returns_pid_when_pid_is_cozempic_guard(self):
         """Positive case: PID is alive AND ps confirms it's a cozempic guard."""
         from cozempic.guard import _is_guard_running_for_session
@@ -853,6 +855,7 @@ class TestNF3_IsCozempicGuardProcessRejectsLooseSubstrings(unittest.TestCase):
             f"cozempic.cli + guard as discrete tokens.",
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_accepts_real_daemon_invocation(self):
         """Positive: canonical python -m cozempic.cli guard invocation."""
         from cozempic.guard import _is_cozempic_guard_process
@@ -1028,6 +1031,7 @@ class TestNF5_WindowsTaskkillReVerifies(unittest.TestCase):
             f"Discord, etc.).",
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_windows_taskkill_proceeds_when_identity_still_valid(self):
         """Positive: when _is_claude_process stays True, some taskkill MUST
         run — guards against a fix that over-protects and leaves Claude alive."""
@@ -1067,6 +1071,7 @@ class TestNF5_WindowsTaskkillReVerifies(unittest.TestCase):
 # would be rejected as "not cozempic" → SIGTERM blocked on legitimate daemons,
 # or _is_guard_running_for_session returns None → duplicate daemons spawn.
 # ---------------------------------------------------------------------------
+@unittest.skipIf(os.name == "nt", "POSIX ps parsing seam — Windows cmdline parsing covered in tests/test_windows_lifecycle.py")
 class TestR2REG2_VersionedPythonAccepted(unittest.TestCase):
     """Lock in the regex accept/reject contract for python-like binaries.
 
@@ -1210,6 +1215,7 @@ class TestRegexEdgeCases_IsCozempicGuardProcess(unittest.TestCase):
                 "Unicode fullwidth dot falsely accepted as a version separator",
             )
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_trailing_whitespace_stripped(self):
         """Trailing whitespace on argv line must not affect acceptance —
         `args.strip()` handles it; tokens[0] remains clean."""
@@ -1709,6 +1715,7 @@ class TestR3_4_PosixPlainTerminalSigtermHasInnerReverify(unittest.TestCase):
             f"tmux/screen/SIGKILL paths. Fix: mirror those guards.",
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX ps/os.kill seam — Windows uses native probes (see tests/test_windows_lifecycle.py)")
     def test_sigterm_fires_when_identity_remains_valid(self):
         """Positive: when identity stays True across the race window, SIGTERM
         MUST fire (guards against an over-protective fix that skips SIGTERM

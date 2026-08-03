@@ -49,7 +49,7 @@ class TestGuardReceipt(unittest.TestCase):
 
     def test_guard_prune_emits_committed_receipt(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 guard._emit_guard_receipt(**_args())
                 rec = _only_receipt(home)
@@ -62,7 +62,7 @@ class TestGuardReceipt(unittest.TestCase):
 
     def test_overflow_source_tagged(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 guard._emit_guard_receipt(**_args(trigger_source="overflow"))
                 self.assertEqual(_only_receipt(home)["trigger"]["source"], "overflow")
@@ -71,7 +71,7 @@ class TestGuardReceipt(unittest.TestCase):
         # a malformed pre_te must not propagate out of the guard hot path AND must
         # not persist a garbage receipt
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
                 os.environ.pop("COZEMPIC_NO_RECEIPTS", None)
                 guard._emit_guard_receipt(**_args(pre_te=None))  # must not raise
                 recdir = Path(home) / ".cozempic" / "receipts"
@@ -80,7 +80,7 @@ class TestGuardReceipt(unittest.TestCase):
 
     def test_optout_suppresses(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {"HOME": home, "COZEMPIC_NO_RECEIPTS": "1"}):
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home, "COZEMPIC_NO_RECEIPTS": "1"}):
                 guard._emit_guard_receipt(**_args())
                 self.assertFalse((Path(home) / ".cozempic" / "receipts").exists())
 
@@ -139,7 +139,7 @@ class TestGuardReceiptIntegration(unittest.TestCase):
         # patch can't redirect, so it must be patched to spare the real ledger.
         writer = result.get("_deferred_writer")
         if invoke_writer and writer is not None:
-            with patch.dict(os.environ, {"HOME": home}), \
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}), \
                     patch("cozempic.guard._PruneLock"), \
                     patch("cozempic.guard.save_messages", return_value=None), \
                     patch("cozempic.guard.cleanup_old_backups"), \

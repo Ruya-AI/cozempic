@@ -111,10 +111,16 @@ def _is_process_alive(pid: int) -> bool:
     ``PermissionError`` if the process exists but we lack permission.
     Conservative interpretation: PermissionError → alive (not ours, but
     real), since a reload lock held by another user's process must not be
-    stolen. Matches spawn_lock._is_process_alive semantics exactly.
+    stolen. Matches spawn_lock._is_process_alive semantics exactly —
+    including the Windows delegation to the native OpenProcess probe
+    (``os.kill(pid, 0)`` is CTRL_C_EVENT delivery there, not a probe; it
+    read live lock holders as dead, letting peers steal held locks).
     """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        from .helpers import _pid_is_alive_windows
+        return _pid_is_alive_windows(pid)
     try:
         os.kill(pid, 0)
         return True

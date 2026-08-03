@@ -28,7 +28,7 @@ class _Base(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="cz_uninstall_"))
         # redirect HOME and the module-level markers into the temp home
         self._patches = [
-            patch.dict(os.environ, {"HOME": str(self.home)}),
+            patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
             patch.object(cz_init, "_GLOBAL_INIT_MARKER", self.home / ".cozempic_global_initialized"),
             patch.object(cz_init, "_REMIND_COUNTER", self.home / ".cozempic_remind_counter"),
             patch("cozempic.session.get_claude_dir", return_value=self.home / ".claude"),
