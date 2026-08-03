@@ -104,6 +104,48 @@ def _read_hard_exit_threshold() -> int:
 
 HARD_LOOP_HARD_EXIT_THRESHOLD = _read_hard_exit_threshold()
 
+
+# ── Orphan backstop: exit when there is no Claude PID to watch ───────────────
+# The Claude-exit watchdog only works when the daemon knows Claude's PID. When
+# resolution fails (claude_pid is None — historically ALWAYS on Windows, where
+# the ps-based ancestry walk silently returned None), a guard on a normal-size
+# session has NO exit path at all and outlives Claude indefinitely. The
+# backstop: if claude_pid is None AND the transcript has not been written for
+# this many seconds, assume the session ended and exit cleanly. Set to 0 to
+# disable. Read EXACTLY ONCE at module import time (same convention as
+# COZEMPIC_GUARD_HARD_EXIT_K) — restart the daemon to apply a new value.
+#
+# Default 2 hours: long enough that a thinking/idle-but-attended session is
+# never abandoned prematurely (and with claude_pid resolvable the backstop is
+# dormant anyway), short enough that leaked daemons drain the same day instead
+# of accumulating across desktop restarts.
+_DEFAULT_ORPHAN_EXIT_SECONDS = 7200.0
+_ORPHAN_EXIT_MAX = 7 * 24 * 3600.0
+
+
+def _read_orphan_exit_seconds() -> float:
+    """Read COZEMPIC_GUARD_ORPHAN_EXIT_SECONDS. Clamps to [0, 7 days].
+
+    0 disables the backstop entirely (operator opt-out). Invalid values
+    (non-numeric, NaN, inf, negative, > 7 days) fall back to the default —
+    keeps the daemon working rather than failing at startup over a
+    misconfigured env var (sister precedent: _read_hard_exit_threshold,
+    spawn_lock._read_fresh_window_seconds).
+    """
+    raw = os.environ.get("COZEMPIC_GUARD_ORPHAN_EXIT_SECONDS")
+    if raw is None:
+        return _DEFAULT_ORPHAN_EXIT_SECONDS
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_ORPHAN_EXIT_SECONDS
+    if not math.isfinite(val) or val < 0 or val > _ORPHAN_EXIT_MAX:
+        return _DEFAULT_ORPHAN_EXIT_SECONDS
+    return val
+
+
+GUARD_ORPHAN_EXIT_SECONDS = _read_orphan_exit_seconds()
+
 # ── Watcher poll constants (GAP-B) ───────────────────────────────────────────
 # After osascript fires, the watcher polls for a new claude process for up to
 # RELOAD_WATCHER_POLL_TIMEOUT_SECONDS. 30s matches acquire_with_wait default.
@@ -1007,11 +1049,20 @@ def start_guard(
 
                 # Watchdog: detect Claude exit (workaround for Stop hook not firing)
                 if claude_pid and claude_alive:
-                    try:
-                        os.kill(claude_pid, 0)
-                    except (ProcessLookupError, PermissionError):
-                        claude_alive = False
+                    if os.name == "nt":
+                        # os.kill(pid, 0) is not a liveness probe on Windows
+                        # (signal 0 = CTRL_C_EVENT, a console-group broadcast
+                        # — see helpers._pid_is_alive_windows). Use the native
+                        # OpenProcess probe; the raw os.kill below stays the
+                        # POSIX path so its semantics are untouched.
+                        if not _pid_is_alive(claude_pid):
+                            claude_alive = False
                     else:
+                        try:
+                            os.kill(claude_pid, 0)
+                        except (ProcessLookupError, PermissionError):
+                            claude_alive = False
+                    if claude_alive:
                         # Liveness confirmed — also verify PID identity to guard against
                         # PID reuse (daemon started hours ago; original Claude exited and
                         # kernel recycled its PID to an unrelated process).
@@ -1033,6 +1084,34 @@ def start_guard(
                         _safe_unlink_session_pidfile(sess.get("session_id"))
                         checkpoint_team(session_path=session_path, quiet=False)
                         print(f"  Guard stopping (Claude exited).")
+                        break
+
+                # Orphan backstop: when the Claude PID could never be resolved
+                # (claude_pid is None — historically ALWAYS the case on
+                # Windows, where the ps-based walk silently failed), the
+                # watchdog above is disarmed and the daemon has NO exit path
+                # for a normal-size session: it outlives Claude Code, the
+                # desktop app, and the workday (observed: 10-30 immortal
+                # pythonw daemons accumulating across restarts). If nothing
+                # has written the transcript for GUARD_ORPHAN_EXIT_SECONDS,
+                # assume the session is over and exit cleanly. Dormant
+                # whenever claude_pid is known — the watchdog owns that case.
+                if claude_pid is None and GUARD_ORPHAN_EXIT_SECONDS > 0:
+                    try:
+                        _transcript_idle_s = time.time() - session_path.stat().st_mtime
+                    except OSError:
+                        _transcript_idle_s = 0.0
+                    if _transcript_idle_s > GUARD_ORPHAN_EXIT_SECONDS:
+                        print(
+                            f"  [{_now()}] No Claude PID to watch and the transcript "
+                            f"has been idle {int(_transcript_idle_s / 60)} min "
+                            f"(> {int(GUARD_ORPHAN_EXIT_SECONDS / 60)} min orphan "
+                            f"threshold, COZEMPIC_GUARD_ORPHAN_EXIT_SECONDS to tune). "
+                            f"Assuming the session ended. Final checkpoint..."
+                        )
+                        _safe_unlink_session_pidfile(sess.get("session_id"))
+                        checkpoint_team(session_path=session_path, quiet=False)
+                        print(f"  Guard stopping (orphaned — no watchable Claude PID).")
                         break
 
                 current_size = session_path.stat().st_size
@@ -2186,11 +2265,17 @@ def _detect_terminal_env() -> str:
 
 
 def _wait_for_exit(pid: int, timeout: float = 5.0) -> bool:
-    """Wait for a process to exit. Returns True if exited, False if still alive."""
+    """Wait for a process to exit. Returns True if exited, False if still alive.
+
+    Uses ``_kill0_probe`` (not raw ``os.kill(pid, 0)``): on Windows the raw
+    probe raises OSError for LIVE processes, which made this function report
+    a still-running Claude as exited and let the terminate-and-resume path
+    proceed against a live client.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            os.kill(pid, 0)
+            _kill0_probe(pid)
             time.sleep(0.2)
         except (ProcessLookupError, PermissionError, OSError):
             return True
@@ -3316,7 +3401,7 @@ def _cleanup_legacy_pid(cwd: str) -> None:
     if legacy.exists():
         try:
             pid = int(legacy.read_text().strip())
-            os.kill(pid, 0)
+            _kill0_probe(pid)
             # Only SIGTERM if we can confirm this is actually our daemon.
             if _is_cozempic_guard_process(pid):
                 os.kill(pid, signal.SIGTERM)
@@ -3401,7 +3486,7 @@ def _is_guard_running_for_session(session_id: str) -> int | None:
             # _FRESH_PIDFILE_SECONDS gate, not by an in-process dict.
             pid_path.unlink(missing_ok=True)
             return None
-        os.kill(pid, 0)
+        _kill0_probe(pid)
         # Verify the PID is actually our guard — defend against PID reuse.
         if not _is_cozempic_guard_process(pid):
             # Don't eagerly unlink a fresh-looking pidfile here. A peer
@@ -3840,7 +3925,15 @@ def _is_cozempic_guard_process(pid: int) -> bool:
     our spawn pattern in start_guard_daemon) OR the explicit entry-point
     "cozempic guard" — not just substring "cozempic" + "guard" which could
     match unrelated things like `vim /tmp/cozempic_guard_notes.md`.
+
+    On Windows, ``ps`` is unavailable (the run below always errored, so
+    every live guard read as "not a guard" and the freshness-gated pidfile
+    cleanup in ``_is_guard_running_for_session`` destroyed live claims —
+    one source of the duplicate-daemon leak). Read the command line natively
+    via NtQueryInformationProcess instead and apply the same token rules.
     """
+    if os.name == "nt":
+        return _is_cozempic_guard_process_windows(pid)
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
@@ -3876,6 +3969,55 @@ def _is_cozempic_guard_process(pid: int) -> bool:
         # but any unhandled exception here would propagate to the
         # non-interactive SessionStart hook surface — fail closed.
         return False
+
+
+def _split_windows_cmdline(cmdline: str) -> tuple[str, list[str]]:
+    """Split a raw Windows command line into (argv0, remaining tokens).
+
+    Windows stores the command line as one string, with argv[0] quoted when
+    the interpreter path contains spaces (e.g. ``"C:\\Program Files\\..."``).
+    A naive ``.split()`` would truncate such an argv[0] at the first space
+    and fail the interpreter-name gate for legitimate guards. Only argv[0]
+    needs quote-aware handling — the token checks below look for exact
+    argument words (``cozempic.cli``, ``guard``), which whitespace split
+    preserves.
+    """
+    cmdline = cmdline.strip()
+    if cmdline.startswith('"'):
+        end = cmdline.find('"', 1)
+        if end > 0:
+            return cmdline[1:end], cmdline[end + 1:].split()
+        return cmdline.strip('"'), []
+    argv0, _, rest = cmdline.partition(" ")
+    return argv0, rest.split()
+
+
+def _is_cozempic_guard_process_windows(pid: int) -> bool:
+    """Windows twin of the ps-based argv check: same token rules, applied to
+    the command line read natively via NtQueryInformationProcess (no
+    subprocess, no console window). Fail-closed on any read failure, exactly
+    like the ps-error path — never signal a process we could not verify.
+    """
+    from .helpers import _windows_process_cmdline
+    if not _pid_is_alive(pid):
+        return False
+    cmdline = _windows_process_cmdline(pid)
+    if not cmdline:
+        return False
+    argv0, tokens = _split_windows_cmdline(cmdline)
+    binary = Path(argv0).name.lower()
+    # python/pythonw with optional version and .exe (pythonw is how the
+    # Windows daemon avoids a console); or the cozempic entry-point exe.
+    if not (
+        re.fullmatch(r"pythonw?(\d+(\.\d+)*)?(\.exe)?", binary)
+        or binary in ("cozempic", "cozempic.exe")
+    ):
+        return False
+    if "cozempic.cli" in tokens and "guard" in tokens:
+        return True
+    if tokens and binary.startswith("cozempic") and tokens[0] == "guard":
+        return True
+    return False
 
 
 _MTIME_LIVENESS_WINDOW_SEC = 60
@@ -4016,6 +4158,27 @@ def _pid_identity_match(pid: int, session_id: str | None) -> bool:
 # module-level alias so callers in this module and tests that patch
 # ``guard._pid_is_alive`` continue to work without a wrapper call.
 _pid_is_alive = _pid_is_alive_canonical
+
+
+def _kill0_probe(pid: int) -> None:
+    """Sig-0-style probe: return None if ``pid`` is alive, raise
+    ``ProcessLookupError`` if it is not.
+
+    Drop-in replacement for the raw ``os.kill(pid, 0)`` probes scattered
+    through the daemon-lifecycle paths, so their existing except-clauses
+    keep working unchanged. On POSIX it IS ``os.kill(pid, 0)``. On Windows
+    ``os.kill(pid, 0)`` is CTRL_C_EVENT delivery, not a probe — it raised
+    OSError for LIVE detached daemons, which made ``_is_guard_running_for_
+    session`` / ``_cleanup_legacy_pid`` / ``reload_self_daemon`` classify
+    live pidfiles as stale, unlink them, and spawn duplicate daemons (and
+    made ``_wait_for_exit`` report a live Claude as already exited). Use
+    the native OpenProcess probe there instead.
+    """
+    if os.name == "nt":
+        if not _pid_is_alive(pid):
+            raise ProcessLookupError(f"no such process: {pid}")
+        return
+    os.kill(pid, 0)
 
 
 def _is_claude_process(pid: int, session_path: Path | None = None) -> bool:
@@ -4236,7 +4399,7 @@ def reload_self_daemon(
                     stale_pid = 0
                 try:
                     if stale_pid > 0:
-                        os.kill(stale_pid, 0)
+                        _kill0_probe(stale_pid)
                     # Still alive — leave the pid file alone and let
                     # start_guard_daemon below return already_running.
                 except (ProcessLookupError, PermissionError):
