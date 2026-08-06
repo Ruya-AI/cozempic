@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,6 +13,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from . import __version__
+from . import _subprocess as _sp
 
 _PYPI_URL = "https://pypi.org/pypi/cozempic/json"
 _COUNTER_URL = "https://cozempic-counters.counterapi-ruya.workers.dev/counter/auto_updates/up"
@@ -106,7 +106,7 @@ def _do_upgrade(latest: str) -> bool:
     if method == "uv-tool":
         if shutil.which("uv"):
             try:
-                r = subprocess.run(["uv", "tool", "upgrade", "cozempic"],
+                r = _sp.run(["uv", "tool", "upgrade", "cozempic"],
                                    capture_output=True, timeout=120)
                 if r.returncode == 0:
                     return True
@@ -116,7 +116,7 @@ def _do_upgrade(latest: str) -> bool:
     if method == "pipx":
         if shutil.which("pipx"):
             try:
-                r = subprocess.run(["pipx", "upgrade", "cozempic"],
+                r = _sp.run(["pipx", "upgrade", "cozempic"],
                                    capture_output=True, timeout=120)
                 if r.returncode == 0:
                     return True
@@ -127,7 +127,7 @@ def _do_upgrade(latest: str) -> bool:
     # Try uv pip install first (works in uv-managed environments)
     if shutil.which("uv"):
         try:
-            result = subprocess.run(
+            result = _sp.run(
                 ["uv", "pip", "install", f"cozempic=={latest}", "--quiet"],
                 capture_output=True,
                 timeout=60,
@@ -139,7 +139,7 @@ def _do_upgrade(latest: str) -> bool:
 
     # Try pip via sys.executable (works in pip-managed venvs)
     try:
-        result = subprocess.run(
+        result = _sp.run(
             [sys.executable, "-m", "pip", "install", f"cozempic=={latest}",
              "--quiet", "--disable-pip-version-check"],
             capture_output=True,
@@ -153,7 +153,7 @@ def _do_upgrade(latest: str) -> bool:
     # Try bare pip (works when pip is on PATH but not in current venv)
     if shutil.which("pip"):
         try:
-            result = subprocess.run(
+            result = _sp.run(
                 ["pip", "install", f"cozempic=={latest}",
                  "--quiet", "--disable-pip-version-check"],
                 capture_output=True,

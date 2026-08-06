@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import _subprocess as _sp
 from .config import load_config
 from .diagnosis import diagnose_session
 from .doctor import run_doctor
@@ -904,14 +905,12 @@ def cmd_reload(args):
 
         if term_env == "tmux":
             pane = os.environ.get("TMUX_PANE", "")
-            import subprocess as sp
-            sp.run(["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
+            _sp.run(["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
                    capture_output=True, timeout=5)
             print(f"  Resuming with optimized context...")
         elif term_env == "screen":
             screen_session = os.environ.get("STY", "")
-            import subprocess as sp
-            sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
+            _sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
                    capture_output=True, timeout=5)
             print(f"  Resuming with optimized context...")
         else:
@@ -973,7 +972,7 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
         f"echo \"$(date): Cozempic resumed Claude in {project_dir}\" >> /tmp/cozempic_reload.log"
     )
 
-    subprocess.Popen(
+    _sp.popen(
         ["bash", "-c", watcher_script],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
