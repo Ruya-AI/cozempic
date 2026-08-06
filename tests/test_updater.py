@@ -180,7 +180,7 @@ class TestDoUpgradeDispatch(unittest.TestCase):
     def test_brew_never_autoruns(self):
         from cozempic import updater
         with patch.object(updater, "_install_method", return_value="brew"), \
-             patch("cozempic.updater.subprocess.run") as run:
+             patch("cozempic.updater._sp.run") as run:
             self.assertFalse(updater._do_upgrade("9.9.9"))
             run.assert_not_called()
 
@@ -188,7 +188,7 @@ class TestDoUpgradeDispatch(unittest.TestCase):
         from cozempic import updater
         with patch.object(updater, "_install_method", return_value="uv-tool"), \
              patch("cozempic.updater.shutil.which", return_value="/usr/bin/uv"), \
-             patch("cozempic.updater.subprocess.run",
+             patch("cozempic.updater._sp.run",
                    return_value=MagicMock(returncode=0)) as run:
             self.assertTrue(updater._do_upgrade("9.9.9"))
             self.assertEqual(run.call_args[0][0], ["uv", "tool", "upgrade", "cozempic"])
@@ -197,7 +197,7 @@ class TestDoUpgradeDispatch(unittest.TestCase):
         from cozempic import updater
         with patch.object(updater, "_install_method", return_value="pip"), \
              patch("cozempic.updater.shutil.which", return_value=None), \
-             patch("cozempic.updater.subprocess.run",
+             patch("cozempic.updater._sp.run",
                    return_value=MagicMock(returncode=0)) as run:
             self.assertTrue(updater._do_upgrade("9.9.9"))
             # first attempt is `pip install cozempic==…` via sys.executable
