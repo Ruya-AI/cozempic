@@ -16,7 +16,7 @@ from .doctor import run_doctor
 from .executor import execute_actions, run_prescription
 from .guard import checkpoint_team, start_guard, start_guard_daemon
 from .helpers import (
-    is_ssh_session, shell_quote,
+    is_ssh_session, shell_quote, find_linux_terminal_launch_command,
     compile_protect_patterns, tag_pattern_matches, strip_pattern_tags,
 )
 from .init import run_init
@@ -954,13 +954,19 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
         )
     elif system == "Linux":
         inner_cmd = f"cd {shell_quote(project_dir)} && {recap_cmd}claude {resume_flag}; exec bash"
-        resume_cmd = (
-            f"if command -v gnome-terminal >/dev/null 2>&1; then "
-            f"gnome-terminal -- bash -c '{inner_cmd}'; "
-            f"elif command -v xterm >/dev/null 2>&1; then "
-            f"xterm -e '{inner_cmd}' & "
-            f"else echo 'No terminal emulator found' >> /tmp/cozempic_reload.log; fi"
-        )
+        launch_cmd = find_linux_terminal_launch_command(inner_cmd)
+        if launch_cmd is None:
+            # No supported terminal emulator on PATH (Terminator/Konsole/etc.
+            # missing, or an IDE-embedded terminal with nothing launchable at
+            # all — #183). A background watcher can't retry or report back
+            # once Claude has exited, so tell the user now, while this
+            # process can still talk to them, instead of spawning a watcher
+            # that will fail silently later.
+            print(f"  No supported terminal emulator found for auto-resume.")
+            print(f"  After exiting, resume manually:")
+            print(f"    cd {project_dir} && claude {resume_flag}")
+            return
+        resume_cmd = launch_cmd
     else:
         print(f"  WARNING: Auto-resume not supported on {system}.")
         print(f"  Restart manually: cd {project_dir} && claude {resume_flag}")
