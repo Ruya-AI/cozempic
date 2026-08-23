@@ -66,7 +66,7 @@ class TestFindLinuxTerminalLaunchCommand(unittest.TestCase):
             cmd = find_linux_terminal_launch_command("echo 'it'\"'\"'s a test'")
         # Should produce one shell-quoted argument, not a syntax-breaking mix.
         self.assertIn("gnome-terminal -- bash -c ", cmd)
-        self.assertTrue(cmd.count("bash -c ") == 1)
+        self.assertEqual(cmd.count("bash -c "), 1)
 
 
 class TestSpawnWatcherLinuxTerminalFallback(unittest.TestCase):

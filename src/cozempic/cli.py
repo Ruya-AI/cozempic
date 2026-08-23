@@ -962,8 +962,8 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
             # once Claude has exited, so tell the user now, while this
             # process can still talk to them, instead of spawning a watcher
             # that will fail silently later.
-            print(f"  No supported terminal emulator found for auto-resume.")
-            print(f"  After exiting, resume manually:")
+            print("  No supported terminal emulator found for auto-resume.")
+            print("  After exiting, resume manually:")
             print(f"    cd {project_dir} && claude {resume_flag}")
             return
         resume_cmd = launch_cmd
