@@ -388,6 +388,43 @@ def is_ssh_session() -> bool:
     )
 
 
+# Linux terminal emulators to try, in priority order, each paired with the
+# argv form that runs a command and keeps the window open afterwards.
+# gnome-terminal/xterm were the only two previously checked (#183) — this
+# silently failed for anyone on Terminator, KDE, XFCE, or a tiling-WM-style
+# GPU terminal, since none of those install gnome-terminal or xterm by
+# default. An IDE-embedded terminal (e.g. IntelliJ's) isn't a launchable
+# binary at all, so it's out of scope here by construction — callers should
+# treat a ``None`` return the same way they already treat "no terminal found".
+_LINUX_TERMINAL_LAUNCHERS: tuple[tuple[str, str], ...] = (
+    ("gnome-terminal", "gnome-terminal -- bash -c {cmd}"),
+    ("konsole", "konsole -e bash -c {cmd}"),
+    ("xfce4-terminal", "xfce4-terminal -x bash -c {cmd}"),
+    ("terminator", "terminator -x bash -c {cmd}"),
+    ("tilix", "tilix -e bash -c {cmd}"),
+    ("alacritty", "alacritty -e bash -c {cmd}"),
+    ("kitty", "kitty bash -c {cmd}"),
+    ("xterm", "xterm -e {cmd}"),
+)
+
+
+def find_linux_terminal_launch_command(inner_cmd: str) -> str | None:
+    """Return a shell command that opens *some* installed terminal emulator
+    running ``inner_cmd``, or ``None`` if none of the known emulators are on
+    ``PATH``.
+
+    Checked in the priority order of ``_LINUX_TERMINAL_LAUNCHERS`` via
+    ``shutil.which`` — the first match wins. ``inner_cmd`` is shell-quoted
+    once here so every launcher template receives it pre-quoted.
+    """
+    import shutil
+    quoted = shell_quote(inner_cmd)
+    for binary, template in _LINUX_TERMINAL_LAUNCHERS:
+        if shutil.which(binary):
+            return template.format(cmd=quoted)
+    return None
+
+
 _PROTECTED_TYPES = frozenset({
     "content-replacement",
     "marble-origami-commit",

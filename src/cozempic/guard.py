@@ -197,6 +197,7 @@ from .helpers import (
     _pid_is_alive as _pid_is_alive_canonical,
     is_ssh_session,
     shell_quote,
+    find_linux_terminal_launch_command,
     tag_pattern_matches,
     strip_pattern_tags,
 )
@@ -2479,12 +2480,18 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
             f"\"cd {shell_quote(project_dir)} && claude {resume_flag}\"'"
         )
     elif system == "Linux":
+        # Only gnome-terminal/xterm were checked here (#183) — missed
+        # Terminator/Konsole/XFCE/etc. entirely, and the xterm fallback also
+        # dropped ``; exec bash`` that the gnome-terminal branch had, closing
+        # the window the instant claude exited instead of leaving a shell.
+        # find_linux_terminal_launch_command applies the same inner_cmd (with
+        # exec bash) to every launcher, fixing both at once.
+        _linux_inner_cmd = f"cd {shell_quote(project_dir)} && claude {resume_flag}; exec bash"
+        _linux_launch_cmd = find_linux_terminal_launch_command(_linux_inner_cmd)
         resume_cmd = (
-            f"if command -v gnome-terminal >/dev/null 2>&1; then "
-            f"gnome-terminal -- bash -c 'cd {shell_quote(project_dir)} && claude {resume_flag}; exec bash'; "
-            f"elif command -v xterm >/dev/null 2>&1; then "
-            f"xterm -e 'cd {shell_quote(project_dir)} && claude {resume_flag}' & "
-            f"else echo 'No terminal emulator found' >> /tmp/cozempic_guard.log; fi"
+            _linux_launch_cmd
+            if _linux_launch_cmd is not None
+            else "echo 'No terminal emulator found' >> /tmp/cozempic_guard.log"
         )
     elif system == "Windows":
         # Windows has no bash, and the POSIX watcher below uses kill -0 / pgrep /
