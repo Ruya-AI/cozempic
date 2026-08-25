@@ -4125,6 +4125,7 @@ def reload_self_daemon(
     threshold_tokens: int | None = None,
     soft_threshold_tokens: int | None = None,
     protect_patterns: list | None = None,
+    claude_pid: int | None = None,
 ) -> dict:
     """Gracefully restart the running guard daemon for this session.
 
@@ -4219,6 +4220,7 @@ def reload_self_daemon(
         soft_threshold_tokens=soft_threshold_tokens,
         session_id=session_id,
         protect_patterns=protect_patterns,
+        claude_pid=claude_pid,
     )
     result = start_guard_daemon(**daemon_args)
     if not result.get("started") and not result.get("already_running"):

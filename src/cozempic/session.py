@@ -911,15 +911,28 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
 MAX_CACHED_MESSAGES = 5000  # per-session cache cap; evicts oldest on overflow
 MAX_CACHE_SESSIONS = 8      # LRU cap on distinct session paths held at once
 
+# Per-call byte budget for the incremental read-only path. A large append or a
+# cache miss must never allocate the whole unread range (a 100-180 MiB
+# transcript previously ballooned to ~1 GiB RSS — see ISSUE-AGT-637). Instead we
+# read at most this many bytes per call, parse complete lines, defer the partial
+# tail, and resume from the byte offset on the next poll. Bounded and small; the
+# guard's 30s cadence converges a full cache-miss over a few calls.
+_MAX_INCREMENTAL_READ_BYTES = 8 * 1024 * 1024
+
 
 @dataclass
 class _CacheEntry:
     messages: list[Message] = field(default_factory=list)
-    offset: int = 0       # byte position after the last fully-parsed newline
+    offset: int = 0       # byte position of the next unread byte (consumed-through)
     mtime_ns: int = 0
     size: int = 0
     inode: int = 0
     next_line_index: int = 0  # running file-line counter for Message tuples
+                               # (relative to the tail scan's start after a
+                               # tail-anchored cache miss, NOT the true absolute
+                               # file-line number — see load_messages_incremental)
+    pending: bytes = b""  # bytes of an unterminated trailing line, deferred
+    skipping: bool = False  # inside a line that exceeded MAX_LINE_BYTES: swallow until \n
 
 
 # OrderedDict supports move_to_end / popitem(last=False) for LRU bookkeeping.
@@ -955,14 +968,33 @@ def load_messages_incremental(path: Path) -> list[Message]:
     """Return parsed JSONL messages using a byte-offset cache.
 
     Equivalent to load_messages() on the happy path: same tuple shape, same
-    ordering, same error handling. Diverges only for files larger than
+    ordering, same error handling. Diverges for files larger than
     MAX_CACHED_MESSAGES — the cache retains the newest N entries, so the
-    returned list is likewise truncated. Callers that need full historical
-    state (prune, save roundtrip) must use load_messages() instead.
+    returned list is likewise truncated — AND for files larger than one read
+    budget on a cache miss (see tail-anchoring below): line indices there are
+    relative to where the tail scan started, not load_messages()'s true
+    absolute file-line numbers. Callers that need full historical state or
+    exact line numbers (prune, save roundtrip) must use load_messages() instead.
 
     Invalidation: inode change (os.replace), size shrink (truncation), or
     mtime regression trigger a full re-read. Partial trailing lines (no
     terminating newline) are deferred until the write completes.
+
+    The read is STREAMING and byte-bounded: at most _MAX_INCREMENTAL_READ_BYTES
+    are consumed per call, so a cache miss or a large append on a 100 MiB+
+    transcript never allocates the whole unread range. Remaining complete lines
+    are picked up on subsequent calls; an oversized single line is skipped whole
+    (consuming its line index) rather than buffered unboundedly.
+
+    TAIL-ANCHORING (ISSUE-AGT-637 follow-up): a cache miss (first call, inode
+    replacement, truncation, or same-size in-place rewrite) does NOT resume a
+    forward-from-0 scan. [size - budget, size) always fits in one read, so the
+    cache is seeded from the CURRENT TAIL instead — the first result already
+    reflects the newest retained messages, rather than requiring several guard
+    polls (minutes, on a 100-180 MiB transcript) to forward-scan into range of
+    active-agent markers near EOF. Subsequent polls proceed incrementally from
+    EOF exactly as before. The tail window is realigned to the next real
+    newline so a parse never starts mid-line.
 
     Thread-safe via a module-global lock.
     """
@@ -990,26 +1022,100 @@ def load_messages_incremental(path: Path) -> list[Message]:
         if needs_full_read:
             entry = _CacheEntry(inode=st.st_ino)
             _INCR_CACHE[key] = entry
-            start_offset = 0
-        elif st.st_size == entry.size and st.st_mtime_ns == entry.mtime_ns:
+            # Cache miss / inode replacement / truncation / same-size rewrite:
+            # do NOT resume the old forward-from-0 scan. On a 100-180 MiB
+            # transcript that took several guard cycles (each capped at
+            # _MAX_INCREMENTAL_READ_BYTES) to reach the tail, so active-agent
+            # markers near EOF stayed invisible to checkpoint_team/agents_active
+            # for minutes (ISSUE-AGT-637 follow-up). Anchor the cache at the
+            # CURRENT TAIL instead: [start_offset, st.st_size) always fits in
+            # one read budget by construction, so the very first result already
+            # reflects the newest retained messages; later polls proceed
+            # incrementally from EOF exactly as before.
+            start_offset = max(0, st.st_size - _MAX_INCREMENTAL_READ_BYTES)
+            tail_anchor = start_offset > 0
+        elif entry.offset >= st.st_size:
+            # Everything up to the current file end is already accounted for
+            # (complete lines parsed, unterminated tail deferred in pending).
+            # Nothing new to read this poll.
             _INCR_CACHE.move_to_end(key)
             return list(entry.messages)
         else:
             start_offset = entry.offset
+            tail_anchor = False
 
-        with open(path, "rb") as f:
-            f.seek(start_offset)
-            raw_bytes = f.read(st.st_size - start_offset)
-
-        # Stop at the last complete line — a trailing partial line means the
-        # writer is mid-append. We'll pick up the remainder on the next call.
-        last_newline = raw_bytes.rfind(b"\n")
-        if last_newline == -1:
-            # No complete lines in the new region yet; leave cache untouched.
+        read_end = min(st.st_size, start_offset + _MAX_INCREMENTAL_READ_BYTES)
+        if read_end <= start_offset:
+            # Defensive: should be unreachable (offset >= size is handled above).
             _INCR_CACHE.move_to_end(key)
             return list(entry.messages)
 
-        complete = raw_bytes[: last_newline + 1]
+        with open(path, "rb") as f:
+            f.seek(start_offset)
+            new_bytes = f.read(read_end - start_offset)
+
+        if tail_anchor:
+            # start_offset landed at an arbitrary byte, not a line boundary —
+            # drop the (guaranteed-partial) leading fragment up to and including
+            # its terminating newline so parsing begins on a real line. No
+            # newline in the whole tail window means one line spans the entire
+            # budget (a pathological transcript); fall back to a full
+            # forward-from-0 read rather than parse a mid-line guess.
+            nl = new_bytes.find(b"\n")
+            if nl != -1:
+                new_bytes = new_bytes[nl + 1:]
+            else:
+                start_offset = 0
+                read_end = min(st.st_size, _MAX_INCREMENTAL_READ_BYTES)
+                with open(path, "rb") as f:
+                    new_bytes = f.read(read_end)
+
+        carry = entry.pending + new_bytes
+        entry.pending = b""
+
+        if entry.skipping:
+            # We're mid-way through a line that exceeded MAX_LINE_BYTES. Swallow
+            # bytes until its terminating newline; the giant line contributes no
+            # message but still consumes one line index (matches _parse_one_line's
+            # oversized-line skip in _parse_jsonl_chunk).
+            nl = carry.find(b"\n")
+            if nl == -1:
+                entry.offset = read_end
+                entry.size = st.st_size
+                entry.mtime_ns = st.st_mtime_ns
+                _INCR_CACHE.move_to_end(key)
+                return list(entry.messages)
+            entry.next_line_index += 1
+            entry.skipping = False
+            carry = carry[nl + 1:]
+
+        # Stop at the last complete line — a trailing partial line means the
+        # writer is mid-append (or we hit the per-call byte budget). The tail is
+        # deferred to pending and resumed from the byte offset on the next call.
+        last_newline = carry.rfind(b"\n")
+        if last_newline == -1:
+            # No complete line in the read region — the whole carry is an
+            # unterminated tail. Buffer it (bounded); an oversized partial tail
+            # enters skip mode so a single giant line never defeats the bound.
+            if len(carry) > MAX_LINE_BYTES:
+                entry.skipping = True
+                entry.pending = b""
+            else:
+                entry.pending = carry
+            entry.offset = read_end
+            entry.size = st.st_size
+            entry.mtime_ns = st.st_mtime_ns
+            _INCR_CACHE.move_to_end(key)
+            return list(entry.messages)
+
+        complete = carry[: last_newline + 1]
+        tail = carry[last_newline + 1:]
+        if len(tail) > MAX_LINE_BYTES:
+            entry.skipping = True
+            entry.pending = b""
+        else:
+            entry.pending = tail
+
         # surrogateescape (ynaamane review, LOW): mirror load_messages /
         # load_messages_and_snapshot rather than the lossy U+FFFD "replace". This is
         # the read-only incremental path so the only effect is correct byte_len
@@ -1021,7 +1127,7 @@ def load_messages_incremental(path: Path) -> list[Message]:
         )
         entry.messages.extend(new_messages)
         entry.next_line_index += lines_consumed
-        entry.offset = start_offset + (last_newline + 1)
+        entry.offset = read_end
         entry.size = st.st_size
         entry.mtime_ns = st.st_mtime_ns
 

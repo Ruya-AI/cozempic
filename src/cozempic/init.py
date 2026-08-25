@@ -43,7 +43,7 @@ def _c(args: str) -> str:
 # POSIX-safe `SLUG=$(printf '%.12s' "$SESSION_ID")` so the SessionStart hook no
 # longer aborts with "Bad substitution" under dash (/bin/sh on Debian/Ubuntu),
 # which silently killed the guard-daemon spawn on those systems (#168).
-HOOK_SCHEMA_VERSION = "v14"
+HOOK_SCHEMA_VERSION = "v15"
 HOOK_SCHEMA_MARKER = f"cozempic-hook-schema={HOOK_SCHEMA_VERSION}"
 
 
