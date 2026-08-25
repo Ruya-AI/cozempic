@@ -1040,6 +1040,7 @@ def cmd_guard(args):
             threshold_tokens=args.threshold_tokens,
             soft_threshold_tokens=args.soft_threshold_tokens,
             protect_patterns=protect_patterns,
+            claude_pid=claude_pid,
         )
         if result.get("reloaded"):
             print(f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})")
