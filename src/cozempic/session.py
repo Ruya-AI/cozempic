@@ -928,6 +928,9 @@ class _CacheEntry:
     size: int = 0
     inode: int = 0
     next_line_index: int = 0  # running file-line counter for Message tuples
+                               # (relative to the tail scan's start after a
+                               # tail-anchored cache miss, NOT the true absolute
+                               # file-line number — see load_messages_incremental)
     pending: bytes = b""  # bytes of an unterminated trailing line, deferred
     skipping: bool = False  # inside a line that exceeded MAX_LINE_BYTES: swallow until \n
 
@@ -965,10 +968,13 @@ def load_messages_incremental(path: Path) -> list[Message]:
     """Return parsed JSONL messages using a byte-offset cache.
 
     Equivalent to load_messages() on the happy path: same tuple shape, same
-    ordering, same error handling. Diverges only for files larger than
+    ordering, same error handling. Diverges for files larger than
     MAX_CACHED_MESSAGES — the cache retains the newest N entries, so the
-    returned list is likewise truncated. Callers that need full historical
-    state (prune, save roundtrip) must use load_messages() instead.
+    returned list is likewise truncated — AND for files larger than one read
+    budget on a cache miss (see tail-anchoring below): line indices there are
+    relative to where the tail scan started, not load_messages()'s true
+    absolute file-line numbers. Callers that need full historical state or
+    exact line numbers (prune, save roundtrip) must use load_messages() instead.
 
     Invalidation: inode change (os.replace), size shrink (truncation), or
     mtime regression trigger a full re-read. Partial trailing lines (no
@@ -979,6 +985,16 @@ def load_messages_incremental(path: Path) -> list[Message]:
     transcript never allocates the whole unread range. Remaining complete lines
     are picked up on subsequent calls; an oversized single line is skipped whole
     (consuming its line index) rather than buffered unboundedly.
+
+    TAIL-ANCHORING (ISSUE-AGT-637 follow-up): a cache miss (first call, inode
+    replacement, truncation, or same-size in-place rewrite) does NOT resume a
+    forward-from-0 scan. [size - budget, size) always fits in one read, so the
+    cache is seeded from the CURRENT TAIL instead — the first result already
+    reflects the newest retained messages, rather than requiring several guard
+    polls (minutes, on a 100-180 MiB transcript) to forward-scan into range of
+    active-agent markers near EOF. Subsequent polls proceed incrementally from
+    EOF exactly as before. The tail window is realigned to the next real
+    newline so a parse never starts mid-line.
 
     Thread-safe via a module-global lock.
     """
@@ -1006,14 +1022,28 @@ def load_messages_incremental(path: Path) -> list[Message]:
         if needs_full_read:
             entry = _CacheEntry(inode=st.st_ino)
             _INCR_CACHE[key] = entry
+            # Cache miss / inode replacement / truncation / same-size rewrite:
+            # do NOT resume the old forward-from-0 scan. On a 100-180 MiB
+            # transcript that took several guard cycles (each capped at
+            # _MAX_INCREMENTAL_READ_BYTES) to reach the tail, so active-agent
+            # markers near EOF stayed invisible to checkpoint_team/agents_active
+            # for minutes (ISSUE-AGT-637 follow-up). Anchor the cache at the
+            # CURRENT TAIL instead: [start_offset, st.st_size) always fits in
+            # one read budget by construction, so the very first result already
+            # reflects the newest retained messages; later polls proceed
+            # incrementally from EOF exactly as before.
+            start_offset = max(0, st.st_size - _MAX_INCREMENTAL_READ_BYTES)
+            tail_anchor = start_offset > 0
         elif entry.offset >= st.st_size:
             # Everything up to the current file end is already accounted for
             # (complete lines parsed, unterminated tail deferred in pending).
             # Nothing new to read this poll.
             _INCR_CACHE.move_to_end(key)
             return list(entry.messages)
+        else:
+            start_offset = entry.offset
+            tail_anchor = False
 
-        start_offset = entry.offset
         read_end = min(st.st_size, start_offset + _MAX_INCREMENTAL_READ_BYTES)
         if read_end <= start_offset:
             # Defensive: should be unreachable (offset >= size is handled above).
@@ -1023,6 +1053,22 @@ def load_messages_incremental(path: Path) -> list[Message]:
         with open(path, "rb") as f:
             f.seek(start_offset)
             new_bytes = f.read(read_end - start_offset)
+
+        if tail_anchor:
+            # start_offset landed at an arbitrary byte, not a line boundary —
+            # drop the (guaranteed-partial) leading fragment up to and including
+            # its terminating newline so parsing begins on a real line. No
+            # newline in the whole tail window means one line spans the entire
+            # budget (a pathological transcript); fall back to a full
+            # forward-from-0 read rather than parse a mid-line guess.
+            nl = new_bytes.find(b"\n")
+            if nl != -1:
+                new_bytes = new_bytes[nl + 1:]
+            else:
+                start_offset = 0
+                read_end = min(st.st_size, _MAX_INCREMENTAL_READ_BYTES)
+                with open(path, "rb") as f:
+                    new_bytes = f.read(read_end)
 
         carry = entry.pending + new_bytes
         entry.pending = b""
