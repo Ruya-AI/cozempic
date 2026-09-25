@@ -78,7 +78,8 @@ class TestReloadWritesInFlightSentinel(unittest.TestCase):
              patch("cozempic.guard._is_claude_process", return_value=True), \
              patch("cozempic.guard._wait_for_exit", return_value=True), \
              patch("cozempic.guard.os.kill"), \
-             patch("cozempic.guard.time.sleep"):
+             patch("cozempic.guard.time.sleep"), \
+             patch("cozempic.guard.subprocess.run"):
             from cozempic.guard import _terminate_and_resume
             _terminate_and_resume(
                 claude_pid=self.old_claude_pid,

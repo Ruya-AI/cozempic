@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -384,6 +386,19 @@ class TestStaleTmpArtifacts(unittest.TestCase):
             result = check_stale_tmp_artifacts()
         self.assertEqual(result.status, "ok")
 
+    def test_daemon_check_uses_runtime_tmpdir(self):
+        """The daemon status check must use the same platform temp root as guards."""
+        from cozempic.doctor import check_cozempic_daemon_running
+
+        self._make_pid_file("livesess-12", 42)
+        with (
+            patch("cozempic.doctor.os.kill"),
+            patch("cozempic.guard._is_cozempic_guard_process", return_value=True),
+        ):
+            result = check_cozempic_daemon_running()
+        self.assertEqual(result.status, "ok")
+        self.assertIn("PIDs: 42", result.message)
+
     def test_dead_pid_file_is_stale(self):
         """A .pid file whose PID is no longer a running cozempic guard is stale."""
         self._make_pid_file("deadsess-01", 999999)
@@ -399,13 +414,58 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         self.assertIn(result.status, ("warning", "issue"))
         self.assertIn("log", result.message.lower())
 
+    def test_stale_pid_tmp_is_reported_and_removed(self):
+        from cozempic.doctor import _DOCTOR_PID_TMP_STALE_SECONDS
+
+        temp_path = self.tmpdir / "cozempic_guard_staletmp-04.pid.tmp"
+        temp_path.write_text("reserved\n")
+        stale_at = time.time() - _DOCTOR_PID_TMP_STALE_SECONDS - 1
+        os.utime(temp_path, (stale_at, stale_at))
+        result = check_stale_tmp_artifacts()
+        self.assertIn("pid.tmp", result.message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(temp_path.exists())
+
+    def test_randomized_pid_tmp_is_reported_and_removed(self):
+        from cozempic.doctor import _DOCTOR_PID_TMP_STALE_SECONDS
+
+        fd, tmp_name = tempfile.mkstemp(
+            prefix="cozempic_guard_staletmp-04.pid.", suffix=".tmp", dir=self.tmpdir
+        )
+        os.close(fd)
+        temp_path = Path(tmp_name)
+        stale_at = time.time() - _DOCTOR_PID_TMP_STALE_SECONDS - 1
+        os.utime(temp_path, (stale_at, stale_at))
+        self.assertIn("pid.tmp", check_stale_tmp_artifacts().message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(temp_path.exists())
+
+    def test_recent_pid_tmp_is_not_reclaimed_during_doctor_fix(self):
+        temp_path = self.tmpdir / "cozempic_guard_slowspawn-04.pid.tmp"
+        temp_path.write_text("reserved\n")
+        stale_at = time.time() - 10
+        os.utime(temp_path, (stale_at, stale_at))
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        fix_stale_tmp_artifacts()
+        self.assertTrue(temp_path.exists())
+
+    def test_pid_tmp_symlink_is_reported_and_removed(self):
+        victim = self.tmpdir / "victim.txt"
+        victim.write_text("keep")
+        temp_path = self.tmpdir / "cozempic_guard_symlink-04.pid.tmp"
+        os.symlink(victim, temp_path)
+        self.assertIn("pid.tmp", check_stale_tmp_artifacts().message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(temp_path.exists())
+        self.assertEqual(victim.read_text(), "keep")
+
     def test_orphan_lock_is_stale_when_not_held(self):
-        """A .lock file that can be acquired with LOCK_EX|LOCK_NB is orphaned."""
-        self._make_lock_file("oldhook-05")
+        """An unheld hook lock is an orphan that doctor may clean."""
+        lock_path = self._make_lock_file("oldhook-05")
         with patch("cozempic.doctor._is_lock_held", return_value=False):
             result = check_stale_tmp_artifacts()
         self.assertIn(result.status, ("warning", "issue"))
-        self.assertIn("lock", result.message.lower())
+        self.assertTrue(lock_path.exists())
 
     def test_held_lock_is_not_stale(self):
         """A .lock file currently held by another process must be preserved."""
@@ -414,12 +474,71 @@ class TestStaleTmpArtifacts(unittest.TestCase):
             result = check_stale_tmp_artifacts()
         self.assertEqual(result.status, "ok")
 
+    def test_lock_probe_is_nonblocking(self):
+        from cozempic.doctor import _is_lock_held
+
+        lock_path = self._make_lock_file("nonblocking-06")
+        with patch("cozempic.doctor.os.open", wraps=os.open) as open_file:
+            _is_lock_held(lock_path)
+        self.assertTrue(open_file.call_args.args[1] & os.O_NONBLOCK)
+
+    def test_orphan_marker_is_reported_and_removed_when_guard_is_dead(self):
+        marker = self.tmpdir / "cozempic_guard_orphan-06.orphan"
+        marker.write_text("999999\n")
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=False):
+            self.assertIn("PIDs: 999999", check_stale_tmp_artifacts().message)
+            fix_stale_tmp_artifacts()
+        self.assertFalse(marker.exists())
+
+    def test_zero_pid_is_not_probed_as_a_process_group(self):
+        from cozempic.doctor import _is_live_guard_pid
+
+        with patch("cozempic.doctor.os.kill") as kill:
+            self.assertFalse(_is_live_guard_pid(0))
+        kill.assert_not_called()
+
+    def test_orphan_marker_is_preserved_while_guard_is_live(self):
+        marker = self.tmpdir / "cozempic_guard_orphan-07.orphan"
+        marker.write_text("42\n")
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=True):
+            fix_stale_tmp_artifacts()
+        self.assertTrue(marker.exists())
+
+    def test_orphan_marker_symlink_is_removed_without_touching_target(self):
+        victim = self.tmpdir / "victim.txt"
+        victim.write_text("keep")
+        marker = self.tmpdir / "cozempic_guard_orphan-08.orphan.42"
+        os.symlink(victim, marker)
+
+        self.assertIn("orphan guard marker", check_stale_tmp_artifacts().message)
+        fix_stale_tmp_artifacts()
+        self.assertFalse(marker.exists())
+        self.assertEqual(victim.read_text(), "keep")
+
+    def test_hook_lock_symlink_does_not_touch_its_target(self):
+        victim = self.tmpdir / "victim.txt"
+        lock_path = self.tmpdir / "cozempic_hook_symlink-06.lock"
+        os.symlink(victim, lock_path)
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        self.assertFalse(victim.exists())
+        fix_stale_tmp_artifacts()
+        self.assertTrue(lock_path.is_symlink())
+
     def test_garbage_pid_content_is_treated_as_stale(self):
         """Non-integer .pid file content must not crash — treat as stale."""
         pid_path = self.tmpdir / "cozempic_guard_badcontent-07.pid"
         pid_path.write_text("not-an-integer")
+        stale_at = time.time() - 61
+        os.utime(pid_path, (stale_at, stale_at))
         result = check_stale_tmp_artifacts()
         self.assertIn(result.status, ("warning", "issue"))
+
+    def test_fresh_empty_pidfile_is_not_reclaimed(self):
+        pid_path = self.tmpdir / "cozempic_guard_fresh-empty.pid"
+        pid_path.touch()
+        self.assertEqual(check_stale_tmp_artifacts().status, "ok")
+        fix_stale_tmp_artifacts()
+        self.assertTrue(pid_path.exists())
 
     def test_threshold_escalation_to_issue(self):
         """Many stale artifacts escalate status from warning to issue."""
@@ -461,6 +580,13 @@ class TestStaleTmpArtifacts(unittest.TestCase):
         with patch("cozempic.doctor._is_lock_held", return_value=True):
             fix_stale_tmp_artifacts()
         self.assertTrue(lock_path.exists())
+
+    def test_fix_preserves_reclaim_lock(self):
+        reclaim_lock = self.tmpdir / "cozempic_guard_persistent-22.pid.reclaim-lock"
+        reclaim_lock.write_text("")
+        with patch("cozempic.doctor._is_lock_held", return_value=False):
+            fix_stale_tmp_artifacts()
+        self.assertTrue(reclaim_lock.exists())
 
     def test_fix_preserves_global_files(self):
         guard_log = self.tmpdir / "cozempic_guard.log"

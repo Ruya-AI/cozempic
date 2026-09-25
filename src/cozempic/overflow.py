@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
+
+from .helpers import atomic_write_text
 
 
 # ─── Circuit Breaker ─────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ class CircuitBreaker:
 
     def _save(self, records: list[dict]) -> None:
         try:
-            self.state_path.write_text(json.dumps(records), encoding="utf-8")
+            atomic_write_text(self.state_path, json.dumps(records))
         except OSError:
             pass
 

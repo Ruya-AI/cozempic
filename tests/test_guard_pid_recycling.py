@@ -245,8 +245,8 @@ class TestRecordClaudeIdentityOnStartGuard(unittest.TestCase):
 
             calls = []
 
-            def fake_record(sid, pid):
-                calls.append((sid, pid))
+            def fake_record(sid, pid, session_path=None):
+                calls.append((sid, pid, session_path))
 
             # start_guard calls _resolve_session_by_id (not find_current_session)
             # when session_id is passed, then load_messages, detect_context_window,
@@ -270,7 +270,51 @@ class TestRecordClaudeIdentityOnStartGuard(unittest.TestCase):
                     pass
 
         self.assertEqual(len(calls), 1, "_record_claude_identity must be called exactly once")
-        self.assertEqual(calls[0], (fake_session_id, fake_pid))
+        self.assertEqual(calls[0], (fake_session_id, fake_pid, jsonl))
+
+    def test_auto_detected_session_id_is_recorded(self):
+        import cozempic.guard as g
+
+        fake_pid = 12345
+        fake_session_id = "auto1234-5678-9abc-def0-2026051811ee"
+
+        with tempfile.TemporaryDirectory() as td:
+            jsonl = Path(td) / "session.jsonl"
+            jsonl.write_text("{}\n")
+            fake_session = {
+                "session_id": fake_session_id,
+                "session_path": str(jsonl),
+                "path": jsonl,
+                "project_dir": td,
+            }
+            calls = []
+
+            with patch("cozempic.guard.find_current_session", return_value=fake_session), \
+                 patch("cozempic.guard._record_claude_identity", side_effect=lambda sid, pid, session_path=None: calls.append((sid, pid, session_path))), \
+                 patch("cozempic.guard.load_messages", return_value=[]), \
+                 patch("cozempic.tokens.detect_context_window", return_value=200000), \
+                 patch("cozempic.tokens.default_token_thresholds_4tier", return_value=(50000, 110000, 160000)), \
+                 patch("cozempic.session.record_session"), \
+                 patch("cozempic.guard._cleanup_stale_watchers"), \
+                 patch("cozempic.guard.ping_install_if_new"), \
+                 patch("cozempic.guard.maybe_auto_update"), \
+                 patch("cozempic.guard.checkpoint_team"), \
+                 patch("cozempic.guard.time.sleep", side_effect=RuntimeError("stop loop")):
+                try:
+                    g.start_guard(session_id=None, claude_pid=fake_pid)
+                except (RuntimeError, SystemExit):
+                    pass
+
+        self.assertEqual(calls, [(fake_session_id, fake_pid, jsonl)])
+
+    def test_identity_recording_forwards_session_path(self):
+        import cozempic.guard as g
+
+        session_path = Path("/tmp/session.jsonl")
+        with patch("cozempic.guard._is_claude_process", return_value=False) as is_claude:
+            g._record_claude_identity("a" * 32, 12345, session_path=session_path)
+
+        is_claude.assert_called_once_with(12345, session_path=session_path)
 
 
 # ---------------------------------------------------------------------------

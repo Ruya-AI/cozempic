@@ -30,8 +30,8 @@ reload-side single-flight.
 Lifecycle:
   - On claim (enter): ``O_CREAT|O_EXCL|O_NOFOLLOW`` on the PID file. Loser
     reads the file, returns ``DaemonAlreadyStarting(holder_pid=<read pid>)``.
-    Stale-holder detection: if the read PID is not alive (``kill(pid, 0)``
-    fails), unlink + retry once.
+    Stale-holder detection is serialized by a persistent companion lock before
+    it can unlink + retry, so two contenders cannot reclaim the same file.
   - Inside the claim: caller writes the real daemon PID atomically via
     temp-file + rename (``os.rename`` on same FS is POSIX-atomic). Readers
     transitioning between our parent-PID and the daemon PID observe the OLD
@@ -65,9 +65,11 @@ because the loser shape is just the exception).
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -101,6 +103,8 @@ from typing import Iterator
 # the active value can read ``spawn_lock._FRESH_PIDFILE_SECONDS``.
 _DEFAULT_FRESH = 5.0
 _FRESH_MAX = 300.0
+_RECLAIM_LOCK_ATTEMPTS = 5
+_RECLAIM_LOCK_RETRY_SECONDS = 0.01
 
 
 def _read_fresh_window_seconds() -> float:
@@ -136,6 +140,17 @@ def _read_fresh_window_seconds() -> float:
 _FRESH_PIDFILE_SECONDS = _read_fresh_window_seconds()
 
 
+def pidfile_is_fresh(pid_file: Path) -> bool:
+    """Return whether a PID claim is still within its protected handoff window."""
+    try:
+        mtime = os.stat(pid_file, follow_symlinks=False).st_mtime
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return (time.time() - mtime) < _FRESH_PIDFILE_SECONDS
+
+
 # Initiator strings — mirrored from ``reload_lock.INIT_*`` conventions
 # for operator-triage parity. The parent-vs-daemon split is the only
 # meaningful distinction for spawn-claim payloads:
@@ -169,10 +184,23 @@ def _parse_pidfile_pid(pid_path: Path) -> int:
     only need line 1 and ``cat`` would feed multi-token output to
     ``kill -0``, which is undefined-behaviour across shells.
     """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        content = pid_path.read_text()
+        fd = os.open(str(pid_path), flags)
     except OSError:
         return 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return 0
+        content = os.read(fd, 4096).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 0
+    finally:
+        os.close(fd)
     if not content:
         return 0
     lines = content.splitlines()
@@ -265,6 +293,66 @@ class DaemonAlreadyStarting(Exception):
         )
 
 
+@contextmanager
+def _stale_reclaim_lock(pid_file: Path, session_id: str = "") -> Iterator[None]:
+    """Serialize stale-claim replacement without unlinking the lock path."""
+    lock_path = pid_file.with_name(f"{pid_file.name}.reclaim-lock")
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    fd = os.open(str(lock_path), flags, 0o600)
+    locked = False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, f"reclaim lock is not a regular file: {lock_path}")
+
+        def try_lock() -> None:
+            if os.name == "nt":
+                import msvcrt
+
+                os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        lock_error: OSError | None = None
+        for attempt in range(_RECLAIM_LOCK_ATTEMPTS):
+            try:
+                try_lock()
+                locked = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                lock_error = exc
+                if attempt + 1 < _RECLAIM_LOCK_ATTEMPTS:
+                    time.sleep(_RECLAIM_LOCK_RETRY_SECONDS)
+        if not locked:
+            raise DaemonAlreadyStarting(session_id or str(pid_file)) from lock_error
+        yield
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        else:
+            os.close(fd)
+
+
 class DaemonSpawnClaim:
     """Atomic PID-file claim via O_CREAT|O_EXCL.
 
@@ -338,22 +426,24 @@ class DaemonSpawnClaim:
         try:
             fd = os.open(str(self.pid_file), flags, 0o600)
         except FileExistsError:
-            holder_pid = self._read_existing_pid()
-            holder_alive = holder_pid > 0 and _is_process_alive(holder_pid)
-            fresh = self._is_pidfile_fresh()
-            if holder_alive or fresh:
-                raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
-            # Stale (dead PID AND old file): unlink and retry exactly once.
-            try:
-                self.pid_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-            try:
-                fd = os.open(str(self.pid_file), flags, 0o600)
-            except FileExistsError:
-                # A peer reclaimed between our unlink and our retry.
-                holder_pid = self._read_existing_pid()
-                raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
+            # A persistent companion lock serializes the stale inspection and
+            # replacement. Unlike the old flock sentinel, this lock path is
+            # never unlinked, so every contender locks the same inode.
+            with _stale_reclaim_lock(self.pid_file, session_id=self.session_id):
+                try:
+                    fd = os.open(str(self.pid_file), flags, 0o600)
+                except FileExistsError:
+                    holder_pid = self._read_existing_pid()
+                    holder_alive = holder_pid > 0 and _is_process_alive(holder_pid)
+                    fresh = self._is_pidfile_fresh()
+                    if holder_alive or fresh:
+                        raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
+                    self.pid_file.unlink(missing_ok=True)
+                    try:
+                        fd = os.open(str(self.pid_file), flags, 0o600)
+                    except FileExistsError:
+                        holder_pid = self._read_existing_pid()
+                        raise DaemonAlreadyStarting(self.session_id, holder_pid=holder_pid)
 
         # Won the claim. Write our parent PID + timestamp + initiator
         # so concurrent readers see a real, alive PID (not a placeholder)
@@ -369,6 +459,12 @@ class DaemonSpawnClaim:
                 f"{INIT_SPAWN_PARENT}\n"
             )
             os.write(fd, payload.encode("utf-8"))
+        except BaseException:
+            try:
+                self.pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         finally:
             os.close(fd)
         self.owned = True
@@ -390,15 +486,7 @@ class DaemonSpawnClaim:
         Other OSErrors (ENOENT — file vanished between exists() and
         stat() — most likely) return False so we can re-claim cleanly.
         """
-        try:
-            mtime = self.pid_file.stat().st_mtime
-        except PermissionError:
-            # EACCES: can't read mtime → assume fresh (don't race a
-            # potentially-live peer claim).
-            return True
-        except OSError:
-            return False
-        return (time.time() - mtime) < _FRESH_PIDFILE_SECONDS
+        return pidfile_is_fresh(self.pid_file)
 
     def _read_existing_pid(self) -> int:
         """Best-effort read of the PID currently in the file.
@@ -437,4 +525,4 @@ def daemon_spawn_lock(session_id: str) -> Iterator[Path]:
         claim.__exit__(None, None, None)
 
 
-_HAVE_FCNTL = False  # exported for back-compat; we no longer use fcntl
+_HAVE_FCNTL = False  # exported for back-compat; primary claims do not use fcntl

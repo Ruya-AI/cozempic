@@ -66,11 +66,9 @@ class TestPolishPR93_SpawnLocksDictRemoved(unittest.TestCase):
         )
 
 
-class TestPolishPR93_PlaceholderPidIsUnlinked(unittest.TestCase):
-    """Regression test: even after the dead consumer branch is removed,
-    a placeholder-valued pidfile (pid <= 0) must still resolve to None
-    AND be unlinked. Mirrors TestR3_1 pattern but exercises the path
-    that survives the deletion."""
+class TestPolishPR93_PlaceholderPidProbe(unittest.TestCase):
+    """Regression test: a placeholder pidfile resolves to None without
+    pre-claim cleanup. DaemonSpawnClaim owns serialized stale recovery."""
 
     SESSION_ID = "pr93pl00-0000-0000-0000-000000000093"
 
@@ -82,19 +80,19 @@ class TestPolishPR93_PlaceholderPidIsUnlinked(unittest.TestCase):
     def tearDown(self):
         self.pid_path.unlink(missing_ok=True)
 
-    def test_zero_pid_resolves_to_none_and_unlinks(self):
+    def test_zero_pid_resolves_to_none_without_unlinking(self):
         from cozempic.guard import _is_guard_running_for_session
         self.pid_path.write_text("0\n")
         result = _is_guard_running_for_session(self.SESSION_ID)
         self.assertIsNone(result, "placeholder pid 0 must resolve to None")
-        self.assertFalse(self.pid_path.exists(), "placeholder pidfile must be unlinked")
+        self.assertTrue(self.pid_path.exists(), "probe must not unlink pidfile")
 
-    def test_negative_pid_resolves_to_none_and_unlinks(self):
+    def test_negative_pid_resolves_to_none_without_unlinking(self):
         from cozempic.guard import _is_guard_running_for_session
         self.pid_path.write_text("-1\n")
         result = _is_guard_running_for_session(self.SESSION_ID)
         self.assertIsNone(result, "negative pid must resolve to None")
-        self.assertFalse(self.pid_path.exists(), "placeholder pidfile must be unlinked")
+        self.assertTrue(self.pid_path.exists(), "probe must not unlink pidfile")
 
 
 # ─── Item #3 — Pidfile unlinked on ALL daemon-exit paths ────────────────────
@@ -690,9 +688,7 @@ class TestPolishPR93_PidfileEACCES(unittest.TestCase):
 
         claim = DaemonSpawnClaim("any-session-12345", Path("/tmp/x.pid"))
 
-        with _patch.object(
-            Path, "stat", side_effect=PermissionError("EACCES")
-        ):
+        with _patch("cozempic.spawn_lock.os.stat", side_effect=PermissionError("EACCES")):
             result = claim._is_pidfile_fresh()
         self.assertTrue(
             result,

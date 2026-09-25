@@ -21,7 +21,9 @@ default and only terminates a confirmed-looping daemon under an explicit ``--fix
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -217,11 +219,39 @@ class GuardLoopHit:
 
 
 def _read_pid(pid_file: Path) -> int | None:
+    from .spawn_lock import _parse_pidfile_pid
+
+    pid = _parse_pidfile_pid(pid_file)
+    return pid if pid > 0 else None
+
+
+def _read_regular_log_tail(log_file: Path, max_tail_bytes: int) -> str | None:
+    """Read a bounded log tail without following symlinks or blocking on FIFOs."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        first = pid_file.read_text(encoding="utf-8").strip().splitlines()[0]
-        return int(first.strip())
-    except (OSError, ValueError, IndexError):
+        fd = os.open(str(log_file), flags)
+    except OSError:
         return None
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            return None
+        offset = max(0, file_stat.st_size - max_tail_bytes)
+        os.lseek(fd, offset, os.SEEK_SET)
+        text = os.read(fd, max_tail_bytes).decode("utf-8", "replace")
+        if offset:
+            _partial, separator, text = text.partition("\n")
+            if not separator:
+                return ""
+        return text
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def scan_guard_logs(
@@ -240,14 +270,8 @@ def scan_guard_logs(
     if not log_dir.is_dir():
         return hits
     for log_file in sorted(log_dir.glob("cozempic_guard_*.log")):
-        try:
-            size = log_file.stat().st_size
-            with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
-                if size > max_tail_bytes:
-                    fh.seek(size - max_tail_bytes)
-                    fh.readline()  # discard partial line
-                text = fh.read()
-        except OSError:
+        text = _read_regular_log_tail(log_file, max_tail_bytes)
+        if text is None:
             continue
         rep = scan_log_text(text, loop_trip=loop_trip)
         if not rep.looping:

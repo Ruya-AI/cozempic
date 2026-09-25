@@ -17,6 +17,7 @@ ledger never leaks into the shared /tmp (which would make order/timing-dependent
 flakes across runs).
 """
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -103,6 +104,21 @@ class TestPostPruneTokenProgressGate(unittest.TestCase):
 
 
 class TestReloadRateLedger(unittest.TestCase):
+    def test_ledger_write_replaces_symlink_without_touching_target(self):
+        from cozempic.guard import _reload_rate_exceeded
+
+        d = Path(tempfile.mkdtemp(prefix="cozempic_ledger_"))
+        try:
+            victim = d / "victim"
+            victim.write_text("keep")
+            ledger = d / "h.json"
+            os.symlink(victim, ledger)
+            _reload_rate_exceeded(ledger, now=1000.0)
+            self.assertFalse(ledger.is_symlink())
+            self.assertEqual(victim.read_text(), "keep")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_helper_caps_after_max_in_window(self):
         from cozempic.guard import _reload_rate_exceeded
         d = Path(tempfile.mkdtemp(prefix="cozempic_ledger_"))
