@@ -567,7 +567,7 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
                 "size": sess_path.stat().st_size, "mtime": 0, "lines": 20}
 
         # treat_session reads once via load_messages_and_snapshot; wrap _FileSnapshot
-        # .from_bytes so the returned snapshot injects a same-prefix rewrite at
+        # .from_digest (the streamed loader's constructor) so the returned snapshot injects a same-prefix rewrite at
         # classify time (→ "conflict"), simulating a concurrent mutation mid-prune.
         class _Conflicting:
             def __init__(self, real, path): self._r, self._p, self._done = real, path, False
@@ -586,12 +586,12 @@ class TestMcpTreatSessionPruneLock(unittest.TestCase):
                 self._inject()
                 return self._r.classify_and_delta(p)
 
-        real_from_bytes = S._FileSnapshot.from_bytes.__func__
-        def injecting_from_bytes(cls, path, raw):
-            return _Conflicting(real_from_bytes(cls, path, raw), path)
+        real_from_digest = S._FileSnapshot.from_digest.__func__
+        def injecting_from_digest(cls, inode, size, content_hash):
+            return _Conflicting(real_from_digest(cls, inode, size, content_hash), sess_path)
 
         with mock.patch.object(S, "find_current_session", lambda *a, **k: sess), \
-             mock.patch.object(S._FileSnapshot, "from_bytes", classmethod(injecting_from_bytes)):
+             mock.patch.object(S._FileSnapshot, "from_digest", classmethod(injecting_from_digest)):
             out = mod.treat_session(prescription="standard", execute=True)
 
         self.assertIn("Aborted: session changed mid-prune", out,

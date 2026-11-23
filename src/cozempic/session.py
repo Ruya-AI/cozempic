@@ -73,6 +73,18 @@ class _FileSnapshot:
         self.content_hash = hashlib.md5(raw).hexdigest()
         return self
 
+    @classmethod
+    def from_digest(cls, inode: int, size: int, content_hash: str) -> "_FileSnapshot":
+        """Build a snapshot from values computed while STREAMING the file, so
+        the bytes never have to be held in memory at once (see
+        load_messages_and_snapshot). Same contract as from_bytes: size and hash
+        describe exactly the bytes the caller loaded."""
+        self = cls.__new__(cls)
+        self.inode = inode
+        self.size = size
+        self.content_hash = content_hash
+        return self
+
     def classify(self, path: Path) -> Literal["unchanged", "appended", "conflict"]:
         """Classify what happened to the file since this snapshot was taken."""
         try:
@@ -844,6 +856,43 @@ def _split_physical_lines(text: str) -> list[str]:
     return lines
 
 
+def _physical_lines_of(bline: bytes) -> list[str]:
+    """Decode ONE b"\\n"-terminated (or final, unterminated) byte line into the
+    physical lines _split_physical_lines would produce for it.
+
+    Streaming counterpart of _split_physical_lines: applied to every byte line
+    of a file in order, the concatenated results equal _split_physical_lines()
+    of the whole decoded file. Decoding per line is exact because 0x0A never
+    occurs inside a UTF-8 multibyte sequence, and surrogateescape maps each
+    invalid byte independently. A CR can only split further, never join, so
+    handling it inside the line is equivalent too.
+    """
+    text = bline.decode("utf-8", "surrogateescape")
+    if "\r" not in text:
+        return [text[:-1] if text.endswith("\n") else text]
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _iter_byte_lines(f, end: int | None = None):
+    """Yield (bline, terminated) from binary file *f* at its current position,
+    one b"\\n"-terminated line at a time, never more than one line in memory.
+
+    *end* is an absolute byte offset to stop at (bytes appended after the
+    caller's stat() are not read); a line cut off by *end* or EOF is yielded
+    once with terminated=False.
+    """
+    pos = f.tell()
+    while end is None or pos < end:
+        bline = f.readline() if end is None else f.readline(end - pos)
+        if not bline:
+            return
+        pos += len(bline)
+        yield bline, bline.endswith(b"\n")
+
+
 def load_messages(path: Path) -> list[Message]:
     """Load JSONL file. Returns list of (line_index, message_dict, byte_size)."""
     messages: list[Message] = []
@@ -869,8 +918,6 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     and then re-read the file, and any line appended in that window was both
     loaded AND counted in the append delta, duplicating it on save (the TOCTOU
     audit P1). Reading once eliminates the window entirely."""
-    raw = path.read_bytes()
-    snapshot = _FileSnapshot.from_bytes(path, raw)
     messages: list[Message] = []
     # errors="surrogateescape" (R4 fix, supersedes the round-3 strict abort): a
     # non-UTF-8 byte must NOT be rewritten to U+FFFD and os.replace()'d over the
@@ -882,12 +929,29 @@ def load_messages_and_snapshot(path: Path) -> tuple[list[Message], "_FileSnapsho
     # handler, so the exact original bytes round-trip losslessly AND the prune can
     # proceed. Verified: in-string bytes survive via json escaping, structural bytes
     # via the _raw passthrough written through the surrogateescape-opened tmp file.
-    text = raw.decode("utf-8", "surrogateescape")
-    del raw  # C9: free the bytes copy before line processing to cap peak memory
-    for i, line in enumerate(_split_physical_lines(text)):
-        parsed = _parse_one_line(line, i)
-        if parsed is not None:
-            messages.append(parsed)
+    #
+    # STREAMED, not read_bytes()+decode()+split(): that held the raw bytes, the
+    # decoded str (up to 4 bytes per char once one non-Latin-1 character is
+    # present) and the list of line copies at the same time -- ~8.5x the file
+    # size at peak (695 MB for an 81 MB transcript), and the guard runs this on
+    # every SOFT cycle while the transcript grows. CPython's allocator keeps the
+    # freed arenas, so the daemon's RSS stays at the peak for its lifetime.
+    # The hash and size are computed over exactly the bytes parsed, so the
+    # snapshot contract (from_bytes) is unchanged.
+    md5 = hashlib.md5()
+    size = 0
+    i = 0
+    with open(path, "rb") as f:
+        inode = os.fstat(f.fileno()).st_ino
+        for bline, _terminated in _iter_byte_lines(f):
+            md5.update(bline)
+            size += len(bline)
+            for line in _physical_lines_of(bline):
+                parsed = _parse_one_line(line, i)
+                if parsed is not None:
+                    messages.append(parsed)
+                i += 1
+    snapshot = _FileSnapshot.from_digest(inode, size, md5.hexdigest())
     return messages, snapshot
 
 
@@ -997,31 +1061,43 @@ def load_messages_incremental(path: Path) -> list[Message]:
         else:
             start_offset = entry.offset
 
-        with open(path, "rb") as f:
-            f.seek(start_offset)
-            raw_bytes = f.read(st.st_size - start_offset)
-
+        # Streamed line by line (see load_messages_and_snapshot for why): the
+        # first call on a long session is a FULL read, and reading the region
+        # as one bytes + one decoded str + one list of lines peaked at ~8.5x
+        # the file size -- more than the cache it was filling.
         # Stop at the last complete line — a trailing partial line means the
         # writer is mid-append. We'll pick up the remainder on the next call.
-        last_newline = raw_bytes.rfind(b"\n")
-        if last_newline == -1:
-            # No complete lines in the new region yet; leave cache untouched.
-            _INCR_CACHE.move_to_end(key)
-            return list(entry.messages)
-
-        complete = raw_bytes[: last_newline + 1]
         # surrogateescape (ynaamane review, LOW): mirror load_messages /
         # load_messages_and_snapshot rather than the lossy U+FFFD "replace". This is
         # the read-only incremental path so the only effect is correct byte_len
         # accounting on non-UTF-8 lines, but it keeps every decode path consistent.
-        chunk = complete.decode("utf-8", "surrogateescape")
+        new_messages: list[Message] = []
+        consumed = 0
+        line_index = entry.next_line_index
+        with open(path, "rb") as f:
+            f.seek(start_offset)
+            for bline, terminated in _iter_byte_lines(f, end=st.st_size):
+                if not terminated:
+                    break
+                consumed += len(bline)
+                for line in _physical_lines_of(bline):
+                    parsed = _parse_one_line(line, line_index)
+                    if parsed is not None:
+                        new_messages.append(parsed)
+                    line_index += 1
+                # Bound the working set on a full read of a huge file: only the
+                # newest MAX_CACHED_MESSAGES survive the trim below anyway.
+                if len(new_messages) > 2 * MAX_CACHED_MESSAGES:
+                    del new_messages[:-MAX_CACHED_MESSAGES]
 
-        new_messages, lines_consumed = _parse_jsonl_chunk(
-            chunk, entry.next_line_index
-        )
+        if consumed == 0:
+            # No complete lines in the new region yet; leave cache untouched.
+            _INCR_CACHE.move_to_end(key)
+            return list(entry.messages)
+
         entry.messages.extend(new_messages)
-        entry.next_line_index += lines_consumed
-        entry.offset = start_offset + (last_newline + 1)
+        entry.next_line_index = line_index
+        entry.offset = start_offset + consumed
         entry.size = st.st_size
         entry.mtime_ns = st.st_mtime_ns
 
