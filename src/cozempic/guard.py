@@ -990,6 +990,7 @@ def start_guard(
         print(f"  Interactive session: hard reloads wait for an idle breakpoint "
               f"(never mid-turn{_fp}).")
 
+    _pidfile_state: dict = {}
     try:
         while True:
             time.sleep(poll_interval)
@@ -1004,6 +1005,9 @@ def start_guard(
                 if not session_path.exists():
                     print("  WARNING: Session file disappeared. Stopping guard.")
                     break
+
+                # Keep the pidfile young so /tmp cleaners never reap it.
+                _keep_own_pidfile_alive(sess.get("session_id"), _pidfile_state)
 
                 # Watchdog: detect Claude exit (workaround for Stop hook not firing)
                 if claude_pid and claude_alive:
@@ -3361,6 +3365,48 @@ def _safe_unlink_session_pidfile(session_id: str | None) -> None:
     try:
         if _pid_file_points_to(session_id, os.getpid()):
             _pid_file_for_session(session_id).unlink(missing_ok=True)
+    except (ValueError, OSError):
+        pass
+
+
+def _keep_own_pidfile_alive(session_id: str | None, state: dict) -> None:
+    """Keep this daemon's pidfile (and log) from being reaped while it runs.
+
+    macOS 14+ runs ``/usr/libexec/tmp_cleaner`` daily at 00:00 and deletes
+    anything in /tmp whose atime, mtime AND ctime are all older than 3 days.
+    The pidfile is written once at spawn and never touched again, so a guard
+    that outlives ~4 days silently loses it. Every dedupe check trusts the
+    pidfile, so the next SessionStart (resume, compaction) then spawns a
+    SECOND guard for the same session -- both prune and reload the same
+    transcript. Touching the file each cycle keeps it young; if it is gone
+    anyway (deleted by some other cleaner), the daemon that owned it puts its
+    claim back.
+
+    Never fights a peer: restores only when this process previously owned the
+    pidfile AND no file exists now (O_CREAT|O_EXCL, so a concurrent spawn
+    claim wins). A file pointing at another PID is left alone. Exit paths
+    still unlink through _safe_unlink_session_pidfile's CAS, so a claim
+    restored moments before SIGTERM is removed by this same process.
+    """
+    if not session_id:
+        return
+    try:
+        path = _pid_file_for_session(session_id)
+        if _pid_file_points_to(session_id, os.getpid()):
+            state["owned"] = True
+            os.utime(path)
+            log = path.with_suffix(".log")
+            if log.exists():
+                os.utime(log)
+            return
+        if not state.get("owned") or path.exists():
+            return
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w") as f:
+            from datetime import datetime as _dt
+            f.write(f"{os.getpid()}\n{_dt.now().isoformat(timespec='seconds')}\nguard-restored\n")
+        print(f"  [{_now()}] Pidfile was removed while the guard ran (tmp cleaner?); restored.")
     except (ValueError, OSError):
         pass
 
